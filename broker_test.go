@@ -152,3 +152,99 @@ func TestPublishToNonExistentTopic(t *testing.T) {
 	// Should not panic.
 	assert.NotPanics(t, func() { b.Publish("nonexistent", "msg") })
 }
+
+func TestNewSSEBroker_DefaultBuffer(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	assert.Equal(t, 10, b.bufferSize)
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	// Fill the default buffer of 10 without blocking.
+	for i := range 10 {
+		b.Publish("t", string(rune('a'+i)))
+	}
+
+	// 11th message should be dropped (buffer full).
+	b.Publish("t", "overflow")
+
+	received := 0
+	for range 10 {
+		select {
+		case <-ch:
+			received++
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("timed out draining channel")
+		}
+	}
+	assert.Equal(t, 10, received)
+
+	// Channel should be empty now.
+	select {
+	case <-ch:
+		t.Fatal("unexpected extra message")
+	default:
+	}
+}
+
+func TestNewSSEBroker_CustomBuffer(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(3))
+	defer b.Close()
+
+	assert.Equal(t, 3, b.bufferSize)
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	// Fill the custom buffer of 3.
+	for i := range 3 {
+		b.Publish("t", string(rune('a'+i)))
+	}
+
+	// 4th message should be dropped.
+	b.Publish("t", "overflow")
+
+	received := 0
+	for range 3 {
+		select {
+		case <-ch:
+			received++
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("timed out draining channel")
+		}
+	}
+	assert.Equal(t, 3, received)
+
+	select {
+	case <-ch:
+		t.Fatal("unexpected extra message — buffer was larger than configured")
+	default:
+	}
+}
+
+func TestWithBufferSize_LargeBuffer(t *testing.T) {
+	const bufSize = 500
+	b := NewSSEBroker(WithBufferSize(bufSize))
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	// Publish exactly bufSize messages — none should be dropped.
+	for i := range bufSize {
+		b.Publish("t", string(rune('0'+(i%10))))
+	}
+
+	received := 0
+	for range bufSize {
+		select {
+		case <-ch:
+			received++
+		case <-time.After(time.Second):
+			t.Fatalf("timed out after receiving %d/%d messages", received, bufSize)
+		}
+	}
+	assert.Equal(t, bufSize, received)
+}
