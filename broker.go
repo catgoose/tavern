@@ -16,10 +16,16 @@ import (
 // subscribers of a given topic. A zero-value SSEBroker is not usable; create
 // one with [NewSSEBroker].
 type SSEBroker struct {
-	topics     map[string]map[chan string]struct{}
-	mu         sync.RWMutex
-	bufferSize int
-	drops      atomic.Int64
+	topics       map[string]map[chan string]struct{}
+	scopedTopics map[string]map[chan string]scopedSub
+	mu           sync.RWMutex
+	bufferSize   int
+	drops        atomic.Int64
+}
+
+// scopedSub tracks the scope key alongside the channel.
+type scopedSub struct {
+	scope string
 }
 
 // BrokerOption configures the SSE broker.
@@ -36,8 +42,9 @@ func WithBufferSize(size int) BrokerOption {
 // subscribers. It accepts optional [BrokerOption] values to override defaults.
 func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	b := &SSEBroker{
-		topics:     make(map[string]map[chan string]struct{}),
-		bufferSize: 10,
+		topics:       make(map[string]map[chan string]struct{}),
+		scopedTopics: make(map[string]map[chan string]scopedSub),
+		bufferSize:   10,
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -72,35 +79,64 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 	}
 }
 
+// SubscribeScoped registers a subscriber with a scope key for the given topic.
+// Only messages published via [SSEBroker.PublishTo] with a matching scope will
+// be delivered. The returned unsubscribe function releases resources and closes
+// the channel; it is safe to call more than once.
+func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, unsubscribe func()) {
+	ch := make(chan string, b.bufferSize)
+	b.mu.Lock()
+	if b.scopedTopics[topic] == nil {
+		b.scopedTopics[topic] = make(map[chan string]scopedSub)
+	}
+	b.scopedTopics[topic][ch] = scopedSub{scope: scope}
+	b.mu.Unlock()
+	return ch, func() {
+		b.mu.Lock()
+		if _, ok := b.scopedTopics[topic][ch]; ok {
+			delete(b.scopedTopics[topic], ch)
+			close(ch)
+		}
+		b.mu.Unlock()
+	}
+}
+
 // HasSubscribers reports whether the given topic has at least one active
-// subscriber. This is useful for skipping expensive serialization when no
-// clients are listening.
+// subscriber, including both unscoped and scoped subscribers. This is useful
+// for skipping expensive serialization when no clients are listening.
 func (b *SSEBroker) HasSubscribers(topic string) bool {
 	b.mu.RLock()
-	n := len(b.topics[topic])
+	n := len(b.topics[topic]) + len(b.scopedTopics[topic])
 	b.mu.RUnlock()
 	return n > 0
 }
 
 // TopicCounts returns a snapshot of the number of active subscribers per topic.
-// The returned map is a copy and safe to read without synchronization.
+// The returned map is a copy and safe to read without synchronization. Counts
+// include both unscoped and scoped subscribers.
 func (b *SSEBroker) TopicCounts() map[string]int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	counts := make(map[string]int, len(b.topics))
+	counts := make(map[string]int, len(b.topics)+len(b.scopedTopics))
 	for topic, subs := range b.topics {
-		counts[topic] = len(subs)
+		counts[topic] += len(subs)
+	}
+	for topic, subs := range b.scopedTopics {
+		counts[topic] += len(subs)
 	}
 	return counts
 }
 
 // SubscriberCount returns the total number of active subscribers across all
-// topics.
+// topics, including both unscoped and scoped subscribers.
 func (b *SSEBroker) SubscriberCount() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	n := 0
 	for _, subs := range b.topics {
+		n += len(subs)
+	}
+	for _, subs := range b.scopedTopics {
 		n += len(subs)
 	}
 	return n
@@ -128,11 +164,17 @@ type BrokerStats struct {
 // and [SSEBroker.PublishDrops] into a single lock acquisition.
 func (b *SSEBroker) Stats() BrokerStats {
 	b.mu.RLock()
-	topics := len(b.topics)
+	seen := make(map[string]struct{}, len(b.topics)+len(b.scopedTopics))
 	subs := 0
-	for _, s := range b.topics {
+	for t, s := range b.topics {
+		seen[t] = struct{}{}
 		subs += len(s)
 	}
+	for t, s := range b.scopedTopics {
+		seen[t] = struct{}{}
+		subs += len(s)
+	}
+	topics := len(seen)
 	b.mu.RUnlock()
 	return BrokerStats{
 		Topics:       topics,
@@ -172,6 +214,37 @@ func (b *SSEBroker) Publish(topic, msg string) {
 	}
 }
 
+// PublishTo fans out msg only to scoped subscribers of the given topic whose
+// scope matches. It is non-blocking: if a subscriber's channel buffer is full,
+// the message is silently dropped. Publishing to a topic or scope with no
+// matching subscribers is a no-op.
+func (b *SSEBroker) PublishTo(topic, scope, msg string) {
+	b.mu.RLock()
+	scopedSubs, exists := b.scopedTopics[topic]
+	if !exists || len(scopedSubs) == 0 {
+		b.mu.RUnlock()
+		return
+	}
+	channels := make([]chan string, 0, len(scopedSubs))
+	for ch, sub := range scopedSubs {
+		if sub.scope == scope {
+			channels = append(channels, ch)
+		}
+	}
+	b.mu.RUnlock()
+
+	for _, ch := range channels {
+		func() {
+			defer func() { _ = recover() }()
+			select {
+			case ch <- msg:
+			default:
+				b.drops.Add(1)
+			}
+		}()
+	}
+}
+
 // Close shuts down the broker by closing all subscriber channels and removing
 // all topics. After Close returns, any pending reads on subscriber channels
 // will receive the zero value. It is safe to call Close while other goroutines
@@ -186,5 +259,12 @@ func (b *SSEBroker) Close() {
 			close(ch)
 		}
 		delete(b.topics, topic)
+	}
+	for topic, subs := range b.scopedTopics {
+		for ch := range subs {
+			delete(subs, ch)
+			close(ch)
+		}
+		delete(b.scopedTopics, topic)
 	}
 }

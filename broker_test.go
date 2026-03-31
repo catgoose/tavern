@@ -307,3 +307,153 @@ func TestWithBufferSize_LargeBuffer(t *testing.T) {
 	}
 	assert.Equal(t, bufSize, received)
 }
+
+func TestSubscribeScoped_IsolatesMessages(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	chA, unsubA := b.SubscribeScoped("events", "acct-1")
+	defer unsubA()
+	chB, unsubB := b.SubscribeScoped("events", "acct-2")
+	defer unsubB()
+
+	b.PublishTo("events", "acct-1", "for-acct-1")
+	b.PublishTo("events", "acct-2", "for-acct-2")
+
+	select {
+	case msg := <-chA:
+		assert.Equal(t, "for-acct-1", msg)
+	case <-time.After(time.Second):
+		t.Fatal("acct-1 timed out")
+	}
+
+	select {
+	case msg := <-chB:
+		assert.Equal(t, "for-acct-2", msg)
+	case <-time.After(time.Second):
+		t.Fatal("acct-2 timed out")
+	}
+
+	// Verify no cross-delivery.
+	select {
+	case msg := <-chA:
+		t.Fatalf("acct-1 received unexpected message: %s", msg)
+	default:
+	}
+	select {
+	case msg := <-chB:
+		t.Fatalf("acct-2 received unexpected message: %s", msg)
+	default:
+	}
+}
+
+func TestPublishTo_NoMatchingScope(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("events", "acct-1")
+	defer unsub()
+
+	// Publish to a scope that has no subscribers.
+	b.PublishTo("events", "acct-999", "ghost")
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("should not have received message: %s", msg)
+	default:
+		// expected — no delivery
+	}
+}
+
+func TestPublishOOBTo(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("updates", "sess-1")
+	defer unsub()
+
+	b.PublishOOBTo("updates", "sess-1", Replace("status", "<b>online</b>"))
+
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, `hx-swap-oob="outerHTML"`)
+		assert.Contains(t, msg, `id="status"`)
+		assert.Contains(t, msg, "<b>online</b>")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OOB message")
+	}
+}
+
+func TestSubscribeScoped_UnsubscribeCleanup(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	_, unsub := b.SubscribeScoped("events", "acct-1")
+
+	require.True(t, b.HasSubscribers("events"))
+	require.Equal(t, 1, b.SubscriberCount())
+
+	unsub()
+
+	require.False(t, b.HasSubscribers("events"))
+	require.Equal(t, 0, b.SubscriberCount())
+
+	// Double-unsub should not panic.
+	assert.NotPanics(t, func() { unsub() })
+}
+
+func TestScopedAndUnscopedCoexist(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	// Unscoped subscriber.
+	chGlobal, unsubGlobal := b.Subscribe("events")
+	defer unsubGlobal()
+
+	// Scoped subscriber.
+	chScoped, unsubScoped := b.SubscribeScoped("events", "acct-1")
+	defer unsubScoped()
+
+	// Unscoped publish reaches only unscoped subscribers.
+	b.Publish("events", "broadcast")
+
+	select {
+	case msg := <-chGlobal:
+		assert.Equal(t, "broadcast", msg)
+	case <-time.After(time.Second):
+		t.Fatal("global subscriber timed out")
+	}
+
+	select {
+	case msg := <-chScoped:
+		t.Fatalf("scoped subscriber should not receive unscoped publish: %s", msg)
+	default:
+	}
+
+	// Scoped publish reaches only matching scoped subscribers.
+	b.PublishTo("events", "acct-1", "scoped-msg")
+
+	select {
+	case msg := <-chScoped:
+		assert.Equal(t, "scoped-msg", msg)
+	case <-time.After(time.Second):
+		t.Fatal("scoped subscriber timed out")
+	}
+
+	select {
+	case msg := <-chGlobal:
+		t.Fatalf("global subscriber should not receive scoped publish: %s", msg)
+	default:
+	}
+
+	// Both count toward HasSubscribers and SubscriberCount.
+	assert.True(t, b.HasSubscribers("events"))
+	assert.Equal(t, 2, b.SubscriberCount())
+
+	counts := b.TopicCounts()
+	assert.Equal(t, 2, counts["events"])
+
+	s := b.Stats()
+	assert.Equal(t, 1, s.Topics)
+	assert.Equal(t, 2, s.Subscribers)
+}
