@@ -7,7 +7,9 @@ import (
 	"time"
 )
 
-// SystemStats holds Go runtime metrics for the SSE system dashboard.
+// SystemStats holds a point-in-time snapshot of Go runtime metrics. It is
+// intended for use in SSE-powered dashboards that stream system health data
+// to connected clients. Use [CollectRuntimeStats] to populate it.
 type SystemStats struct {
 	Timestamp       string
 	GoVersion       string
@@ -33,8 +35,9 @@ type SystemStats struct {
 	GCCycles        uint32
 }
 
-// CollectRuntimeStats samples the current Go runtime metrics.
-// start is the time the process was started (used to compute Uptime).
+// CollectRuntimeStats samples the current Go runtime and memory statistics and
+// returns them as a [SystemStats] value. The start parameter is the time the
+// process was started; it is used to compute the Uptime field.
 func CollectRuntimeStats(start time.Time) SystemStats {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
