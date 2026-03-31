@@ -224,6 +224,65 @@ func TestNewSSEBroker_CustomBuffer(t *testing.T) {
 	}
 }
 
+func TestSubscriberCount(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	assert.Equal(t, 0, b.SubscriberCount())
+
+	_, unsub1 := b.Subscribe("a")
+	_, unsub2 := b.Subscribe("a")
+	_, unsub3 := b.Subscribe("b")
+
+	assert.Equal(t, 3, b.SubscriberCount())
+
+	unsub1()
+	assert.Equal(t, 2, b.SubscriberCount())
+
+	unsub2()
+	unsub3()
+	assert.Equal(t, 0, b.SubscriberCount())
+}
+
+func TestPublishDrops(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1))
+	defer b.Close()
+
+	assert.Equal(t, int64(0), b.PublishDrops())
+
+	_, unsub := b.Subscribe("t")
+	defer unsub()
+
+	// First publish fills the buffer.
+	b.Publish("t", "msg1")
+	assert.Equal(t, int64(0), b.PublishDrops())
+
+	// Second publish overflows — should be counted as a drop.
+	b.Publish("t", "msg2")
+	assert.Equal(t, int64(1), b.PublishDrops())
+}
+
+func TestStats(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1))
+	defer b.Close()
+
+	_, unsub1 := b.Subscribe("a")
+	_, unsub2 := b.Subscribe("b")
+	defer unsub1()
+	defer unsub2()
+
+	// Overflow both subscribers.
+	b.Publish("a", "m1")
+	b.Publish("a", "m2") // drop
+	b.Publish("b", "m1")
+	b.Publish("b", "m2") // drop
+
+	s := b.Stats()
+	assert.Equal(t, 2, s.Topics)
+	assert.Equal(t, 2, s.Subscribers)
+	assert.Equal(t, int64(2), s.PublishDrops)
+}
+
 func TestWithBufferSize_LargeBuffer(t *testing.T) {
 	const bufSize = 500
 	b := NewSSEBroker(WithBufferSize(bufSize))

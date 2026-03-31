@@ -8,6 +8,7 @@ package tavern
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 // SSEBroker is a thread-safe, topic-based pub/sub message broker. Subscribers
@@ -18,6 +19,7 @@ type SSEBroker struct {
 	topics     map[string]map[chan string]struct{}
 	mu         sync.RWMutex
 	bufferSize int
+	drops      atomic.Int64
 }
 
 // BrokerOption configures the SSE broker.
@@ -92,6 +94,53 @@ func (b *SSEBroker) TopicCounts() map[string]int {
 	return counts
 }
 
+// SubscriberCount returns the total number of active subscribers across all
+// topics.
+func (b *SSEBroker) SubscriberCount() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	n := 0
+	for _, subs := range b.topics {
+		n += len(subs)
+	}
+	return n
+}
+
+// PublishDrops returns the cumulative number of messages that were dropped
+// because a subscriber's channel buffer was full.
+func (b *SSEBroker) PublishDrops() int64 {
+	return b.drops.Load()
+}
+
+// BrokerStats is a point-in-time summary of broker state returned by
+// [SSEBroker.Stats].
+type BrokerStats struct {
+	// Topics is the number of active topics.
+	Topics int
+	// Subscribers is the total number of active subscribers across all topics.
+	Subscribers int
+	// PublishDrops is the cumulative number of dropped messages.
+	PublishDrops int64
+}
+
+// Stats returns a point-in-time [BrokerStats] snapshot. It is a convenience
+// method that combines [SSEBroker.TopicCounts], [SSEBroker.SubscriberCount],
+// and [SSEBroker.PublishDrops] into a single lock acquisition.
+func (b *SSEBroker) Stats() BrokerStats {
+	b.mu.RLock()
+	topics := len(b.topics)
+	subs := 0
+	for _, s := range b.topics {
+		subs += len(s)
+	}
+	b.mu.RUnlock()
+	return BrokerStats{
+		Topics:       topics,
+		Subscribers:  subs,
+		PublishDrops: b.drops.Load(),
+	}
+}
+
 // Publish fans out msg to every subscriber of the given topic. It is
 // non-blocking: if a subscriber's channel buffer is full, the message is
 // silently dropped for that subscriber rather than blocking the publisher.
@@ -117,7 +166,7 @@ func (b *SSEBroker) Publish(topic, msg string) {
 			select {
 			case ch <- msg:
 			default:
-				// channel full — skip stale subscriber
+				b.drops.Add(1)
 			}
 		}()
 	}
