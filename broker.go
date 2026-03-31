@@ -54,7 +54,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 // The returned channel is buffered (default capacity 10, configurable via
 // [WithBufferSize]). If the subscriber does not drain the channel fast enough,
 // messages will be dropped by [SSEBroker.Publish].
-func (b *SSEBroker) Subscribe(topic string) (<-chan string, func()) {
+func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe func()) {
 	ch := make(chan string, b.bufferSize)
 	b.mu.Lock()
 	if b.topics[topic] == nil {
