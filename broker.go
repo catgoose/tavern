@@ -1,25 +1,40 @@
-// Package tavern provides a topic-based pub/sub broker for Server-Sent Events.
+// Package tavern provides a thread-safe, topic-based pub/sub broker for
+// Server-Sent Events (SSE). It is designed for fan-out messaging where a
+// server publishes events and multiple HTTP clients consume them via SSE
+// streams.
+//
+// All broker methods are safe for concurrent use by multiple goroutines.
 package tavern
 
 import (
 	"sync"
 )
 
-// SSEBroker manages topic-based pub/sub for SSE events.
+// SSEBroker is a thread-safe, topic-based pub/sub message broker. Subscribers
+// receive messages on a buffered channel and publishers fan out messages to all
+// subscribers of a given topic. A zero-value SSEBroker is not usable; create
+// one with [NewSSEBroker].
 type SSEBroker struct {
 	topics map[string]map[chan string]struct{}
 	mu     sync.RWMutex
 }
 
-// NewSSEBroker creates a new SSEBroker instance.
+// NewSSEBroker creates a ready-to-use [SSEBroker] with no active topics or
+// subscribers.
 func NewSSEBroker() *SSEBroker {
 	return &SSEBroker{
 		topics: make(map[string]map[chan string]struct{}),
 	}
 }
 
-// Subscribe returns a read channel for a topic and an unsubscribe function.
-// The caller must invoke the returned function to release resources.
+// Subscribe registers a new subscriber for the given topic and returns a
+// read-only channel that will receive published messages, along with an
+// unsubscribe function. The caller must invoke the returned function when done
+// to release resources and close the channel. Calling the unsubscribe function
+// more than once is safe and has no effect after the first call.
+//
+// The returned channel is buffered (capacity 10). If the subscriber does not
+// drain the channel fast enough, messages will be dropped by [SSEBroker.Publish].
 func (b *SSEBroker) Subscribe(topic string) (<-chan string, func()) {
 	ch := make(chan string, 10)
 	b.mu.Lock()
@@ -38,7 +53,9 @@ func (b *SSEBroker) Subscribe(topic string) (<-chan string, func()) {
 	}
 }
 
-// HasSubscribers reports whether the given topic has at least one subscriber.
+// HasSubscribers reports whether the given topic has at least one active
+// subscriber. This is useful for skipping expensive serialization when no
+// clients are listening.
 func (b *SSEBroker) HasSubscribers(topic string) bool {
 	b.mu.RLock()
 	n := len(b.topics[topic])
@@ -46,7 +63,8 @@ func (b *SSEBroker) HasSubscribers(topic string) bool {
 	return n > 0
 }
 
-// TopicCounts returns the number of active subscribers per topic.
+// TopicCounts returns a snapshot of the number of active subscribers per topic.
+// The returned map is a copy and safe to read without synchronization.
 func (b *SSEBroker) TopicCounts() map[string]int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -57,8 +75,10 @@ func (b *SSEBroker) TopicCounts() map[string]int {
 	return counts
 }
 
-// Publish sends a message to all subscribers of a topic.
-// Non-blocking: if a subscriber channel is full, the message is skipped for that subscriber.
+// Publish fans out msg to every subscriber of the given topic. It is
+// non-blocking: if a subscriber's channel buffer is full, the message is
+// silently dropped for that subscriber rather than blocking the publisher.
+// Publishing to a topic with no subscribers is a no-op.
 func (b *SSEBroker) Publish(topic, msg string) {
 	b.mu.RLock()
 	subscribers, exists := b.topics[topic]
@@ -86,7 +106,11 @@ func (b *SSEBroker) Publish(topic, msg string) {
 	}
 }
 
-// Close drains all topic subscriber maps for clean shutdown.
+// Close shuts down the broker by closing all subscriber channels and removing
+// all topics. After Close returns, any pending reads on subscriber channels
+// will receive the zero value. It is safe to call Close while other goroutines
+// are publishing or subscribing; however, no new messages will be delivered
+// after Close returns.
 func (b *SSEBroker) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
