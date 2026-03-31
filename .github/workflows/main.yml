@@ -1,0 +1,214 @@
+name: Pipeline
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── Stage 1: Update dependencies and commit ────────────────────────────────
+  update-deps:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.result.outputs.sha }}
+      deps-changed: ${{ steps.check-changes.outputs.changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Save go.mod before update
+        run: cp go.mod /tmp/go.mod.bak
+
+      - name: Update dependencies
+        run: |
+          go get -u ./...
+          go mod tidy
+          go mod edit -go=$(go version | sed -n 's/.*go\([0-9.]*\).*/\1/p')
+
+      - name: Check for changes
+        id: check-changes
+        run: |
+          git add go.mod go.sum
+          if git diff --staged --quiet; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push
+        if: steps.check-changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: update Go dependencies and Go version [skip ci]" \
+            --author="${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>"
+          git pull --rebase origin main
+          git push origin main
+
+      - name: Output current SHA
+        id: result
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Notify on failure
+        if: failure() && steps.check-changes.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Auto-update workflow failed',
+              body: 'Failed to apply dependency/Go version updates. Please resolve manually.'
+            })
+
+  # ── Stage 2: Lint and test ─────────────────────────────────────────────────
+  test:
+    needs: [update-deps]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.update-deps.outputs.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: Test
+        run: make ci
+
+  # ── Stage 3: Release ───────────────────────────────────────────────────────
+  release:
+    needs: [update-deps, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.update-deps.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Set up Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch tags
+        run: git fetch --tags
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          latest_tag=$(git tag --list 'v*.*.*' --sort=-v:refname | head -n 1 | sed 's/^v//')
+          if [ -z "$latest_tag" ]; then
+            latest_tag="0.0.0"
+          fi
+          echo "latest_tag=$latest_tag" >> $GITHUB_OUTPUT
+
+      - name: Bump patch version
+        id: bump_version
+        run: |
+          latest="${{ steps.get_tag.outputs.latest_tag }}"
+          IFS='.' read -r major minor patch <<<"$latest"
+          if [ -z "$major" ]; then major=0; fi
+          if [ -z "$minor" ]; then minor=0; fi
+          if [ -z "$patch" ]; then patch=0; fi
+          patch=$((patch+1))
+          new_tag="v$major.$minor.$patch"
+          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        run: |
+          echo "## Changes" >> release_notes.md
+          prev_tag="v${{ steps.get_tag.outputs.latest_tag }}"
+          if git rev-parse "$prev_tag" >/dev/null 2>&1; then
+            git log "$prev_tag"..HEAD --pretty=format:"- %s" | grep -v "\[skip ci\]" >> release_notes.md || true
+          else
+            git log --pretty=format:"- %s" | grep -v "\[skip ci\]" >> release_notes.md || true
+          fi
+          echo "" >> release_notes.md
+          echo "Go version: $(grep '^go ' go.mod | awk '{print $2}')" >> release_notes.md
+
+      - name: Create tag
+        run: |
+          git tag ${{ steps.bump_version.outputs.new_tag }}
+          git push origin ${{ steps.bump_version.outputs.new_tag }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump_version.outputs.new_tag }}
+          body_path: release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Notify on failure ───────────────────────────────────────────────────
+  notify-failure:
+    if: ${{ failure() }}
+    needs: [update-deps, test, release]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Notify CI failure
+        run: |
+          BODY="**Workflow:** \`${{ github.workflow }}\`
+          **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          **Branch:** \`${{ github.ref_name }}\`
+          **Commit:** \`${{ github.sha }}\`
+          **Triggered by:** ${{ github.actor }}"
+
+          EXISTING=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --label "ci" \
+            --state all \
+            --limit 1 \
+            --json number,state \
+            --jq '.[0]')
+
+          if [ -z "$EXISTING" ] || [ "$EXISTING" = "null" ]; then
+            gh issue create \
+              --repo "${{ github.repository }}" \
+              --title "Pipeline failure: ${{ github.workflow }}" \
+              --label "ci" \
+              --body "$BODY"
+          else
+            NUMBER=$(echo "$EXISTING" | jq -r '.number')
+            STATE=$(echo "$EXISTING" | jq -r '.state')
+            if [ "$STATE" = "CLOSED" ]; then
+              gh issue reopen "$NUMBER" --repo "${{ github.repository }}"
+            fi
+            gh issue comment "$NUMBER" \
+              --repo "${{ github.repository }}" \
+              --body "$BODY"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

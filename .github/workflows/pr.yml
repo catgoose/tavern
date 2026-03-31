@@ -1,0 +1,76 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  notify-failure:
+    if: ${{ failure() }}
+    needs: [test]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Notify CI failure
+        run: |
+          BODY="**Workflow:** \`${{ github.workflow }}\`
+          **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          **Branch:** \`${{ github.ref_name }}\`
+          **Commit:** \`${{ github.sha }}\`
+          **Triggered by:** ${{ github.actor }}"
+
+          EXISTING=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --label "ci" \
+            --state all \
+            --limit 1 \
+            --json number,state \
+            --jq '.[0]')
+
+          if [ -z "$EXISTING" ] || [ "$EXISTING" = "null" ]; then
+            gh issue create \
+              --repo "${{ github.repository }}" \
+              --title "Pipeline failure: ${{ github.workflow }}" \
+              --label "ci" \
+              --body "$BODY"
+          else
+            NUMBER=$(echo "$EXISTING" | jq -r '.number')
+            STATE=$(echo "$EXISTING" | jq -r '.state')
+            if [ "$STATE" = "CLOSED" ]; then
+              gh issue reopen "$NUMBER" --repo "${{ github.repository }}"
+            fi
+            gh issue comment "$NUMBER" \
+              --repo "${{ github.repository }}" \
+              --body "$BODY"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
