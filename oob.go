@@ -50,3 +50,9 @@ func RenderFragments(fragments ...Fragment) string {
 func (b *SSEBroker) PublishOOB(topic string, fragments ...Fragment) {
 	b.Publish(topic, RenderFragments(fragments...))
 }
+
+// PublishOOBTo renders the given fragments and publishes them only to scoped
+// subscribers whose scope matches.
+func (b *SSEBroker) PublishOOBTo(topic, scope string, fragments ...Fragment) {
+	b.PublishTo(topic, scope, RenderFragments(fragments...))
+}
