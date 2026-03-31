@@ -1,5 +1,8 @@
 # tavern
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/catgoose/tavern.svg)](https://pkg.go.dev/github.com/catgoose/tavern)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Thread-safe, topic-based pub/sub broker for Server-Sent Events (SSE) in Go.
 
 Tavern provides a minimal, concurrent-safe message broker that fans out string
