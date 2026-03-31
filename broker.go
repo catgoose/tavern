@@ -15,16 +15,32 @@ import (
 // subscribers of a given topic. A zero-value SSEBroker is not usable; create
 // one with [NewSSEBroker].
 type SSEBroker struct {
-	topics map[string]map[chan string]struct{}
-	mu     sync.RWMutex
+	topics     map[string]map[chan string]struct{}
+	mu         sync.RWMutex
+	bufferSize int
+}
+
+// BrokerOption configures the SSE broker.
+type BrokerOption func(*SSEBroker)
+
+// WithBufferSize sets the subscriber channel buffer size. Default is 10.
+func WithBufferSize(size int) BrokerOption {
+	return func(b *SSEBroker) {
+		b.bufferSize = size
+	}
 }
 
 // NewSSEBroker creates a ready-to-use [SSEBroker] with no active topics or
-// subscribers.
-func NewSSEBroker() *SSEBroker {
-	return &SSEBroker{
-		topics: make(map[string]map[chan string]struct{}),
+// subscribers. It accepts optional [BrokerOption] values to override defaults.
+func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
+	b := &SSEBroker{
+		topics:     make(map[string]map[chan string]struct{}),
+		bufferSize: 10,
 	}
+	for _, opt := range opts {
+		opt(b)
+	}
+	return b
 }
 
 // Subscribe registers a new subscriber for the given topic and returns a
@@ -33,10 +49,11 @@ func NewSSEBroker() *SSEBroker {
 // to release resources and close the channel. Calling the unsubscribe function
 // more than once is safe and has no effect after the first call.
 //
-// The returned channel is buffered (capacity 10). If the subscriber does not
-// drain the channel fast enough, messages will be dropped by [SSEBroker.Publish].
+// The returned channel is buffered (default capacity 10, configurable via
+// [WithBufferSize]). If the subscriber does not drain the channel fast enough,
+// messages will be dropped by [SSEBroker.Publish].
 func (b *SSEBroker) Subscribe(topic string) (<-chan string, func()) {
-	ch := make(chan string, 10)
+	ch := make(chan string, b.bufferSize)
 	b.mu.Lock()
 	if b.topics[topic] == nil {
 		b.topics[topic] = make(map[chan string]struct{})
