@@ -18,17 +18,17 @@ func Delete(id string) Fragment {
 }
 
 // Replace creates a fragment that replaces an element's outer HTML.
-func Replace(id string, html string) Fragment {
+func Replace(id, html string) Fragment {
 	return Fragment{ID: id, Swap: "outerHTML", HTML: html}
 }
 
 // Append creates a fragment that appends content to the end of an element.
-func Append(id string, html string) Fragment {
+func Append(id, html string) Fragment {
 	return Fragment{ID: id, Swap: "beforeend", HTML: html}
 }
 
 // Prepend creates a fragment that prepends content to the beginning of an element.
-func Prepend(id string, html string) Fragment {
+func Prepend(id, html string) Fragment {
 	return Fragment{ID: id, Swap: "afterbegin", HTML: html}
 }
 
