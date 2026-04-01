@@ -206,6 +206,12 @@ broker.Publish(tavern.TopicSystemStats, statsJSON)
 broker.Publish(tavern.TopicActivityFeed, eventJSON)
 ```
 
+> The whole point -- the ENTIRE POINT -- of hypermedia is that the server tells the client what to do next IN THE RESPONSE ITSELF.
+>
+> -- The Wisdom of the Uniform Interface
+
+SSE is the server telling the client what happened next, in real time. The event stream is just another representation — the server speaks, the client listens, and nobody had to install an npm package to make it work.
+
 ## Thread safety
 
 All `SSEBroker` methods are safe for concurrent use. The broker uses an
@@ -213,6 +219,16 @@ All `SSEBroker` methods are safe for concurrent use. The broker uses an
 while publishing and reading counts take a read lock. `Publish` snapshots the
 subscriber set under the read lock, then sends outside it, so publishers never
 block each other.
+
+## Philosophy
+
+Tavern follows the [dothog design philosophy](https://github.com/catgoose/dothog/blob/main/PHILOSOPHY.md): the server drives state, the broker is just plumbing, and `sync.RWMutex` is the only dependency you need for thread safety.
+
+> wife of Grug say from cave: "easy, easy, easy. like touching feet to ground when get out of bed. server return html. browser render html. what is difficult?"
+>
+> -- Layman Grug
+
+Server publish event. Browser receive event. What is difficult?
 
 ## License
 
