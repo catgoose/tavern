@@ -1,9 +1,45 @@
 package tavern
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"strings"
 )
+
+// Component renders itself to a writer. This interface is intentionally
+// identical to templ.Component so that templ components can be passed
+// directly without tavern importing the templ package.
+type Component interface {
+	Render(ctx context.Context, w io.Writer) error
+}
+
+// ReplaceComponent renders a Component and returns a Replace fragment.
+// If rendering fails, the fragment contains the error message as an HTML comment.
+func ReplaceComponent(id string, cmp Component) Fragment {
+	return Fragment{ID: id, Swap: "outerHTML", HTML: renderComponent(cmp)}
+}
+
+// AppendComponent renders a Component and returns an Append fragment.
+// If rendering fails, the fragment contains the error message as an HTML comment.
+func AppendComponent(id string, cmp Component) Fragment {
+	return Fragment{ID: id, Swap: "beforeend", HTML: renderComponent(cmp)}
+}
+
+// PrependComponent renders a Component and returns a Prepend fragment.
+// If rendering fails, the fragment contains the error message as an HTML comment.
+func PrependComponent(id string, cmp Component) Fragment {
+	return Fragment{ID: id, Swap: "afterbegin", HTML: renderComponent(cmp)}
+}
+
+func renderComponent(cmp Component) string {
+	var buf bytes.Buffer
+	if err := cmp.Render(context.Background(), &buf); err != nil {
+		return "<!-- render error: " + err.Error() + " -->"
+	}
+	return buf.String()
+}
 
 // Fragment describes a targeted DOM mutation for HTMX OOB swaps via SSE.
 type Fragment struct {

@@ -195,6 +195,56 @@ for topic, n := range counts {
 }
 ```
 
+## OOB Fragments
+
+Tavern includes helpers for HTMX out-of-band (OOB) swaps over SSE. Build
+targeted DOM mutations and publish them as a single event:
+
+```go
+// Replace, Append, Prepend, Delete — plain string helpers
+broker.PublishOOB("events",
+    tavern.Replace("stats-bar", "<span>42</span>"),
+    tavern.Delete("task-row-5"),
+    tavern.Append("activity-feed", "<li>New item</li>"),
+)
+```
+
+### Component interface
+
+`Component` renders itself to a writer. The interface is identical to
+`templ.Component`, so templ components can be passed directly — tavern does
+not import templ.
+
+```go
+type Component interface {
+    Render(ctx context.Context, w io.Writer) error
+}
+```
+
+Use the component helpers to render and wrap in one call:
+
+```go
+broker.PublishOOB("events",
+    tavern.ReplaceComponent("stats-bar", views.StatsBar(stats)),
+    tavern.AppendComponent("feed", views.FeedItem(item)),
+)
+```
+
+If rendering fails, the fragment contains an HTML comment with the error
+message rather than a partial render.
+
+### Raw fragment rendering
+
+For manual control, render fragments to a string and publish directly:
+
+```go
+html := tavern.RenderFragments(
+    tavern.Replace("header", "<h1>Updated</h1>"),
+    tavern.Delete("old-banner"),
+)
+broker.Publish("events", tavern.NewSSEMessage("oob", html).String())
+```
+
 ## Topic constants
 
 Tavern ships a set of topic name constants as conventions for common use
