@@ -12,6 +12,54 @@ messages to subscribers by topic. It is designed to sit behind an HTTP handler
 (Echo, Chi, net/http, etc.) and push real-time events to browser clients over
 SSE.
 
+## Why
+
+**Without tavern:**
+
+```go
+var (
+    mu          sync.RWMutex
+    subscribers map[string][]chan string
+)
+
+func publish(topic, msg string) {
+    mu.RLock()
+    defer mu.RUnlock()
+    for _, ch := range subscribers[topic] {
+        select {
+        case ch <- msg: // non-blocking send
+        default:        // drop if full
+        }
+    }
+}
+
+func subscribe(topic string) (chan string, func()) {
+    mu.Lock()
+    ch := make(chan string, 16)
+    subscribers[topic] = append(subscribers[topic], ch)
+    mu.Unlock()
+    return ch, func() {
+        mu.Lock()
+        defer mu.Unlock()
+        // find and remove ch from the slice, close it...
+    }
+}
+// Now handle graceful shutdown, topic cleanup, subscriber counting...
+```
+
+**With tavern:**
+
+```go
+broker := tavern.NewSSEBroker()
+defer broker.Close()
+
+ch, unsub := broker.Subscribe("events")
+defer unsub()
+
+broker.Publish("events", tavern.NewSSEMessage("update", data).String())
+// Thread-safe. Non-blocking. Cleanup on Close(). Done.
+```
+
 ## Install
 
 ```bash
