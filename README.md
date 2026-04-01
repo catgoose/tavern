@@ -242,26 +242,6 @@ Server publish event. Browser receive event. What is difficult?
                       └──► subscriber C (chan) ──► SSE endpoint ──► browser C
 ```
 
-### Where tavern fits in the dothog ecosystem
-
-```
-                        ┌──────────────────────────────────────┐
-                        │              dothog app              │
-                        └──────────┬───────────────────────────┘
-                                   │
-          ┌────────────┬───────────┼───────────┬────────────┐
-          │            │           │           │            │
-     ┌────v────┐  ┌────v────┐ ┌───v────┐  ┌───v────┐  ┌───v─────┐
-     │ crooner │  │ porter  │ │fraggle │  │*tavern*│  │promolog │
-     │  auth   │  │  authz  │ │  sql   │  │  sse   │  │  logs   │
-     └─────────┘  └─────────┘ └────────┘  └────────┘  └─────────┘
-```
-
-Tavern is the real-time channel. Handlers publish events when state changes,
-SSE endpoints subscribe and fan them out to connected browsers. The broker
-is framework-agnostic — it works with Echo, Chi, net/http, or anything that
-can write to an `http.ResponseWriter`.
-
 ## License
 
 [MIT](LICENSE)
