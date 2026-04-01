@@ -7,6 +7,12 @@
 
 Thread-safe, topic-based pub/sub broker for Server-Sent Events (SSE) in Go.
 
+> Master say: "but how does the client know when state changes?"
+>
+> Grug say: "server tell it."
+>
+> -- Layman Grug, Dothog Manifesto
+
 Tavern provides a minimal, concurrent-safe message broker that fans out string
 messages to subscribers by topic. It is designed to sit behind an HTTP handler
 (Echo, Chi, net/http, etc.) and push real-time events to browser clients over
@@ -77,7 +83,11 @@ defer broker.Close()
 
 ### Subscribe and unsubscribe
 
-`Subscribe` returns a read-only channel and an unsubscribe function. Always
+> The server sends a representation. The representation contains links and forms. The client follows them. THAT IS THE ENTIRE INTERACTION MODEL.
+>
+> -- The Wisdom of the Uniform Interface, Dothog Manifesto
+
+The server speaks; the client listens. This is the natural order. `Subscribe` returns a read-only channel and an unsubscribe function. Always
 defer the unsubscribe to avoid leaking goroutines and channels.
 
 ```go
@@ -140,6 +150,10 @@ if broker.HasSubscribers("system-stats") {
     broker.Publish("system-stats", toJSON(stats))
 }
 ```
+
+> Before enlightenment: fetch JSON, parse JSON, validate JSON, transform JSON, store JSON in client state, derive view from client state, diff virtual DOM, reconcile DOM. After enlightenment: the server tells it.
+>
+> -- Layman Grug, Dothog Manifesto (adapted for SSE)
 
 ### Echo SSE endpoint
 
