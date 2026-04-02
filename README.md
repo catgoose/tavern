@@ -99,6 +99,41 @@ for msg := range ch {
 }
 ```
 
+### Scoped subscriptions
+
+Sometimes different clients need to see different slices of the same topic —
+per-user notifications, per-tenant feeds, or per-session state. `SubscribeScoped`
+tags a subscriber with a scope key. Only messages published via `PublishTo` with
+a matching key are delivered to that subscriber.
+
+```go
+// Client subscribes to their own user feed
+ch, unsub := broker.SubscribeScoped("notifications", userID)
+defer unsub()
+
+for msg := range ch {
+    // only messages published to this userID arrive here
+}
+```
+
+Publish to a specific scope:
+
+```go
+broker.PublishTo("notifications", userID, tavern.NewSSEMessage("alert", payload).String())
+```
+
+For OOB fragments targeted to a single scope:
+
+```go
+broker.PublishOOBTo("notifications", userID,
+    tavern.Replace("alert-badge", `<span>3</span>`),
+)
+```
+
+Scoped and unscoped subscribers on the same topic are fully independent.
+`Publish` delivers only to unscoped subscribers; `PublishTo` delivers only to
+matching scoped subscribers. `HasSubscribers` and `TopicCounts` count both.
+
 ### Publish
 
 `Publish` fans out a message to every subscriber of a topic. It is
@@ -185,6 +220,19 @@ func sseHandler(broker *tavern.SSEBroker) echo.HandlerFunc {
 }
 ```
 
+### Broker options
+
+`NewSSEBroker` accepts functional options to override defaults.
+
+`WithBufferSize` sets the channel buffer capacity for every new subscriber.
+The default is 10. Increase it if your publisher bursts faster than subscribers
+drain, or decrease it to tighten back-pressure.
+
+```go
+broker := tavern.NewSSEBroker(tavern.WithBufferSize(64))
+defer broker.Close()
+```
+
 ### Topic metrics
 
 ```go
@@ -193,6 +241,39 @@ counts := broker.TopicCounts()
 for topic, n := range counts {
     fmt.Printf("%s: %d subscribers\n", topic, n)
 }
+```
+
+`SubscriberCount` returns the total across all topics in a single call:
+
+```go
+fmt.Println("total subscribers:", broker.SubscriberCount())
+```
+
+`PublishDrops` reports the running count of messages silently dropped because a
+subscriber's buffer was full:
+
+```go
+fmt.Println("dropped messages:", broker.PublishDrops())
+```
+
+`Stats` combines all three into a single lock acquisition:
+
+```go
+s := broker.Stats()
+// BrokerStats{Topics: int, Subscribers: int, PublishDrops: int64}
+fmt.Printf("topics=%d subs=%d drops=%d\n", s.Topics, s.Subscribers, s.PublishDrops)
+```
+
+These are useful for health endpoints, structured logging, and alerting on
+unexpected drop rates:
+
+```go
+go func() {
+    for range time.Tick(30 * time.Second) {
+        s := broker.Stats()
+        slog.Info("broker", "topics", s.Topics, "subs", s.Subscribers, "drops", s.PublishDrops)
+    }
+}()
 ```
 
 ## OOB Fragments
@@ -243,6 +324,54 @@ html := tavern.RenderFragments(
     tavern.Delete("old-banner"),
 )
 broker.Publish("events", tavern.NewSSEMessage("oob", html).String())
+```
+
+## Runtime stats
+
+`CollectRuntimeStats` samples the Go runtime and returns a `SystemStats`
+snapshot. It is designed to feed SSE-powered dashboards that stream live process
+health to browser clients without any external monitoring agent.
+
+```go
+start := time.Now()
+
+// In your SSE ticker loop:
+stats := tavern.CollectRuntimeStats(start)
+broker.Publish(tavern.TopicSystemStats, toJSON(stats))
+```
+
+`SystemStats` fields:
+
+| Field | Description |
+|---|---|
+| `Timestamp` | Wall time of the snapshot (`HH:MM:SS`) |
+| `GoVersion` | Go toolchain version |
+| `OS` / `Arch` | GOOS / GOARCH |
+| `NumCPU` | Logical CPUs available |
+| `Uptime` | Elapsed time since `start` |
+| `Goroutines` | Live goroutine count |
+| `NumThread` | OS threads created |
+| `HeapAllocMB` | Currently allocated heap bytes |
+| `HeapSysMB` | Heap memory obtained from the OS |
+| `HeapIdleMB` | Idle heap spans |
+| `HeapReleasedMB` | Returned idle spans |
+| `StackInUseMB` | Stack memory in use |
+| `SysMB` | Total memory from the OS |
+| `TotalAllocMB` | Cumulative bytes allocated |
+| `HeapObjects` | Allocated heap objects |
+| `Mallocs` / `Frees` | Cumulative allocations / frees |
+| `LiveObjects` | `Mallocs - Frees` |
+| `GCCycles` | Number of completed GC cycles |
+| `LastPauseMicros` | Duration of the last GC STW pause |
+| `NextGCMB` | Heap target for the next GC |
+
+Combine with `HasSubscribers` to skip the `runtime.ReadMemStats` call when no
+clients are connected:
+
+```go
+if broker.HasSubscribers(tavern.TopicSystemStats) {
+    broker.Publish(tavern.TopicSystemStats, toJSON(tavern.CollectRuntimeStats(start)))
+}
 ```
 
 ## Topic constants
