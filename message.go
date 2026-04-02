@@ -27,7 +27,9 @@ type SSEMessage struct {
 func (m SSEMessage) String() string {
 	var parts []string
 	parts = append(parts, fmt.Sprintf("event: %s", m.Event))
-	parts = append(parts, fmt.Sprintf("data: %s", m.Data))
+	for _, line := range strings.Split(m.Data, "\n") {
+		parts = append(parts, "data: "+line)
+	}
 	if m.ID != "" {
 		parts = append(parts, fmt.Sprintf("id: %s", m.ID))
 	}

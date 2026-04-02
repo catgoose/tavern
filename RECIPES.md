@@ -322,7 +322,7 @@ func assignTask(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
 
 ## 5. OOB templ component swap
 
-Use the `tavern/templ` sub-package to render a full `templ.Component` as an OOB
+Use `tavern.ReplaceComponent` to render a full `templ.Component` as an OOB
 replacement fragment. This keeps your server-rendered markup in `.templ` files
 instead of scattering HTML strings through handler code.
 
@@ -344,7 +344,6 @@ templ StatsCard(label string, value int) {
 ```go
 import (
     "github.com/catgoose/tavern"
-    ttempl "github.com/catgoose/tavern/templ"
     "myapp/components"
 )
 
@@ -353,7 +352,7 @@ func refreshStats(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
         count, _ := countActiveUsers(db)
 
         broker.PublishOOB("dashboard",
-            ttempl.ReplaceComponent("stats-card",
+            tavern.ReplaceComponent("stats-card",
                 components.StatsCard("Active Users", count)),
         )
 
@@ -442,7 +441,7 @@ func optimisticDelete(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
 ## 7. Append to a list (live feed)
 
 Push new entries to a live activity feed on all connected clients. Uses
-`tavern.Append` for raw HTML or `ttempl.AppendComponent` for templ components.
+`tavern.Append` for raw HTML or `tavern.AppendComponent` for templ components.
 
 ### Go handler (raw HTML)
 
@@ -469,7 +468,7 @@ func createComment(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
 ### Go handler (templ component)
 
 ```go
-import ttempl "github.com/catgoose/tavern/templ"
+import "github.com/catgoose/tavern"
 
 func createCommentTempl(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
     return func(c echo.Context) error {
@@ -478,7 +477,7 @@ func createCommentTempl(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
         id, _ := insertComment(db, author, body)
 
         broker.PublishOOB("comments",
-            ttempl.AppendComponent("comment-feed",
+            tavern.AppendComponent("comment-feed",
                 components.CommentEntry(id, author, body)),
         )
 

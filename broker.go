@@ -21,7 +21,15 @@ type SSEBroker struct {
 	mu           sync.RWMutex
 	bufferSize   int
 	drops        atomic.Int64
+	closed       bool
 }
+
+// Topic name constants are conventions for common real-time use cases.
+// Any string works as a topic name; these are provided for consistent naming.
+const (
+	TopicSystemStats  = "system-stats"
+	TopicActivityFeed = "activity-feed"
+)
 
 // scopedSub tracks the scope key alongside the channel.
 type scopedSub struct {
@@ -62,8 +70,14 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 // [WithBufferSize]). If the subscriber does not drain the channel fast enough,
 // messages will be dropped by [SSEBroker.Publish].
 func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe func()) {
-	ch := make(chan string, b.bufferSize)
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		ch := make(chan string)
+		close(ch)
+		return ch, func() {}
+	}
+	ch := make(chan string, b.bufferSize)
 	if b.topics[topic] == nil {
 		b.topics[topic] = make(map[chan string]struct{})
 	}
@@ -84,8 +98,14 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 // be delivered. The returned unsubscribe function releases resources and closes
 // the channel; it is safe to call more than once.
 func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, unsubscribe func()) {
-	ch := make(chan string, b.bufferSize)
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		ch := make(chan string)
+		close(ch)
+		return ch, func() {}
+	}
+	ch := make(chan string, b.bufferSize)
 	if b.scopedTopics[topic] == nil {
 		b.scopedTopics[topic] = make(map[chan string]scopedSub)
 	}
@@ -253,6 +273,7 @@ func (b *SSEBroker) PublishTo(topic, scope, msg string) {
 func (b *SSEBroker) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.closed = true
 	for topic, subs := range b.topics {
 		for ch := range subs {
 			delete(subs, ch)

@@ -1,6 +1,7 @@
 package tavern
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -94,4 +95,27 @@ func TestSSEMessage_WithRetry_ImmutableOriginal(t *testing.T) {
 	orig := NewSSEMessage("event", "data")
 	_ = orig.WithRetry(999)
 	assert.Zero(t, orig.Retry, "WithRetry should return a copy, not mutate the receiver")
+}
+
+func TestSSEMessage_MultilineData(t *testing.T) {
+	m := NewSSEMessage("update", "line1\nline2\nline3")
+	got := m.String()
+
+	assert.Contains(t, got, "data: line1\n")
+	assert.Contains(t, got, "data: line2\n")
+	assert.Contains(t, got, "data: line3\n")
+
+	// There must be exactly 3 data: lines, not one collapsed line.
+	count := strings.Count(got, "data: ")
+	assert.Equal(t, 3, count, "each newline in Data must produce a separate data: line")
+}
+
+func TestSSEMessage_SingleLineData(t *testing.T) {
+	m := NewSSEMessage("update", "hello")
+	got := m.String()
+
+	// Single line: exactly one data: field.
+	count := strings.Count(got, "data: ")
+	assert.Equal(t, 1, count)
+	assert.Contains(t, got, "data: hello\n")
 }

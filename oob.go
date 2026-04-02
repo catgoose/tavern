@@ -36,9 +36,18 @@ func PrependComponent(id string, cmp Component) Fragment {
 func renderComponent(cmp Component) string {
 	var buf bytes.Buffer
 	if err := cmp.Render(context.Background(), &buf); err != nil {
-		return "<!-- render error: " + err.Error() + " -->"
+		return "<!-- render error: " + escapeAttr(err.Error()) + " -->"
 	}
 	return buf.String()
+}
+
+// escapeAttr escapes characters that are unsafe in HTML attribute values.
+func escapeAttr(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, `"`, "&quot;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
 }
 
 // Fragment describes a targeted DOM mutation for HTMX OOB swaps via SSE.
@@ -74,9 +83,9 @@ func RenderFragments(fragments ...Fragment) string {
 	var b strings.Builder
 	for _, f := range fragments {
 		if f.Swap == "delete" {
-			fmt.Fprintf(&b, `<div id="%s" hx-swap-oob="delete"></div>`, f.ID)
+			fmt.Fprintf(&b, `<div id="%s" hx-swap-oob="delete"></div>`, escapeAttr(f.ID))
 		} else {
-			fmt.Fprintf(&b, `<div id="%s" hx-swap-oob="%s">%s</div>`, f.ID, f.Swap, f.HTML)
+			fmt.Fprintf(&b, `<div id="%s" hx-swap-oob="%s">%s</div>`, escapeAttr(f.ID), f.Swap, f.HTML)
 		}
 	}
 	return b.String()

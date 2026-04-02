@@ -456,6 +456,46 @@ func TestClose_EmptyBroker(t *testing.T) {
 	assert.NotPanics(t, func() { b.Close() })
 }
 
+func TestSubscribeAfterClose(t *testing.T) {
+	b := NewSSEBroker()
+	b.Close()
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	// Channel must be closed immediately.
+	select {
+	case _, ok := <-ch:
+		assert.False(t, ok, "channel returned from Subscribe after Close must be closed")
+	default:
+		t.Fatal("channel from Subscribe after Close was not immediately closed")
+	}
+}
+
+func TestSubscribeScopedAfterClose(t *testing.T) {
+	b := NewSSEBroker()
+	b.Close()
+
+	ch, unsub := b.SubscribeScoped("topic", "scope")
+	defer unsub()
+
+	select {
+	case _, ok := <-ch:
+		assert.False(t, ok, "channel returned from SubscribeScoped after Close must be closed")
+	default:
+		t.Fatal("channel from SubscribeScoped after Close was not immediately closed")
+	}
+}
+
+func TestPublishAfterClose(t *testing.T) {
+	b := NewSSEBroker()
+	b.Close()
+
+	// Publish after Close should not panic.
+	assert.NotPanics(t, func() { b.Publish("topic", "msg") })
+	assert.NotPanics(t, func() { b.PublishTo("topic", "scope", "msg") })
+}
+
 func TestScopedAndUnscopedCoexist(t *testing.T) {
 	b := NewSSEBroker()
 	defer b.Close()

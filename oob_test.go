@@ -135,3 +135,25 @@ func TestPublishOOB_NoSubscribers_NoOp(t *testing.T) {
 		b.PublishOOB("nonexistent", Replace("el", "<div/>"))
 	})
 }
+
+func TestRenderFragments_EscapesID(t *testing.T) {
+	// ID with quotes and angle brackets must be escaped in the attribute.
+	html := RenderFragments(Replace(`bad"<id>`, "<p>content</p>"))
+	assert.Contains(t, html, `id="bad&quot;&lt;id&gt;"`)
+	assert.NotContains(t, html, `id="bad"<id>"`)
+
+	// Delete variant also escapes.
+	html2 := RenderFragments(Delete(`x"y`))
+	assert.Contains(t, html2, `id="x&quot;y"`)
+}
+
+func TestRenderComponentError_EscapesComment(t *testing.T) {
+	// An error message containing --> must not break out of the HTML comment.
+	// escapeAttr replaces > with &gt;, turning --> into --&gt; inside the comment body.
+	cmp := testComponent{err: errors.New("oops --> injected")}
+	f := ReplaceComponent("el", cmp)
+	// The escaped payload must not contain the raw --> sequence.
+	assert.NotContains(t, f.HTML, "oops -->", "raw --> from error payload must be escaped")
+	assert.Contains(t, f.HTML, "--&gt;", "closing angle bracket in error must be escaped")
+	assert.Contains(t, f.HTML, "oops")
+}
