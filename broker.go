@@ -7,6 +7,9 @@
 package tavern
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 )
@@ -22,6 +25,8 @@ type SSEBroker struct {
 	bufferSize   int
 	drops        atomic.Int64
 	closed       bool
+	publishers   sync.WaitGroup
+	logger       *slog.Logger
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -35,6 +40,10 @@ type scopedSub struct {
 	scope string
 }
 
+// PublisherFunc is a long-running function that publishes messages to the broker.
+// It receives the broker's context and should return when the context is cancelled.
+type PublisherFunc func(ctx context.Context)
+
 // BrokerOption configures the SSE broker.
 type BrokerOption func(*SSEBroker)
 
@@ -42,6 +51,14 @@ type BrokerOption func(*SSEBroker)
 func WithBufferSize(size int) BrokerOption {
 	return func(b *SSEBroker) {
 		b.bufferSize = size
+	}
+}
+
+// WithLogger sets a structured logger for the broker. When set, publisher
+// panics and errors are logged. Default is nil (no logging).
+func WithLogger(l *slog.Logger) BrokerOption {
+	return func(b *SSEBroker) {
+		b.logger = l
 	}
 }
 
@@ -264,12 +281,37 @@ func (b *SSEBroker) PublishTo(topic, scope, msg string) {
 	}
 }
 
-// Close shuts down the broker by closing all subscriber channels and removing
-// all topics. After Close returns, any pending reads on subscriber channels
-// will receive the zero value. It is safe to call Close while other goroutines
-// are publishing or subscribing; however, no new messages will be delivered
-// after Close returns.
+// RunPublisher launches fn in a new goroutine with panic recovery. If fn
+// panics, the panic is recovered and logged (when a logger is configured via
+// [WithLogger]). The goroutine is tracked by the broker's internal wait group
+// so that [SSEBroker.Close] blocks until all publishers have returned.
+//
+// fn receives the provided context and should return when the context is
+// cancelled. Callers typically pass a context derived from the application's
+// shutdown signal.
+func (b *SSEBroker) RunPublisher(ctx context.Context, fn PublisherFunc) {
+	b.publishers.Add(1)
+	go func() {
+		defer b.publishers.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				if b.logger != nil {
+					b.logger.Error("publisher panic recovered", "panic", fmt.Sprint(r))
+				}
+			}
+		}()
+		fn(ctx)
+	}()
+}
+
+// Close shuts down the broker. It first waits for all publisher goroutines
+// started via [SSEBroker.RunPublisher] to return, then closes all subscriber
+// channels and removes all topics. After Close returns, any pending reads on
+// subscriber channels will receive the zero value. It is safe to call Close
+// while other goroutines are publishing or subscribing; however, no new
+// messages will be delivered after Close returns.
 func (b *SSEBroker) Close() {
+	b.publishers.Wait()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
