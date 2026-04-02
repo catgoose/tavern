@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -82,4 +83,55 @@ func TestRenderComponentError(t *testing.T) {
 	f := ReplaceComponent("broken", testComponent{err: errors.New("render failed")})
 	assert.Contains(t, f.HTML, "render error")
 	assert.Contains(t, f.HTML, "render failed")
+}
+
+func TestPublishOOB_DeliveredToSubscribers(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("updates")
+	defer unsub()
+
+	b.PublishOOB("updates", Replace("status", "<b>online</b>"))
+
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, `hx-swap-oob="outerHTML"`)
+		assert.Contains(t, msg, `id="status"`)
+		assert.Contains(t, msg, "<b>online</b>")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OOB message")
+	}
+}
+
+func TestPublishOOB_MultipleFragments(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("updates")
+	defer unsub()
+
+	b.PublishOOB("updates",
+		Replace("box-a", "<p>A</p>"),
+		Delete("box-b"),
+	)
+
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, `id="box-a"`)
+		assert.Contains(t, msg, "<p>A</p>")
+		assert.Contains(t, msg, `id="box-b" hx-swap-oob="delete"`)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OOB message")
+	}
+}
+
+func TestPublishOOB_NoSubscribers_NoOp(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	// Should not panic when there are no subscribers.
+	assert.NotPanics(t, func() {
+		b.PublishOOB("nonexistent", Replace("el", "<div/>"))
+	})
 }

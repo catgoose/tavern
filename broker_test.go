@@ -402,6 +402,60 @@ func TestSubscribeScoped_UnsubscribeCleanup(t *testing.T) {
 	assert.NotPanics(t, func() { unsub() })
 }
 
+func TestPublishTo_DropsWhenChannelFull(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1))
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("events", "user-1")
+	defer unsub()
+
+	// Fill the buffer.
+	b.PublishTo("events", "user-1", "first")
+	assert.Equal(t, int64(0), b.PublishDrops())
+
+	// Overflow — should be dropped.
+	b.PublishTo("events", "user-1", "overflow")
+	assert.Equal(t, int64(1), b.PublishDrops())
+
+	// Drain the one message that was buffered.
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "first", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestPublishTo_NonExistentTopic(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	// Should not panic.
+	assert.NotPanics(t, func() { b.PublishTo("ghost", "scope-x", "msg") })
+}
+
+func TestClose_WithScopedSubscribers(t *testing.T) {
+	b := NewSSEBroker()
+
+	ch1, _ := b.SubscribeScoped("events", "acct-1")
+	ch2, _ := b.SubscribeScoped("events", "acct-2")
+
+	// Should not panic.
+	b.Close()
+
+	// Channels should be closed.
+	_, ok1 := <-ch1
+	_, ok2 := <-ch2
+	assert.False(t, ok1)
+	assert.False(t, ok2)
+}
+
+func TestClose_EmptyBroker(t *testing.T) {
+	b := NewSSEBroker()
+	// Close on a broker with no subscribers should not panic.
+	assert.NotPanics(t, func() { b.Close() })
+}
+
 func TestScopedAndUnscopedCoexist(t *testing.T) {
 	b := NewSSEBroker()
 	defer b.Close()
