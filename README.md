@@ -326,62 +326,12 @@ html := tavern.RenderFragments(
 broker.Publish("events", tavern.NewSSEMessage("oob", html).String())
 ```
 
-## Runtime stats
-
-`CollectRuntimeStats` samples the Go runtime and returns a `SystemStats`
-snapshot. It is designed to feed SSE-powered dashboards that stream live process
-health to browser clients without any external monitoring agent.
-
-```go
-start := time.Now()
-
-// In your SSE ticker loop:
-stats := tavern.CollectRuntimeStats(start)
-broker.Publish(tavern.TopicSystemStats, toJSON(stats))
-```
-
-`SystemStats` fields:
-
-| Field | Description |
-|---|---|
-| `Timestamp` | Wall time of the snapshot (`HH:MM:SS`) |
-| `GoVersion` | Go toolchain version |
-| `OS` / `Arch` | GOOS / GOARCH |
-| `NumCPU` | Logical CPUs available |
-| `Uptime` | Elapsed time since `start` |
-| `Goroutines` | Live goroutine count |
-| `NumThread` | OS threads created |
-| `HeapAllocMB` | Currently allocated heap bytes |
-| `HeapSysMB` | Heap memory obtained from the OS |
-| `HeapIdleMB` | Idle heap spans |
-| `HeapReleasedMB` | Returned idle spans |
-| `StackInUseMB` | Stack memory in use |
-| `SysMB` | Total memory from the OS |
-| `TotalAllocMB` | Cumulative bytes allocated |
-| `HeapObjects` | Allocated heap objects |
-| `Mallocs` / `Frees` | Cumulative allocations / frees |
-| `LiveObjects` | `Mallocs - Frees` |
-| `GCCycles` | Number of completed GC cycles |
-| `LastPauseMicros` | Duration of the last GC STW pause |
-| `NextGCMB` | Heap target for the next GC |
-
-Combine with `HasSubscribers` to skip the `runtime.ReadMemStats` call when no
-clients are connected:
-
-```go
-if broker.HasSubscribers(tavern.TopicSystemStats) {
-    broker.Publish(tavern.TopicSystemStats, toJSON(tavern.CollectRuntimeStats(start)))
-}
-```
-
 ## Topic constants
 
-Tavern ships a set of topic name constants as conventions for common use
-cases (dashboards, activity feeds, etc.). These are optional -- any string
-works as a topic name.
+Tavern ships topic name constants as conventions for common use cases. These
+are optional -- any string works as a topic name.
 
 ```go
-broker.Publish(tavern.TopicSystemStats, statsJSON)
 broker.Publish(tavern.TopicActivityFeed, eventJSON)
 ```
 
