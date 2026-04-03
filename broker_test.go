@@ -551,3 +551,121 @@ func TestScopedAndUnscopedCoexist(t *testing.T) {
 	assert.Equal(t, 1, s.Topics)
 	assert.Equal(t, 2, s.Subscribers)
 }
+
+func TestPublishWithReplay_NewSubscriberGetsReplay(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.PublishWithReplay("topic", "cached-msg")
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "cached-msg", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for replay message")
+	}
+}
+
+func TestPublishWithReplay_UpdatesCache(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.PublishWithReplay("topic", "first")
+	b.PublishWithReplay("topic", "second")
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "second", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for replay message")
+	}
+
+	// Only one replay message should be delivered.
+	select {
+	case msg := <-ch:
+		t.Fatalf("unexpected extra replay message: %s", msg)
+	default:
+	}
+}
+
+func TestPublishWithReplay_ExistingSubscribersGetMessage(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	b.PublishWithReplay("topic", "live-msg")
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "live-msg", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for message")
+	}
+}
+
+func TestPublishWithReplay_NoReplayForRegularPublish(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.Publish("topic", "regular-msg")
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("should not have received replay for regular publish: %s", msg)
+	default:
+		// expected — no replay
+	}
+}
+
+func TestPublishWithReplay_ScopedSubscriberGetsReplay(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.PublishWithReplay("events", "cached-event")
+
+	ch, unsub := b.SubscribeScoped("events", "acct-1")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "cached-event", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for replay message on scoped subscriber")
+	}
+}
+
+func TestClearReplay(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.PublishWithReplay("topic", "cached-msg")
+	b.ClearReplay("topic")
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("should not have received replay after clear: %s", msg)
+	default:
+		// expected — no replay
+	}
+}
+
+func TestPublishWithReplay_AfterClose(t *testing.T) {
+	b := NewSSEBroker()
+	b.Close()
+
+	assert.NotPanics(t, func() { b.PublishWithReplay("topic", "msg") })
+}
