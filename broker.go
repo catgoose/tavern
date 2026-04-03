@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // SSEBroker is a thread-safe, topic-based pub/sub message broker. Subscribers
@@ -19,15 +20,17 @@ import (
 // subscribers of a given topic. A zero-value SSEBroker is not usable; create
 // one with [NewSSEBroker].
 type SSEBroker struct {
-	topics       map[string]map[chan string]struct{}
-	scopedTopics map[string]map[chan string]scopedSub
-	replayCache  map[string]string
-	mu           sync.RWMutex
-	bufferSize   int
-	drops        atomic.Int64
-	closed       bool
-	publishers   sync.WaitGroup
-	logger       *slog.Logger
+	topics            map[string]map[chan string]struct{}
+	scopedTopics      map[string]map[chan string]scopedSub
+	replayCache       map[string]string
+	mu                sync.RWMutex
+	bufferSize        int
+	drops             atomic.Int64
+	closed            bool
+	publishers        sync.WaitGroup
+	logger            *slog.Logger
+	keepaliveInterval time.Duration
+	done              chan struct{}
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -63,6 +66,16 @@ func WithLogger(l *slog.Logger) BrokerOption {
 	}
 }
 
+// WithKeepalive enables periodic SSE comment keepalives sent to all
+// subscribers at the given interval. This keeps connections alive through
+// proxies and load balancers that close idle connections. A zero or negative
+// interval disables keepalives (the default).
+func WithKeepalive(interval time.Duration) BrokerOption {
+	return func(b *SSEBroker) {
+		b.keepaliveInterval = interval
+	}
+}
+
 // NewSSEBroker creates a ready-to-use [SSEBroker] with no active topics or
 // subscribers. It accepts optional [BrokerOption] values to override defaults.
 func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
@@ -71,9 +84,13 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 		scopedTopics: make(map[string]map[chan string]scopedSub),
 		replayCache:  make(map[string]string),
 		bufferSize:   10,
+		done:         make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(b)
+	}
+	if b.keepaliveInterval > 0 {
+		go b.keepaliveLoop()
 	}
 	return b
 }
@@ -358,6 +375,47 @@ func (b *SSEBroker) RunPublisher(ctx context.Context, fn PublisherFunc) {
 	}()
 }
 
+// keepaliveLoop sends SSE comment keepalives to all subscriber channels at
+// the configured interval. It stops when the done channel is closed.
+func (b *SSEBroker) keepaliveLoop() {
+	ticker := time.NewTicker(b.keepaliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-b.done:
+			return
+		case <-ticker.C:
+			b.sendKeepalive()
+		}
+	}
+}
+
+// sendKeepalive sends a keepalive comment to all subscriber channels using a
+// non-blocking send. Drops from keepalives are not counted in PublishDrops.
+// The read lock is held for the entire operation to prevent Close from closing
+// channels mid-send.
+func (b *SSEBroker) sendKeepalive() {
+	const msg = ": keepalive\n"
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, subs := range b.topics {
+		for ch := range subs {
+			select {
+			case ch <- msg:
+			default:
+			}
+		}
+	}
+	for _, subs := range b.scopedTopics {
+		for ch := range subs {
+			select {
+			case ch <- msg:
+			default:
+			}
+		}
+	}
+}
+
 // Close shuts down the broker. It first waits for all publisher goroutines
 // started via [SSEBroker.RunPublisher] to return, then closes all subscriber
 // channels and removes all topics. After Close returns, any pending reads on
@@ -368,7 +426,11 @@ func (b *SSEBroker) Close() {
 	b.publishers.Wait()
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
 	b.closed = true
+	close(b.done)
 	b.replayCache = nil
 	for topic, subs := range b.topics {
 		for ch := range subs {

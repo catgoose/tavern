@@ -764,3 +764,87 @@ func TestRunPublisher_CloseWaitsForAll(t *testing.T) {
 	b.Close()
 	// All publishers have exited if Close returned.
 }
+
+func TestWithKeepalive_ReceivesHeartbeats(t *testing.T) {
+	b := NewSSEBroker(WithKeepalive(50 * time.Millisecond))
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, ": keepalive\n", msg)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for keepalive")
+	}
+}
+
+func TestWithKeepalive_StopsOnClose(t *testing.T) {
+	b := NewSSEBroker(WithKeepalive(50 * time.Millisecond))
+
+	ch, _ := b.Subscribe("topic")
+
+	// Wait for at least one keepalive to confirm it's running.
+	select {
+	case <-ch:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for initial keepalive")
+	}
+
+	b.Close()
+
+	// After close, no more messages should arrive (channel is closed).
+	select {
+	case _, ok := <-ch:
+		assert.False(t, ok, "channel should be closed after Close")
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out — channel was not closed")
+	}
+}
+
+func TestWithKeepalive_DefaultOff(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("unexpected message received: %s", msg)
+	case <-time.After(100 * time.Millisecond):
+		// expected — no keepalive
+	}
+}
+
+func TestWithKeepalive_ScopedSubscribers(t *testing.T) {
+	b := NewSSEBroker(WithKeepalive(50 * time.Millisecond))
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("events", "acct-1")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, ": keepalive\n", msg)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for keepalive on scoped subscriber")
+	}
+}
+
+func TestWithKeepalive_DoesNotCountDrops(t *testing.T) {
+	b := NewSSEBroker(WithKeepalive(50*time.Millisecond), WithBufferSize(1))
+
+	// Subscribe but don't drain — buffer will fill.
+	_, _ = b.Subscribe("topic")
+
+	// Wait long enough for several keepalive ticks.
+	time.Sleep(200 * time.Millisecond)
+
+	// Stop the keepalive goroutine before asserting to avoid races on cleanup.
+	b.Close()
+
+	// Keepalive drops must not be counted.
+	assert.Equal(t, int64(0), b.PublishDrops())
+}
