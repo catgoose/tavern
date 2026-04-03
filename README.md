@@ -36,6 +36,7 @@
     - [Check for subscribers](#check-for-subscribers)
     - [Topic metrics](#topic-metrics)
     - [Per-topic metrics](#per-topic-metrics)
+  - [Testing](#testing)
   - [Topic constants](#topic-constants)
   - [Thread safety](#thread-safety)
   - [Philosophy](#philosophy)
@@ -644,6 +645,37 @@ fmt.Printf("totals: published=%d dropped=%d\n", m.TotalPublished, m.TotalDropped
 Metrics are opt-in — when `WithMetrics` is not set, there is zero overhead on
 publish operations. Use this to identify topics with high drop rates, track
 publish throughput, and find peak subscriber counts for capacity planning.
+
+## Testing
+
+The `taverntest` subpackage provides helpers for testing code that uses tavern:
+
+```go
+import "github.com/catgoose/tavern/taverntest"
+
+func TestMyPublisher(t *testing.T) {
+    broker := tavern.NewSSEBroker()
+    defer broker.Close()
+
+    rec := taverntest.NewRecorder(broker, "events")
+    defer rec.Close()
+
+    // ... code under test publishes to "events" ...
+    myPublisher(broker)
+
+    rec.WaitFor(3, time.Second)
+    rec.AssertCount(t, 3)
+    rec.AssertContains(t, "expected-message")
+    rec.AssertNthMessage(t, 0, "first-message")
+}
+```
+
+`NewScopedRecorder` works the same way for scoped subscriptions:
+
+```go
+rec := taverntest.NewScopedRecorder(broker, "notifications", userID)
+defer rec.Close()
+```
 
 ## Topic constants
 
