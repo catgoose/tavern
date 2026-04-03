@@ -58,6 +58,12 @@ func (c testComponent) Render(_ context.Context, w io.Writer) error {
 	return err
 }
 
+func TestRenderComponent(t *testing.T) {
+	cmp := testComponent{html: "<span>hello</span>"}
+	result := RenderComponent(cmp)
+	assert.Equal(t, "<span>hello</span>", result)
+}
+
 func TestReplaceComponent(t *testing.T) {
 	f := ReplaceComponent("stats", testComponent{html: "<span>42</span>"})
 	assert.Equal(t, "stats", f.ID)

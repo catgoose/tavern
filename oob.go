@@ -18,22 +18,24 @@ type Component interface {
 // ReplaceComponent renders a Component and returns a Replace fragment.
 // If rendering fails, the fragment contains the error message as an HTML comment.
 func ReplaceComponent(id string, cmp Component) Fragment {
-	return Fragment{ID: id, Swap: "outerHTML", HTML: renderComponent(cmp)}
+	return Fragment{ID: id, Swap: "outerHTML", HTML: RenderComponent(cmp)}
 }
 
 // AppendComponent renders a Component and returns an Append fragment.
 // If rendering fails, the fragment contains the error message as an HTML comment.
 func AppendComponent(id string, cmp Component) Fragment {
-	return Fragment{ID: id, Swap: "beforeend", HTML: renderComponent(cmp)}
+	return Fragment{ID: id, Swap: "beforeend", HTML: RenderComponent(cmp)}
 }
 
 // PrependComponent renders a Component and returns a Prepend fragment.
 // If rendering fails, the fragment contains the error message as an HTML comment.
 func PrependComponent(id string, cmp Component) Fragment {
-	return Fragment{ID: id, Swap: "afterbegin", HTML: renderComponent(cmp)}
+	return Fragment{ID: id, Swap: "afterbegin", HTML: RenderComponent(cmp)}
 }
 
-func renderComponent(cmp Component) string {
+// RenderComponent renders a Component to a string.
+// If rendering fails, it returns an HTML comment containing the escaped error message.
+func RenderComponent(cmp Component) string {
 	var buf bytes.Buffer
 	if err := cmp.Render(context.Background(), &buf); err != nil {
 		return "<!-- render error: " + escapeAttr(err.Error()) + " -->"
