@@ -943,3 +943,172 @@ func TestWithTopicTTL_ScopedTopics(t *testing.T) {
 		return len(b.TopicCounts()) == 0
 	}, time.Second, 10*time.Millisecond)
 }
+
+func TestPublishIfChanged_PublishesNewMessage(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	ok := b.PublishIfChanged("t", "hello")
+	require.True(t, ok)
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "hello", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for message")
+	}
+}
+
+func TestPublishIfChanged_SkipsDuplicate(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	ok1 := b.PublishIfChanged("t", "same")
+	require.True(t, ok1)
+
+	ok2 := b.PublishIfChanged("t", "same")
+	require.False(t, ok2)
+
+	// Drain the one message that was delivered.
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "same", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+
+	// No second message should be present.
+	select {
+	case msg := <-ch:
+		t.Fatalf("unexpected second message: %s", msg)
+	default:
+	}
+}
+
+func TestPublishIfChanged_PublishesAfterChange(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	ok1 := b.PublishIfChanged("t", "A")
+	require.True(t, ok1)
+
+	ok2 := b.PublishIfChanged("t", "B")
+	require.True(t, ok2)
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "A", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first message")
+	}
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "B", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second message")
+	}
+}
+
+func TestPublishIfChanged_PerTopic(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch1, unsub1 := b.Subscribe("topic1")
+	defer unsub1()
+	ch2, unsub2 := b.Subscribe("topic2")
+	defer unsub2()
+
+	// Same message to different topics — both should publish.
+	ok1 := b.PublishIfChanged("topic1", "same")
+	ok2 := b.PublishIfChanged("topic2", "same")
+	require.True(t, ok1)
+	require.True(t, ok2)
+
+	select {
+	case msg := <-ch1:
+		assert.Equal(t, "same", msg)
+	case <-time.After(time.Second):
+		t.Fatal("topic1 timed out")
+	}
+
+	select {
+	case msg := <-ch2:
+		assert.Equal(t, "same", msg)
+	case <-time.After(time.Second):
+		t.Fatal("topic2 timed out")
+	}
+}
+
+func TestPublishIfChanged_AfterClose(t *testing.T) {
+	b := NewSSEBroker()
+	b.Close()
+
+	assert.NotPanics(t, func() {
+		ok := b.PublishIfChanged("t", "msg")
+		assert.False(t, ok)
+	})
+}
+
+func TestClearDedup(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	ok1 := b.PublishIfChanged("t", "msg")
+	require.True(t, ok1)
+
+	// Clear dedup state.
+	b.ClearDedup("t")
+
+	// Same message should now publish again.
+	ok2 := b.PublishIfChanged("t", "msg")
+	require.True(t, ok2)
+
+	// Drain both messages.
+	for range 2 {
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatal("timed out")
+		}
+	}
+}
+
+func TestPublishIfChanged_EmptyMessage(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	ok1 := b.PublishIfChanged("t", "")
+	require.True(t, ok1)
+
+	ok2 := b.PublishIfChanged("t", "")
+	require.False(t, ok2)
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("unexpected second message: %q", msg)
+	default:
+	}
+}
