@@ -50,11 +50,21 @@
 
 Thread-safe, topic-based pub/sub broker for Server-Sent Events (SSE) in Go.
 
+> A master of the React School visit Grug at cave.
+>
+> Master say: "but how do you manage state?"
+>
+> Grug say: "server manage state."
+>
 > Master say: "but how does the client know when state changes?"
 >
 > Grug say: "server tell it."
 >
-> -- Layman Grug
+> Master say: "but--"
+>
+> Grug say: "server. tell. it."
+>
+> -- The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
 
 Tavern provides a minimal, concurrent-safe message broker that fans out string
 messages to subscribers by topic. It is designed to sit behind an HTTP handler
@@ -172,9 +182,10 @@ func sseHandler(broker *tavern.SSEBroker) echo.HandlerFunc {
 
 ### Subscribe and unsubscribe
 
-> The server sends a representation. The representation contains links and forms. The client follows them. THAT IS THE ENTIRE INTERACTION MODEL.
+> The server sends a representation. The representation contains links and
+> forms. The client follows them. THAT IS THE ENTIRE INTERACTION MODEL.
 >
-> -- The Wisdom of the Uniform Interface
+> -- The Wisdom of the Uniform Interface, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
 
 The server speaks; the client listens. This is the natural order. `Subscribe` returns a read-only channel and an unsubscribe function. Always
 defer the unsubscribe to avoid leaking goroutines and channels.
@@ -265,6 +276,15 @@ broker.Close()
 ```
 
 ## Publishing variants
+
+> Hypertext is the simultaneous presentation of information and controls such
+> that the information BECOMES THE AFFORDANCE through which choices are obtained
+> and actions are selected.
+>
+> -- The Wisdom of the Uniform Interface, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
+
+Tavern's publish methods are how the server exercises that affordance in real
+time. The state changed; the server tells it.
 
 ### PublishWithReplay
 
@@ -480,8 +500,14 @@ broker.RunPublisher(ctx, func(ctx context.Context) {
 
 ## OOB fragments
 
-Tavern includes helpers for HTMX out-of-band (OOB) swaps over SSE. Build
-targeted DOM mutations and publish them as a single event:
+> The whole point -- the ENTIRE POINT -- of hypermedia is that the server tells
+> the client what to do next IN THE RESPONSE ITSELF.
+>
+> -- The Wisdom of the Uniform Interface, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
+
+OOB swaps are SSE's answer to this. The server doesn't just tell the client
+that something changed -- it sends the exact DOM mutations to apply. Build
+targeted swaps and publish them as a single event:
 
 ```go
 // Replace, Append, Prepend, Delete — plain string helpers
@@ -541,9 +567,18 @@ if broker.HasSubscribers("system-stats") {
 }
 ```
 
-> Before enlightenment: fetch JSON, parse JSON, validate JSON, transform JSON, store JSON in client state, derive view from client state, diff virtual DOM, reconcile DOM. After enlightenment: the server tells it.
+> Grug say: "before enlightenment: fetch JSON, parse JSON, validate JSON,
+> transform JSON, store JSON in client state, derive view from client state,
+> diff virtual DOM, reconcile DOM, hydrate DOM, subscribe to store, dispatch
+> action, reduce state, re-derive view, re-diff virtual DOM."
 >
-> -- Layman Grug (adapted for SSE)
+> Student say: "and after enlightenment?"
+>
+> Grug say: "`hx-get`"
+>
+> -- The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
+
+With tavern, after enlightenment: `broker.Publish`.
 
 ### Topic metrics
 
@@ -607,13 +642,22 @@ block each other.
 
 ## Philosophy
 
-Tavern follows the [dothog design philosophy](https://github.com/catgoose/dothog/blob/main/PHILOSOPHY.md): the server drives state, the broker is just plumbing, and `sync.RWMutex` is the only dependency you need for thread safety.
+Tavern follows the [dothog design philosophy](https://github.com/catgoose/dothog/blob/main/PHILOSOPHY.md)
+and the [Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md):
+the server drives state, the broker is just plumbing, and `sync.RWMutex` is
+the only dependency you need for thread safety.
 
-> wife of Grug say from cave: "easy, easy, easy. like touching feet to ground when get out of bed. server return html. browser render html. what is difficult?"
+> wife of Grug say from cave: "easy, easy, easy. like touching feet to ground
+> when get out of bed. server return html. browser render html. what is
+> difficult?"
 >
-> -- Layman Grug
+> -- The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
 
 Server publish event. Browser receive event. What is difficult?
+
+> SSE is the server telling the client what happened next, in real time. The
+> event stream is just another representation -- the server speaks, the client
+> listens, and nobody had to install an npm package to make it work.
 
 ## Architecture
 
