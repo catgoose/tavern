@@ -9,6 +9,7 @@ package tavern
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ type SSEBroker struct {
 	topics            map[string]map[chan string]struct{}
 	scopedTopics      map[string]map[chan string]scopedSub
 	replayCache       map[string]string
+	lastHash          map[string]uint64 // topic → FNV hash of last published message via PublishIfChanged
 	mu                sync.RWMutex
 	bufferSize        int
 	drops             atomic.Int64
@@ -95,6 +97,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 		scopedTopics: make(map[string]map[chan string]scopedSub),
 		replayCache:  make(map[string]string),
 		topicEmpty:   make(map[string]time.Time),
+		lastHash:     make(map[string]uint64),
 		bufferSize:   10,
 		done:         make(chan struct{}),
 	}
@@ -375,6 +378,65 @@ func (b *SSEBroker) PublishTo(topic, scope, msg string) {
 	}
 }
 
+// hashMsg returns the FNV-64a hash of msg.
+func hashMsg(msg string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(msg)) //nolint:errcheck // hash.Write never returns an error
+	return h.Sum64()
+}
+
+// PublishIfChanged publishes msg to the given topic only when it differs from
+// the last message published via PublishIfChanged for that topic. It returns
+// true if the message was published (content changed) or false if it was
+// skipped (identical to the previous message). Comparison is done via an
+// FNV-64a hash of the message content.
+//
+// The deduplication state is per-topic and independent of [SSEBroker.Publish].
+// Use [SSEBroker.ClearDedup] to reset the stored hash for a topic.
+func (b *SSEBroker) PublishIfChanged(topic, msg string) bool {
+	h := hashMsg(msg)
+
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return false
+	}
+	if prev, ok := b.lastHash[topic]; ok && prev == h {
+		b.mu.Unlock()
+		return false
+	}
+	b.lastHash[topic] = h
+
+	// Snapshot subscribers while we hold the lock.
+	subscribers := b.topics[topic]
+	channels := make([]chan string, 0, len(subscribers))
+	for ch := range subscribers {
+		channels = append(channels, ch)
+	}
+	b.mu.Unlock()
+
+	for _, ch := range channels {
+		func() {
+			defer func() { _ = recover() }()
+			select {
+			case ch <- msg:
+			default:
+				b.drops.Add(1)
+			}
+		}()
+	}
+	return true
+}
+
+// ClearDedup resets the deduplication state for the given topic so the next
+// call to [SSEBroker.PublishIfChanged] will always publish regardless of
+// content.
+func (b *SSEBroker) ClearDedup(topic string) {
+	b.mu.Lock()
+	delete(b.lastHash, topic)
+	b.mu.Unlock()
+}
+
 // RunPublisher launches fn in a new goroutine with panic recovery. If fn
 // panics, the panic is recovered and logged (when a logger is configured via
 // [WithLogger]). The goroutine is tracked by the broker's internal wait group
@@ -455,6 +517,7 @@ func (b *SSEBroker) Close() {
 	b.closed = true
 	close(b.done)
 	b.replayCache = nil
+	b.lastHash = nil
 	for topic, subs := range b.topics {
 		for ch := range subs {
 			delete(subs, ch)
