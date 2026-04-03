@@ -21,6 +21,7 @@ import (
 type SSEBroker struct {
 	topics       map[string]map[chan string]struct{}
 	scopedTopics map[string]map[chan string]scopedSub
+	replayCache  map[string]string
 	mu           sync.RWMutex
 	bufferSize   int
 	drops        atomic.Int64
@@ -68,6 +69,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	b := &SSEBroker{
 		topics:       make(map[string]map[chan string]struct{}),
 		scopedTopics: make(map[string]map[chan string]scopedSub),
+		replayCache:  make(map[string]string),
 		bufferSize:   10,
 	}
 	for _, opt := range opts {
@@ -98,7 +100,14 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		b.topics[topic] = make(map[chan string]struct{})
 	}
 	b.topics[topic][ch] = struct{}{}
+	replay, hasReplay := b.replayCache[topic]
 	b.mu.Unlock()
+	if hasReplay {
+		select {
+		case ch <- replay:
+		default:
+		}
+	}
 	return ch, func() {
 		b.mu.Lock()
 		if _, ok := b.topics[topic][ch]; ok {
@@ -126,7 +135,14 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		b.scopedTopics[topic] = make(map[chan string]scopedSub)
 	}
 	b.scopedTopics[topic][ch] = scopedSub{scope: scope}
+	replay, hasReplay := b.replayCache[topic]
 	b.mu.Unlock()
+	if hasReplay {
+		select {
+		case ch <- replay:
+		default:
+		}
+	}
 	return ch, func() {
 		b.mu.Lock()
 		if _, ok := b.scopedTopics[topic][ch]; ok {
@@ -250,6 +266,44 @@ func (b *SSEBroker) Publish(topic, msg string) {
 	}
 }
 
+// PublishWithReplay behaves like [SSEBroker.Publish] but also caches msg so
+// that future subscribers of the topic immediately receive it on connect. Only
+// the most recent message per topic is retained. Use [SSEBroker.ClearReplay]
+// to remove the cached message for a topic.
+func (b *SSEBroker) PublishWithReplay(topic, msg string) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	b.replayCache[topic] = msg
+	subscribers := b.topics[topic]
+	channels := make([]chan string, 0, len(subscribers))
+	for ch := range subscribers {
+		channels = append(channels, ch)
+	}
+	b.mu.Unlock()
+
+	for _, ch := range channels {
+		func() {
+			defer func() { _ = recover() }()
+			select {
+			case ch <- msg:
+			default:
+				b.drops.Add(1)
+			}
+		}()
+	}
+}
+
+// ClearReplay removes the cached replay message for the given topic. Future
+// subscribers will no longer receive a replayed message on connect.
+func (b *SSEBroker) ClearReplay(topic string) {
+	b.mu.Lock()
+	delete(b.replayCache, topic)
+	b.mu.Unlock()
+}
+
 // PublishTo fans out msg only to scoped subscribers of the given topic whose
 // scope matches. It is non-blocking: if a subscriber's channel buffer is full,
 // the message is silently dropped. Publishing to a topic or scope with no
@@ -315,6 +369,7 @@ func (b *SSEBroker) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
+	b.replayCache = nil
 	for topic, subs := range b.topics {
 		for ch := range subs {
 			delete(subs, ch)
