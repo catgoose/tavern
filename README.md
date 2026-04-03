@@ -261,6 +261,36 @@ Clear the cache:
 broker.ClearReplay("dashboard")
 ```
 
+### Last-Event-ID resumption
+
+Track message IDs for gap-free reconnection:
+
+```go
+// Publish with an event ID
+broker.SetReplayPolicy("events", 100) // keep last 100 for resumption
+broker.PublishWithID("events", "evt-42", msg)
+broker.PublishWithID("events", "evt-43", msg2)
+```
+
+When a client reconnects, the browser sends the `Last-Event-ID` header.
+Use `SubscribeFromID` to replay only the missed messages:
+
+```go
+func sseHandler(broker *tavern.SSEBroker) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        lastID := r.Header.Get("Last-Event-ID")
+        ch, unsub := broker.SubscribeFromID("events", lastID)
+        defer unsub()
+        // ... write messages to response ...
+    }
+}
+```
+
+If `lastID` is empty (first connection), all cached messages are replayed.
+If `lastID` is found, only newer messages are replayed. If `lastID` is not
+in the replay log (too old), no replay occurs and only live messages are
+delivered.
+
 ### Debounce and throttle
 
 Control publish frequency for rapid state changes:

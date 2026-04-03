@@ -627,3 +627,69 @@ func createEvent(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
   <!-- last 20 events replayed on connect, then live updates -->
 </ul>
 ```
+
+---
+
+## 11. Resumable SSE with Last-Event-ID
+
+Use `PublishWithID` and `SubscribeFromID` for gap-free reconnection. When
+a client's connection drops, the browser automatically sends the last
+received event ID on reconnect. The server replays only the missed messages.
+
+### Go setup
+
+```go
+broker.SetReplayPolicy("notifications", 50) // keep last 50 for resumption
+
+var eventSeq atomic.Int64
+
+func publishNotification(broker *tavern.SSEBroker, payload string) {
+    id := fmt.Sprintf("evt-%d", eventSeq.Add(1))
+    msg := tavern.NewSSEMessage("notification", payload).WithID(id).String()
+    broker.PublishWithID("notifications", id, msg)
+}
+```
+
+### Go handler (SSE endpoint)
+
+```go
+func sseHandler(broker *tavern.SSEBroker) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        c.Response().Header().Set("Content-Type", "text/event-stream")
+        c.Response().Header().Set("Cache-Control", "no-cache")
+        c.Response().Header().Set("Connection", "keep-alive")
+
+        lastID := c.Request().Header.Get("Last-Event-ID")
+        ch, unsub := broker.SubscribeFromID("notifications", lastID)
+        defer unsub()
+
+        for {
+            select {
+            case msg, ok := <-ch:
+                if !ok {
+                    return nil
+                }
+                if _, err := fmt.Fprint(c.Response(), msg); err != nil {
+                    return nil
+                }
+                c.Response().Flush()
+            case <-c.Request().Context().Done():
+                return nil
+            }
+        }
+    }
+}
+```
+
+### HTML
+
+```html
+<div hx-ext="sse" sse-connect="/sse/notifications" sse-swap="notification">
+  <!-- EventSource handles Last-Event-ID automatically on reconnect -->
+</div>
+```
+
+> **Tip:** Set the replay policy large enough to cover typical disconnection
+> windows (e.g., 30 seconds of messages). If the client is offline longer
+> than the buffer covers, it gets only live messages -- which is usually the
+> right trade-off.
