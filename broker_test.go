@@ -1,7 +1,10 @@
 package tavern
 
 import (
+	"context"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -668,4 +671,96 @@ func TestPublishWithReplay_AfterClose(t *testing.T) {
 	b.Close()
 
 	assert.NotPanics(t, func() { b.PublishWithReplay("topic", "msg") })
+}
+
+func TestRunPublisher_ContextCancellation(t *testing.T) {
+	b := NewSSEBroker()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var ran atomic.Bool
+	b.RunPublisher(ctx, func(ctx context.Context) {
+		ran.Store(true)
+		<-ctx.Done()
+	})
+
+	// Give the goroutine time to start.
+	time.Sleep(10 * time.Millisecond)
+	require.True(t, ran.Load())
+
+	cancel()
+	// Close should return promptly because publisher exits on cancel.
+	done := make(chan struct{})
+	go func() {
+		b.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked — publisher did not exit after context cancel")
+	}
+}
+
+func TestRunPublisher_PanicRecovery(t *testing.T) {
+	b := NewSSEBroker(WithLogger(slog.Default()))
+
+	b.RunPublisher(context.Background(), func(_ context.Context) {
+		panic("test panic")
+	})
+
+	// Close should return without hanging — the panicking publisher is recovered.
+	done := make(chan struct{})
+	go func() {
+		b.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked — panic was not recovered")
+	}
+}
+
+func TestRunPublisher_PublishesMessages(t *testing.T) {
+	b := NewSSEBroker()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, unsub := b.Subscribe("tick")
+	defer unsub()
+
+	b.RunPublisher(ctx, func(ctx context.Context) {
+		b.Publish("tick", "hello from publisher")
+		<-ctx.Done()
+	})
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "hello from publisher", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for publisher message")
+	}
+
+	cancel()
+	b.Close()
+}
+
+func TestRunPublisher_CloseWaitsForAll(t *testing.T) {
+	b := NewSSEBroker()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var count atomic.Int32
+	for range 5 {
+		b.RunPublisher(ctx, func(ctx context.Context) {
+			count.Add(1)
+			<-ctx.Done()
+		})
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	require.Equal(t, int32(5), count.Load())
+
+	cancel()
+	b.Close()
+	// All publishers have exited if Close returned.
 }
