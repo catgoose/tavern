@@ -23,7 +23,8 @@ import (
 type SSEBroker struct {
 	topics            map[string]map[chan string]struct{}
 	scopedTopics      map[string]map[chan string]scopedSub
-	replayCache       map[string]string
+	replayCache       map[string][]string // topic → recent messages (ring buffer)
+	replaySize        map[string]int      // topic → max messages to keep
 	lastHash          map[string]uint64 // topic → FNV hash of last published message via PublishIfChanged
 	onFirst           map[string][]func(string)
 	onLast            map[string][]func(string)
@@ -37,6 +38,9 @@ type SSEBroker struct {
 	topicTTL          time.Duration
 	topicEmpty        map[string]time.Time
 	done              chan struct{}
+	dropOldest        bool
+	debounce          debouncer
+	throttle          throttler
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -91,13 +95,25 @@ func WithTopicTTL(ttl time.Duration) BrokerOption {
 	}
 }
 
+// WithDropOldest changes the subscriber buffer strategy from drop-newest
+// (default) to drop-oldest. When a subscriber's buffer is full, the oldest
+// buffered message is discarded to make room for the new one. This is useful
+// for dashboards where the latest data is always more relevant than queued
+// historical data.
+func WithDropOldest() BrokerOption {
+	return func(b *SSEBroker) {
+		b.dropOldest = true
+	}
+}
+
 // NewSSEBroker creates a ready-to-use [SSEBroker] with no active topics or
 // subscribers. It accepts optional [BrokerOption] values to override defaults.
 func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	b := &SSEBroker{
 		topics:       make(map[string]map[chan string]struct{}),
 		scopedTopics: make(map[string]map[chan string]scopedSub),
-		replayCache:  make(map[string]string),
+		replayCache:  make(map[string][]string),
+		replaySize:   make(map[string]int),
 		topicEmpty:   make(map[string]time.Time),
 		lastHash:     make(map[string]uint64),
 		onFirst:      make(map[string][]func(string)),
@@ -108,6 +124,8 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	for _, opt := range opts {
 		opt(b)
 	}
+	b.debounce.timers = make(map[string]*debounceEntry)
+	b.throttle.state = make(map[string]*throttleEntry)
 	if b.keepaliveInterval > 0 {
 		go b.keepaliveLoop()
 	}
@@ -144,15 +162,15 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 	if total == 1 {
 		firstHooks = b.onFirst[topic]
 	}
-	replay, hasReplay := b.replayCache[topic]
+	replayMsgs := append([]string(nil), b.replayCache[topic]...)
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
 	for _, fn := range firstHooks {
 		go fn(topic)
 	}
-	if hasReplay {
+	for _, msg := range replayMsgs {
 		select {
-		case ch <- replay:
+		case ch <- msg:
 		default:
 		}
 	}
@@ -197,15 +215,15 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 	if total == 1 {
 		firstHooks = b.onFirst[topic]
 	}
-	replay, hasReplay := b.replayCache[topic]
+	replayMsgs := append([]string(nil), b.replayCache[topic]...)
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
 	for _, fn := range firstHooks {
 		go fn(topic)
 	}
-	if hasReplay {
+	for _, msg := range replayMsgs {
 		select {
-		case ch <- replay:
+		case ch <- msg:
 		default:
 		}
 	}
@@ -338,6 +356,41 @@ func (b *SSEBroker) Stats() BrokerStats {
 	}
 }
 
+// send attempts to send msg on ch. If the channel is full and dropOldest is
+// enabled, it drains the oldest message first. Returns true if sent, false if
+// dropped.
+// send attempts to send msg on ch. If the channel is full and dropOldest is
+// enabled, it drains the oldest message first and counts the drop. Returns
+// true if the new message was sent, false if it was dropped entirely.
+func (b *SSEBroker) send(ch chan string, msg string) bool {
+	if b.dropOldest {
+		select {
+		case ch <- msg:
+			return true
+		default:
+			// Channel full — drain oldest and count it as a drop.
+			select {
+			case <-ch:
+				b.drops.Add(1)
+			default:
+			}
+			// Try again.
+			select {
+			case ch <- msg:
+				return true
+			default:
+				return false
+			}
+		}
+	}
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
 // Publish fans out msg to every subscriber of the given topic. It is
 // non-blocking: if a subscriber's channel buffer is full, the message is
 // silently dropped for that subscriber rather than blocking the publisher.
@@ -360,9 +413,7 @@ func (b *SSEBroker) Publish(topic, msg string) {
 		// Recover from the resulting panic rather than adding complex synchronization.
 		func() {
 			defer func() { _ = recover() }()
-			select {
-			case ch <- msg:
-			default:
+			if !b.send(ch, msg) {
 				b.drops.Add(1)
 			}
 		}()
@@ -379,7 +430,16 @@ func (b *SSEBroker) PublishWithReplay(topic, msg string) {
 		b.mu.Unlock()
 		return
 	}
-	b.replayCache[topic] = msg
+	maxSize := 1
+	if n, ok := b.replaySize[topic]; ok {
+		maxSize = n
+	}
+	msgs := b.replayCache[topic]
+	msgs = append(msgs, msg)
+	if len(msgs) > maxSize {
+		msgs = msgs[len(msgs)-maxSize:]
+	}
+	b.replayCache[topic] = msgs
 	subscribers := b.topics[topic]
 	channels := make([]chan string, 0, len(subscribers))
 	for ch := range subscribers {
@@ -390,12 +450,27 @@ func (b *SSEBroker) PublishWithReplay(topic, msg string) {
 	for _, ch := range channels {
 		func() {
 			defer func() { _ = recover() }()
-			select {
-			case ch <- msg:
-			default:
+			if !b.send(ch, msg) {
 				b.drops.Add(1)
 			}
 		}()
+	}
+}
+
+// SetReplayPolicy sets how many recent messages to cache for replay on the
+// given topic. New subscribers receive up to n cached messages in order before
+// live messages. Use n=0 to disable replay for the topic.
+func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n <= 0 {
+		delete(b.replaySize, topic)
+		delete(b.replayCache, topic)
+		return
+	}
+	b.replaySize[topic] = n
+	if msgs := b.replayCache[topic]; len(msgs) > n {
+		b.replayCache[topic] = msgs[len(msgs)-n:]
 	}
 }
 
@@ -404,6 +479,7 @@ func (b *SSEBroker) PublishWithReplay(topic, msg string) {
 func (b *SSEBroker) ClearReplay(topic string) {
 	b.mu.Lock()
 	delete(b.replayCache, topic)
+	delete(b.replaySize, topic)
 	b.mu.Unlock()
 }
 
@@ -429,9 +505,7 @@ func (b *SSEBroker) PublishTo(topic, scope, msg string) {
 	for _, ch := range channels {
 		func() {
 			defer func() { _ = recover() }()
-			select {
-			case ch <- msg:
-			default:
+			if !b.send(ch, msg) {
 				b.drops.Add(1)
 			}
 		}()
@@ -478,9 +552,7 @@ func (b *SSEBroker) PublishIfChanged(topic, msg string) bool {
 	for _, ch := range channels {
 		func() {
 			defer func() { _ = recover() }()
-			select {
-			case ch <- msg:
-			default:
+			if !b.send(ch, msg) {
 				b.drops.Add(1)
 			}
 		}()
@@ -570,13 +642,14 @@ func (b *SSEBroker) sendKeepalive() {
 func (b *SSEBroker) Close() {
 	b.publishers.Wait()
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
+		b.mu.Unlock()
 		return
 	}
 	b.closed = true
 	close(b.done)
 	b.replayCache = nil
+	b.replaySize = nil
 	b.lastHash = nil
 	for topic, subs := range b.topics {
 		for ch := range subs {
@@ -592,6 +665,21 @@ func (b *SSEBroker) Close() {
 		}
 		delete(b.scopedTopics, topic)
 	}
+	b.mu.Unlock()
+	b.debounce.mu.Lock()
+	for topic, entry := range b.debounce.timers {
+		entry.timer.Stop()
+		delete(b.debounce.timers, topic)
+	}
+	b.debounce.mu.Unlock()
+	b.throttle.mu.Lock()
+	for topic, entry := range b.throttle.state {
+		if entry.timer != nil {
+			entry.timer.Stop()
+		}
+		delete(b.throttle.state, topic)
+	}
+	b.throttle.mu.Unlock()
 }
 
 // startTopicSweep periodically removes topics that have had zero subscribers

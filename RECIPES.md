@@ -512,3 +512,118 @@ es.addEventListener("message", (e) => {
   feed.insertAdjacentHTML("beforeend", e.data);
 });
 ```
+
+---
+
+## 8. Debounced search with SSE results
+
+Publish search results via SSE only after the user stops typing. The server
+debounces rapid keystrokes so only the final query triggers rendering and
+publishing.
+
+### Go handler (search endpoint)
+
+```go
+func searchHandler(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        query := c.QueryParam("q")
+        results := search(db, query)
+        html := renderSearchResults(results)
+
+        // Only publish after 300ms of quiet — rapid typing resets the timer.
+        broker.PublishDebounced("search-"+userID(c), html, 300*time.Millisecond)
+
+        return c.NoContent(http.StatusOK)
+    }
+}
+```
+
+### HTML
+
+```html
+<input type="search"
+       hx-get="/search"
+       hx-trigger="keyup changed delay:100ms"
+       hx-target="#search-results"
+       hx-swap="none"
+       name="q" />
+
+<div id="search-results"
+     hx-ext="sse"
+     sse-connect="/sse?topic=search-user123"
+     sse-swap="message">
+</div>
+```
+
+---
+
+## 9. Throttled live dashboard
+
+Rate-limit a high-frequency data source to publish at most once per second.
+The first update shows immediately; subsequent updates are coalesced.
+
+### Go publisher
+
+```go
+func startMetricsPublisher(ctx context.Context, broker *tavern.SSEBroker) {
+    broker.RunPublisher(ctx, func(ctx context.Context) {
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case sample := <-metricsChannel:
+                html := renderMetricsPanel(sample)
+                // At most 1 publish per second, latest data wins.
+                broker.PublishThrottled("metrics", html, time.Second)
+            }
+        }
+    })
+}
+```
+
+### HTML
+
+```html
+<div id="metrics-panel"
+     hx-ext="sse"
+     sse-connect="/sse?topic=metrics"
+     sse-swap="message">
+  <!-- updates at most once per second -->
+</div>
+```
+
+---
+
+## 10. Activity feed with replay history
+
+New visitors to the activity page immediately see the last 20 events, then
+receive live updates as they happen.
+
+### Go setup
+
+```go
+broker.SetReplayPolicy("activity", 20)
+
+func createEvent(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        event := persistEvent(db, c)
+        html := renderActivityItem(event)
+
+        // Cached for replay + published to live subscribers
+        broker.PublishWithReplay("activity", html)
+
+        return c.NoContent(http.StatusCreated)
+    }
+}
+```
+
+### HTML
+
+```html
+<ul id="activity-feed"
+    hx-ext="sse"
+    sse-connect="/sse?topic=activity"
+    sse-swap="message">
+  <!-- last 20 events replayed on connect, then live updates -->
+</ul>
+```
