@@ -1,5 +1,35 @@
 # tavern
 
+<!--toc:start-->
+
+- [tavern](#tavern)
+  - [Why](#why)
+  - [Install](#install)
+  - [Usage](#usage)
+    - [Create a broker](#create-a-broker)
+    - [Subscribe and unsubscribe](#subscribe-and-unsubscribe)
+    - [Scoped subscriptions](#scoped-subscriptions)
+    - [Publish](#publish)
+    - [Format SSE messages](#format-sse-messages)
+    - [Graceful shutdown](#graceful-shutdown)
+    - [Check for subscribers](#check-for-subscribers)
+    - [Echo SSE endpoint](#echo-sse-endpoint)
+    - [Broker options](#broker-options)
+    - [Replay](#replay)
+    - [Last-Event-ID resumption](#last-event-id-resumption)
+    - [Debounce and throttle](#debounce-and-throttle)
+    - [Topic metrics](#topic-metrics)
+  - [OOB Fragments](#oob-fragments)
+    - [Component interface](#component-interface)
+    - [Raw fragment rendering](#raw-fragment-rendering)
+  - [Topic constants](#topic-constants)
+  - [Thread safety](#thread-safety)
+  - [Philosophy](#philosophy)
+  - [Architecture](#architecture)
+    - [SSE flow](#sse-flow)
+  - [License](#license)
+  <!--toc:end-->
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/catgoose/tavern.svg)](https://pkg.go.dev/github.com/catgoose/tavern)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -24,32 +54,33 @@ SSE.
 
 ```go
 var (
-    mu          sync.RWMutex
-    subscribers map[string][]chan string
+	mu          sync.RWMutex
+	subscribers map[string][]chan string
 )
 
 func publish(topic, msg string) {
-    mu.RLock()
-    defer mu.RUnlock()
-    for _, ch := range subscribers[topic] {
-        select {
-        case ch <- msg: // non-blocking send
-        default:        // drop if full
-        }
-    }
+	mu.RLock()
+	defer mu.RUnlock()
+	for _, ch := range subscribers[topic] {
+		select {
+		case ch <- msg: // non-blocking send
+		default: // drop if full
+		}
+	}
 }
 
 func subscribe(topic string) (chan string, func()) {
-    mu.Lock()
-    ch := make(chan string, 16)
-    subscribers[topic] = append(subscribers[topic], ch)
-    mu.Unlock()
-    return ch, func() {
-        mu.Lock()
-        defer mu.Unlock()
-        // find and remove ch from the slice, close it...
-    }
+	mu.Lock()
+	ch := make(chan string, 16)
+	subscribers[topic] = append(subscribers[topic], ch)
+	mu.Unlock()
+	return ch, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		// find and remove ch from the slice, close it...
+	}
 }
+
 // Now handle graceful shutdown, topic cleanup, subscriber counting...
 ```
 
@@ -95,7 +126,7 @@ ch, unsub := broker.Subscribe("events")
 defer unsub()
 
 for msg := range ch {
-    // handle msg
+	// handle msg
 }
 ```
 
@@ -112,7 +143,7 @@ ch, unsub := broker.SubscribeScoped("notifications", userID)
 defer unsub()
 
 for msg := range ch {
-    // only messages published to this userID arrive here
+	// only messages published to this userID arrive here
 }
 ```
 
@@ -126,7 +157,7 @@ For OOB fragments targeted to a single scope:
 
 ```go
 broker.PublishOOBTo("notifications", userID,
-    tavern.Replace("alert-badge", `<span>3</span>`),
+	tavern.Replace("alert-badge", `<span>3</span>`),
 )
 ```
 
@@ -157,9 +188,9 @@ msg := tavern.NewSSEMessage("update", `{"id":1}`).String()
 
 // With ID and retry
 msg := tavern.NewSSEMessage("update", `{"id":1}`).
-    WithID("42").
-    WithRetry(5000).
-    String()
+	WithID("42").
+	WithRetry(5000).
+	String()
 // event: update
 // data: {"id":1}
 // id: 42
@@ -181,8 +212,8 @@ Skip expensive serialization when nobody is listening:
 
 ```go
 if broker.HasSubscribers("system-stats") {
-    stats := collectStats()
-    broker.Publish("system-stats", toJSON(stats))
+	stats := collectStats()
+	broker.Publish("system-stats", toJSON(stats))
 }
 ```
 
@@ -194,29 +225,29 @@ if broker.HasSubscribers("system-stats") {
 
 ```go
 func sseHandler(broker *tavern.SSEBroker) echo.HandlerFunc {
-    return func(c echo.Context) error {
-        c.Response().Header().Set("Content-Type", "text/event-stream")
-        c.Response().Header().Set("Cache-Control", "no-cache")
-        c.Response().Header().Set("Connection", "keep-alive")
+	return func(c echo.Context) error {
+		c.Response().Header().Set("Content-Type", "text/event-stream")
+		c.Response().Header().Set("Cache-Control", "no-cache")
+		c.Response().Header().Set("Connection", "keep-alive")
 
-        ch, unsub := broker.Subscribe("events")
-        defer unsub()
+		ch, unsub := broker.Subscribe("events")
+		defer unsub()
 
-        for {
-            select {
-            case msg, ok := <-ch:
-                if !ok {
-                    return nil // broker closed
-                }
-                if _, err := fmt.Fprint(c.Response(), msg); err != nil {
-                    return nil // client disconnected
-                }
-                c.Response().Flush()
-            case <-c.Request().Context().Done():
-                return nil
-            }
-        }
-    }
+		for {
+			select {
+			case msg, ok := <-ch:
+				if !ok {
+					return nil // broker closed
+				}
+				if _, err := fmt.Fprint(c.Response(), msg); err != nil {
+					return nil // client disconnected
+				}
+				c.Response().Flush()
+			case <-c.Request().Context().Done():
+				return nil
+			}
+		}
+	}
 }
 ```
 
@@ -277,12 +308,12 @@ Use `SubscribeFromID` to replay only the missed messages:
 
 ```go
 func sseHandler(broker *tavern.SSEBroker) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        lastID := r.Header.Get("Last-Event-ID")
-        ch, unsub := broker.SubscribeFromID("events", lastID)
-        defer unsub()
-        // ... write messages to response ...
-    }
+	return func(w http.ResponseWriter, r *http.Request) {
+		lastID := r.Header.Get("Last-Event-ID")
+		ch, unsub := broker.SubscribeFromID("events", lastID)
+		defer unsub()
+		// ... write messages to response ...
+	}
 }
 ```
 
@@ -318,7 +349,7 @@ where you want bounded latency.
 // Per-topic subscriber counts
 counts := broker.TopicCounts()
 for topic, n := range counts {
-    fmt.Printf("%s: %d subscribers\n", topic, n)
+	fmt.Printf("%s: %d subscribers\n", topic, n)
 }
 ```
 
@@ -348,10 +379,10 @@ unexpected drop rates:
 
 ```go
 go func() {
-    for range time.Tick(30 * time.Second) {
-        s := broker.Stats()
-        slog.Info("broker", "topics", s.Topics, "subs", s.Subscribers, "drops", s.PublishDrops)
-    }
+	for range time.Tick(30 * time.Second) {
+		s := broker.Stats()
+		slog.Info("broker", "topics", s.Topics, "subs", s.Subscribers, "drops", s.PublishDrops)
+	}
 }()
 ```
 
@@ -363,9 +394,9 @@ targeted DOM mutations and publish them as a single event:
 ```go
 // Replace, Append, Prepend, Delete — plain string helpers
 broker.PublishOOB("events",
-    tavern.Replace("stats-bar", "<span>42</span>"),
-    tavern.Delete("task-row-5"),
-    tavern.Append("activity-feed", "<li>New item</li>"),
+	tavern.Replace("stats-bar", "<span>42</span>"),
+	tavern.Delete("task-row-5"),
+	tavern.Append("activity-feed", "<li>New item</li>"),
 )
 ```
 
@@ -377,7 +408,7 @@ not import templ.
 
 ```go
 type Component interface {
-    Render(ctx context.Context, w io.Writer) error
+	Render(ctx context.Context, w io.Writer) error
 }
 ```
 
@@ -385,8 +416,8 @@ Use the component helpers to render and wrap in one call:
 
 ```go
 broker.PublishOOB("events",
-    tavern.ReplaceComponent("stats-bar", views.StatsBar(stats)),
-    tavern.AppendComponent("feed", views.FeedItem(item)),
+	tavern.ReplaceComponent("stats-bar", views.StatsBar(stats)),
+	tavern.AppendComponent("feed", views.FeedItem(item)),
 )
 ```
 
@@ -399,8 +430,8 @@ For manual control, render fragments to a string and publish directly:
 
 ```go
 html := tavern.RenderFragments(
-    tavern.Replace("header", "<h1>Updated</h1>"),
-    tavern.Delete("old-banner"),
+	tavern.Replace("header", "<h1>Updated</h1>"),
+	tavern.Delete("old-banner"),
 )
 broker.Publish("events", tavern.NewSSEMessage("oob", html).String())
 ```
