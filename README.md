@@ -35,6 +35,7 @@
   - [Observability](#observability)
     - [Check for subscribers](#check-for-subscribers)
     - [Topic metrics](#topic-metrics)
+    - [Per-topic metrics](#per-topic-metrics)
   - [Topic constants](#topic-constants)
   - [Thread safety](#thread-safety)
   - [Philosophy](#philosophy)
@@ -622,6 +623,27 @@ go func() {
 	}
 }()
 ```
+
+### Per-topic metrics
+
+Enable detailed per-topic publish and drop counters with `WithMetrics`:
+
+```go
+broker := tavern.NewSSEBroker(tavern.WithMetrics())
+
+// ... publish messages ...
+
+m := broker.Metrics()
+for topic, stats := range m.TopicStats {
+    fmt.Printf("%s: published=%d dropped=%d peak_subs=%d\n",
+        topic, stats.Published, stats.Dropped, stats.PeakSubscribers)
+}
+fmt.Printf("totals: published=%d dropped=%d\n", m.TotalPublished, m.TotalDropped)
+```
+
+Metrics are opt-in — when `WithMetrics` is not set, there is zero overhead on
+publish operations. Use this to identify topics with high drop rates, track
+publish throughput, and find peak subscriber counts for capacity planning.
 
 ## Topic constants
 

@@ -43,13 +43,22 @@ func (b *SSEBroker) PublishWithID(topic, id, msg string) {
 	}
 	b.mu.Unlock()
 
+	var sent, dropped int
 	for _, ch := range channels {
 		func() {
 			defer func() { _ = recover() }()
-			if !b.send(ch, msg) {
+			if b.send(ch, msg) {
+				sent++
+			} else {
 				b.drops.Add(1)
+				dropped++
 			}
 		}()
+	}
+	if b.metrics != nil {
+		tc := b.metrics.counter(topic)
+		tc.published.Add(int64(sent))
+		tc.dropped.Add(int64(dropped))
 	}
 }
 
@@ -79,6 +88,11 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 	var firstHooks []func(string)
 	if total == 1 {
 		firstHooks = b.onFirst[topic]
+	}
+	if b.metrics != nil {
+		if total > b.metrics.peakSubs[topic] {
+			b.metrics.peakSubs[topic] = total
+		}
 	}
 
 	// Find messages after lastEventID.

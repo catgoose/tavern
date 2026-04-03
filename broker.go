@@ -42,6 +42,7 @@ type SSEBroker struct {
 	dropOldest        bool
 	debounce          debouncer
 	throttle          throttler
+	metrics           *metricsState // nil when metrics disabled
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -164,6 +165,11 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 	if total == 1 {
 		firstHooks = b.onFirst[topic]
 	}
+	if b.metrics != nil {
+		if total > b.metrics.peakSubs[topic] {
+			b.metrics.peakSubs[topic] = total
+		}
+	}
 	replayMsgs := append([]string(nil), b.replayCache[topic]...)
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
@@ -216,6 +222,11 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 	var firstHooks []func(string)
 	if total == 1 {
 		firstHooks = b.onFirst[topic]
+	}
+	if b.metrics != nil {
+		if total > b.metrics.peakSubs[topic] {
+			b.metrics.peakSubs[topic] = total
+		}
 	}
 	replayMsgs := append([]string(nil), b.replayCache[topic]...)
 	delete(b.topicEmpty, topic)
@@ -410,15 +421,24 @@ func (b *SSEBroker) Publish(topic, msg string) {
 	}
 	b.mu.RUnlock()
 
+	var sent, dropped int
 	for _, ch := range channels {
 		// Channel may have been closed by unsub() between the snapshot and now.
 		// Recover from the resulting panic rather than adding complex synchronization.
 		func() {
 			defer func() { _ = recover() }()
-			if !b.send(ch, msg) {
+			if b.send(ch, msg) {
+				sent++
+			} else {
 				b.drops.Add(1)
+				dropped++
 			}
 		}()
+	}
+	if b.metrics != nil {
+		tc := b.metrics.counter(topic)
+		tc.published.Add(int64(sent))
+		tc.dropped.Add(int64(dropped))
 	}
 }
 
@@ -449,13 +469,22 @@ func (b *SSEBroker) PublishWithReplay(topic, msg string) {
 	}
 	b.mu.Unlock()
 
+	var sent, dropped int
 	for _, ch := range channels {
 		func() {
 			defer func() { _ = recover() }()
-			if !b.send(ch, msg) {
+			if b.send(ch, msg) {
+				sent++
+			} else {
 				b.drops.Add(1)
+				dropped++
 			}
 		}()
+	}
+	if b.metrics != nil {
+		tc := b.metrics.counter(topic)
+		tc.published.Add(int64(sent))
+		tc.dropped.Add(int64(dropped))
 	}
 }
 
@@ -509,13 +538,22 @@ func (b *SSEBroker) PublishTo(topic, scope, msg string) {
 	}
 	b.mu.RUnlock()
 
+	var sent, dropped int
 	for _, ch := range channels {
 		func() {
 			defer func() { _ = recover() }()
-			if !b.send(ch, msg) {
+			if b.send(ch, msg) {
+				sent++
+			} else {
 				b.drops.Add(1)
+				dropped++
 			}
 		}()
+	}
+	if b.metrics != nil {
+		tc := b.metrics.counter(topic)
+		tc.published.Add(int64(sent))
+		tc.dropped.Add(int64(dropped))
 	}
 }
 
@@ -556,13 +594,22 @@ func (b *SSEBroker) PublishIfChanged(topic, msg string) bool {
 	}
 	b.mu.Unlock()
 
+	var sent, dropped int
 	for _, ch := range channels {
 		func() {
 			defer func() { _ = recover() }()
-			if !b.send(ch, msg) {
+			if b.send(ch, msg) {
+				sent++
+			} else {
 				b.drops.Add(1)
+				dropped++
 			}
 		}()
+	}
+	if b.metrics != nil {
+		tc := b.metrics.counter(topic)
+		tc.published.Add(int64(sent))
+		tc.dropped.Add(int64(dropped))
 	}
 	return true
 }
@@ -598,13 +645,22 @@ func (b *SSEBroker) PublishIfChangedTo(topic, scope, msg string) bool {
 	}
 	b.mu.Unlock()
 
+	var sent, dropped int
 	for _, ch := range channels {
 		func() {
 			defer func() { _ = recover() }()
-			if !b.send(ch, msg) {
+			if b.send(ch, msg) {
+				sent++
+			} else {
 				b.drops.Add(1)
+				dropped++
 			}
 		}()
+	}
+	if b.metrics != nil {
+		tc := b.metrics.counter(topic)
+		tc.published.Add(int64(sent))
+		tc.dropped.Add(int64(dropped))
 	}
 	return true
 }
