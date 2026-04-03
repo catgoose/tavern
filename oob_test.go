@@ -153,6 +153,63 @@ func TestRenderFragments_EscapesID(t *testing.T) {
 	assert.Contains(t, html2, `id="x&quot;y"`)
 }
 
+func TestPublishIfChangedOOB_PublishesOnChange(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	ok := b.PublishIfChangedOOB("t", Replace("el", "<b>v1</b>"))
+	assert.True(t, ok)
+
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "v1")
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestPublishIfChangedOOB_SkipsDuplicate(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	ok1 := b.PublishIfChangedOOB("t", Replace("el", "<b>v1</b>"))
+	assert.True(t, ok1)
+	<-ch // drain
+
+	ok2 := b.PublishIfChangedOOB("t", Replace("el", "<b>v1</b>"))
+	assert.False(t, ok2)
+
+	select {
+	case <-ch:
+		t.Fatal("should not have received duplicate")
+	default:
+	}
+}
+
+func TestPublishIfChangedOOBTo_ScopedDelivery(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("t", "user-1")
+	defer unsub()
+
+	ok := b.PublishIfChangedOOBTo("t", "user-1", Replace("el", "<b>scoped</b>"))
+	assert.True(t, ok)
+
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "scoped")
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}
+
 func TestRenderComponentError_EscapesComment(t *testing.T) {
 	// An error message containing --> must not break out of the HTML comment.
 	// escapeAttr replaces > with &gt;, turning --> into --&gt; inside the comment body.
