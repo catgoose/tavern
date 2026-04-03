@@ -101,3 +101,21 @@ func (b *SSEBroker) PublishOOB(topic string, fragments ...Fragment) {
 func (b *SSEBroker) PublishOOBTo(topic, scope string, fragments ...Fragment) {
 	b.PublishTo(topic, scope, RenderFragments(fragments...))
 }
+
+// PublishIfChangedOOB renders the given fragments and publishes the result
+// to the topic only if it differs from the last message published via
+// [SSEBroker.PublishIfChanged] for that topic. Returns true if published
+// (content changed), false if skipped (identical).
+func (b *SSEBroker) PublishIfChangedOOB(topic string, fragments ...Fragment) bool {
+	msg := NewSSEMessage("oob", RenderFragments(fragments...)).String()
+	return b.PublishIfChanged(topic, msg)
+}
+
+// PublishIfChangedOOBTo renders the given fragments and publishes the result
+// only to scoped subscribers of the topic whose scope matches, and only if
+// the content differs from the last publish for that topic+scope. Returns
+// true if published, false if skipped.
+func (b *SSEBroker) PublishIfChangedOOBTo(topic, scope string, fragments ...Fragment) bool {
+	msg := NewSSEMessage("oob", RenderFragments(fragments...)).String()
+	return b.PublishIfChangedTo(topic, scope, msg)
+}

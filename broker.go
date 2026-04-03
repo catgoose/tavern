@@ -567,6 +567,48 @@ func (b *SSEBroker) PublishIfChanged(topic, msg string) bool {
 	return true
 }
 
+// PublishIfChangedTo publishes msg to scoped subscribers of the given topic
+// only when it differs from the last message published via PublishIfChangedTo
+// for that topic+scope combination. Returns true if published, false if skipped.
+// Comparison is done via an FNV-64a hash of the message content.
+func (b *SSEBroker) PublishIfChangedTo(topic, scope, msg string) bool {
+	key := topic + "\x00" + scope
+	h := hashMsg(msg)
+
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return false
+	}
+	if prev, ok := b.lastHash[key]; ok && prev == h {
+		b.mu.Unlock()
+		return false
+	}
+	b.lastHash[key] = h
+
+	scopedSubs, exists := b.scopedTopics[topic]
+	var channels []chan string
+	if exists {
+		channels = make([]chan string, 0, len(scopedSubs))
+		for ch, sub := range scopedSubs {
+			if sub.scope == scope {
+				channels = append(channels, ch)
+			}
+		}
+	}
+	b.mu.Unlock()
+
+	for _, ch := range channels {
+		func() {
+			defer func() { _ = recover() }()
+			if !b.send(ch, msg) {
+				b.drops.Add(1)
+			}
+		}()
+	}
+	return true
+}
+
 // ClearDedup resets the deduplication state for the given topic so the next
 // call to [SSEBroker.PublishIfChanged] will always publish regardless of
 // content.

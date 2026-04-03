@@ -1502,3 +1502,72 @@ func TestWithDropOldest_WorksWithPublishTo(t *testing.T) {
 
 	assert.Equal(t, []string{"msg-2", "msg-3"}, got)
 }
+
+func TestPublishIfChangedTo_BasicDelivery(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("t", "s1")
+	defer unsub()
+
+	ok := b.PublishIfChangedTo("t", "s1", "hello")
+	assert.True(t, ok)
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "hello", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestPublishIfChangedTo_SkipsDuplicate(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("t", "s1")
+	defer unsub()
+
+	ok1 := b.PublishIfChangedTo("t", "s1", "hello")
+	assert.True(t, ok1)
+	<-ch
+
+	ok2 := b.PublishIfChangedTo("t", "s1", "hello")
+	assert.False(t, ok2)
+}
+
+func TestPublishIfChangedTo_IndependentScopes(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch1, unsub1 := b.SubscribeScoped("t", "s1")
+	defer unsub1()
+	ch2, unsub2 := b.SubscribeScoped("t", "s2")
+	defer unsub2()
+
+	// Same message to different scopes — both should publish
+	ok1 := b.PublishIfChangedTo("t", "s1", "same")
+	ok2 := b.PublishIfChangedTo("t", "s2", "same")
+	assert.True(t, ok1)
+	assert.True(t, ok2)
+
+	select {
+	case msg := <-ch1:
+		assert.Equal(t, "same", msg)
+	case <-time.After(time.Second):
+		t.Fatal("s1 timed out")
+	}
+	select {
+	case msg := <-ch2:
+		assert.Equal(t, "same", msg)
+	case <-time.After(time.Second):
+		t.Fatal("s2 timed out")
+	}
+}
+
+func TestPublishIfChangedTo_AfterClose(t *testing.T) {
+	b := NewSSEBroker()
+	b.Close()
+	ok := b.PublishIfChangedTo("t", "s", "msg")
+	assert.False(t, ok)
+}
