@@ -1112,3 +1112,160 @@ func TestPublishIfChanged_EmptyMessage(t *testing.T) {
 	default:
 	}
 }
+
+func TestOnFirstSubscriber_FiresOnFirstSub(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	fired := make(chan string, 1)
+	b.OnFirstSubscriber("t", func(topic string) { fired <- topic })
+
+	_, unsub := b.Subscribe("t")
+	defer unsub()
+
+	select {
+	case got := <-fired:
+		assert.Equal(t, "t", got)
+	case <-time.After(time.Second):
+		t.Fatal("hook did not fire")
+	}
+}
+
+func TestOnLastUnsubscribe_FiresWhenLastLeaves(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	fired := make(chan string, 1)
+	b.OnLastUnsubscribe("t", func(topic string) { fired <- topic })
+
+	_, unsub := b.Subscribe("t")
+	unsub()
+
+	select {
+	case got := <-fired:
+		assert.Equal(t, "t", got)
+	case <-time.After(time.Second):
+		t.Fatal("hook did not fire")
+	}
+}
+
+func TestLifecycleHooks_MultipleHooksPerTopic(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	fired := make(chan int, 2)
+	b.OnFirstSubscriber("t", func(string) { fired <- 1 })
+	b.OnFirstSubscriber("t", func(string) { fired <- 2 })
+
+	_, unsub := b.Subscribe("t")
+	defer unsub()
+
+	got := make(map[int]bool)
+	for range 2 {
+		select {
+		case v := <-fired:
+			got[v] = true
+		case <-time.After(time.Second):
+			t.Fatal("hook did not fire")
+		}
+	}
+	assert.True(t, got[1])
+	assert.True(t, got[2])
+}
+
+func TestLifecycleHooks_SurvivesSubscriberCycles(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	count := make(chan string, 2)
+	b.OnFirstSubscriber("t", func(topic string) { count <- topic })
+
+	// First cycle.
+	_, unsub1 := b.Subscribe("t")
+	select {
+	case <-count:
+	case <-time.After(time.Second):
+		t.Fatal("first hook did not fire")
+	}
+	unsub1()
+
+	// Second cycle — hook should fire again.
+	_, unsub2 := b.Subscribe("t")
+	defer unsub2()
+	select {
+	case <-count:
+	case <-time.After(time.Second):
+		t.Fatal("hook did not fire on second cycle")
+	}
+}
+
+func TestLifecycleHooks_CountsBothScopedAndUnscoped(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	lastFired := make(chan string, 1)
+	b.OnLastUnsubscribe("t", func(topic string) { lastFired <- topic })
+
+	// Subscribe unscoped then scoped — total 2.
+	_, unsubUnscoped := b.Subscribe("t")
+	_, unsubScoped := b.SubscribeScoped("t", "s1")
+
+	// Remove unscoped — total still 1, onLast should NOT fire.
+	unsubUnscoped()
+	select {
+	case <-lastFired:
+		t.Fatal("onLast fired while scoped subscriber still active")
+	case <-time.After(100 * time.Millisecond):
+		// expected
+	}
+
+	// Remove scoped — total now 0, onLast should fire.
+	unsubScoped()
+	select {
+	case got := <-lastFired:
+		assert.Equal(t, "t", got)
+	case <-time.After(time.Second):
+		t.Fatal("onLast did not fire")
+	}
+}
+
+func TestLifecycleHooks_ClosedBroker(t *testing.T) {
+	b := NewSSEBroker()
+	b.Close()
+
+	fired := make(chan string, 1)
+	b.OnFirstSubscriber("t", func(topic string) { fired <- topic })
+
+	_, unsub := b.Subscribe("t")
+	defer unsub()
+
+	select {
+	case <-fired:
+		t.Fatal("hook should not fire on closed broker")
+	case <-time.After(100 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestOnFirstSubscriber_NonBlocking(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.OnFirstSubscriber("t", func(string) {
+		time.Sleep(500 * time.Millisecond)
+	})
+
+	done := make(chan struct{})
+	go func() {
+		_, unsub := b.Subscribe("t")
+		defer unsub()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Subscribe returned quickly — not blocked by slow hook.
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Subscribe was blocked by slow hook")
+	}
+}

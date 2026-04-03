@@ -25,6 +25,8 @@ type SSEBroker struct {
 	scopedTopics      map[string]map[chan string]scopedSub
 	replayCache       map[string]string
 	lastHash          map[string]uint64 // topic → FNV hash of last published message via PublishIfChanged
+	onFirst           map[string][]func(string)
+	onLast            map[string][]func(string)
 	mu                sync.RWMutex
 	bufferSize        int
 	drops             atomic.Int64
@@ -98,6 +100,8 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 		replayCache:  make(map[string]string),
 		topicEmpty:   make(map[string]time.Time),
 		lastHash:     make(map[string]uint64),
+		onFirst:      make(map[string][]func(string)),
+		onLast:       make(map[string][]func(string)),
 		bufferSize:   10,
 		done:         make(chan struct{}),
 	}
@@ -135,9 +139,17 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		b.topics[topic] = make(map[chan string]struct{})
 	}
 	b.topics[topic][ch] = struct{}{}
+	total := len(b.topics[topic]) + len(b.scopedTopics[topic])
+	var firstHooks []func(string)
+	if total == 1 {
+		firstHooks = b.onFirst[topic]
+	}
 	replay, hasReplay := b.replayCache[topic]
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
+	for _, fn := range firstHooks {
+		go fn(topic)
+	}
 	if hasReplay {
 		select {
 		case ch <- replay:
@@ -146,14 +158,20 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 	}
 	return ch, func() {
 		b.mu.Lock()
+		var lastHooks []func(string)
 		if _, ok := b.topics[topic][ch]; ok {
 			delete(b.topics[topic], ch)
 			close(ch)
-			if len(b.topics[topic])+len(b.scopedTopics[topic]) == 0 {
+			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
+			if total == 0 {
+				lastHooks = b.onLast[topic]
 				b.topicEmpty[topic] = time.Now()
 			}
 		}
 		b.mu.Unlock()
+		for _, fn := range lastHooks {
+			go fn(topic)
+		}
 	}
 }
 
@@ -174,9 +192,17 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		b.scopedTopics[topic] = make(map[chan string]scopedSub)
 	}
 	b.scopedTopics[topic][ch] = scopedSub{scope: scope}
+	total := len(b.topics[topic]) + len(b.scopedTopics[topic])
+	var firstHooks []func(string)
+	if total == 1 {
+		firstHooks = b.onFirst[topic]
+	}
 	replay, hasReplay := b.replayCache[topic]
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
+	for _, fn := range firstHooks {
+		go fn(topic)
+	}
 	if hasReplay {
 		select {
 		case ch <- replay:
@@ -185,15 +211,49 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 	}
 	return ch, func() {
 		b.mu.Lock()
+		var lastHooks []func(string)
 		if _, ok := b.scopedTopics[topic][ch]; ok {
 			delete(b.scopedTopics[topic], ch)
 			close(ch)
-			if len(b.topics[topic])+len(b.scopedTopics[topic]) == 0 {
+			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
+			if total == 0 {
+				lastHooks = b.onLast[topic]
 				b.topicEmpty[topic] = time.Now()
 			}
 		}
 		b.mu.Unlock()
+		for _, fn := range lastHooks {
+			go fn(topic)
+		}
 	}
+}
+
+// OnFirstSubscriber registers a callback that fires when the given topic goes
+// from zero to one total subscribers (counting both unscoped and scoped). The
+// callback runs in its own goroutine and does not block Subscribe. Multiple
+// hooks per topic are allowed and all will fire. Hooks persist across
+// subscriber cycles. Calling this on a closed broker is a no-op.
+func (b *SSEBroker) OnFirstSubscriber(topic string, fn func(topic string)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	b.onFirst[topic] = append(b.onFirst[topic], fn)
+}
+
+// OnLastUnsubscribe registers a callback that fires when the given topic goes
+// from one to zero total subscribers (counting both unscoped and scoped). The
+// callback runs in its own goroutine and does not block the unsubscribe call.
+// Multiple hooks per topic are allowed and all will fire. Hooks persist across
+// subscriber cycles. Calling this on a closed broker is a no-op.
+func (b *SSEBroker) OnLastUnsubscribe(topic string, fn func(topic string)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	b.onLast[topic] = append(b.onLast[topic], fn)
 }
 
 // HasSubscribers reports whether the given topic has at least one active
