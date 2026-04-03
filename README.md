@@ -233,6 +233,55 @@ broker := tavern.NewSSEBroker(tavern.WithBufferSize(64))
 defer broker.Close()
 ```
 
+`WithDropOldest` changes the buffer strategy from drop-newest (default) to
+drop-oldest. When a subscriber's buffer is full, the oldest queued message is
+discarded to make room for the new one. Use this for dashboards where stale
+data is worse than gaps.
+
+```go
+broker := tavern.NewSSEBroker(tavern.WithBufferSize(5), tavern.WithDropOldest())
+```
+
+### Replay
+
+Cache recent messages so new subscribers get them immediately on connect:
+
+```go
+// Default: replays last 1 message
+broker.PublishWithReplay("dashboard", msg)
+
+// Replay last 10 messages (activity feed, chat)
+broker.SetReplayPolicy("activity", 10)
+broker.PublishWithReplay("activity", msg) // last 10 cached
+```
+
+Clear the cache:
+
+```go
+broker.ClearReplay("dashboard")
+```
+
+### Debounce and throttle
+
+Control publish frequency for rapid state changes:
+
+```go
+// Debounce: publish only after 200ms of quiet (typing indicators, search)
+broker.PublishDebounced("search-results", html, 200*time.Millisecond)
+
+// Throttle: publish at most once per second, first call immediate
+broker.PublishThrottled("live-stats", html, time.Second)
+```
+
+**Debounce** waits for a quiet period — if new messages keep arriving, the timer
+resets and only the final message is published. Best for user input where you
+want the settled state.
+
+**Throttle** publishes the first message immediately, then rate-limits to at
+most one message per interval. If messages arrive during the cooldown, the most
+recent one is published when the interval elapses. Best for continuous data
+where you want bounded latency.
+
 ### Topic metrics
 
 ```go

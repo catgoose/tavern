@@ -287,9 +287,9 @@ loop:
 		}
 	}
 
-	// Cancel publisher before unsubscribing to avoid send-on-closed-channel race.
+	// Cancel publisher and close broker to wait for goroutines before unsubscribing.
 	cancel()
-	time.Sleep(20 * time.Millisecond)
+	b.Close()
 	unsub()
 
 	// With 50ms base tick and 50ms interval, expect roughly 4-5 messages in 250ms.

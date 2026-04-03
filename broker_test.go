@@ -2,6 +2,7 @@ package tavern
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -1268,4 +1269,236 @@ func TestOnFirstSubscriber_NonBlocking(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("Subscribe was blocked by slow hook")
 	}
+}
+
+// --- ReplayN tests ---
+
+func TestSetReplayPolicy_ReplayN(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("topic", 3)
+
+	for i := 1; i <= 5; i++ {
+		b.PublishWithReplay("topic", fmt.Sprintf("msg-%d", i))
+	}
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	var got []string
+	for i := 0; i < 3; i++ {
+		select {
+		case msg := <-ch:
+			got = append(got, msg)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for replay message")
+		}
+	}
+
+	assert.Equal(t, []string{"msg-3", "msg-4", "msg-5"}, got)
+
+	// No more replay messages.
+	select {
+	case msg := <-ch:
+		t.Fatalf("unexpected extra replay message: %s", msg)
+	default:
+	}
+}
+
+func TestSetReplayPolicy_DefaultOne(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	// No SetReplayPolicy — default should replay last 1.
+	b.PublishWithReplay("topic", "first")
+	b.PublishWithReplay("topic", "second")
+	b.PublishWithReplay("topic", "third")
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "third", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for replay")
+	}
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("unexpected extra replay message: %s", msg)
+	default:
+	}
+}
+
+func TestSetReplayPolicy_Zero(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("topic", 3)
+	b.PublishWithReplay("topic", "msg-1")
+	b.PublishWithReplay("topic", "msg-2")
+
+	// Disable replay.
+	b.SetReplayPolicy("topic", 0)
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("should not have received replay after policy set to 0: %s", msg)
+	default:
+		// expected
+	}
+}
+
+func TestSetReplayPolicy_TrimExisting(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("topic", 5)
+	for i := 1; i <= 5; i++ {
+		b.PublishWithReplay("topic", fmt.Sprintf("msg-%d", i))
+	}
+
+	// Trim down to 2.
+	b.SetReplayPolicy("topic", 2)
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	var got []string
+	for i := 0; i < 2; i++ {
+		select {
+		case msg := <-ch:
+			got = append(got, msg)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for replay message")
+		}
+	}
+
+	assert.Equal(t, []string{"msg-4", "msg-5"}, got)
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("unexpected extra replay message: %s", msg)
+	default:
+	}
+}
+
+func TestSetReplayPolicy_MultipleScopedReplay(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("events", 3)
+	b.PublishWithReplay("events", "e-1")
+	b.PublishWithReplay("events", "e-2")
+	b.PublishWithReplay("events", "e-3")
+
+	ch, unsub := b.SubscribeScoped("events", "scope-1")
+	defer unsub()
+
+	var got []string
+	for i := 0; i < 3; i++ {
+		select {
+		case msg := <-ch:
+			got = append(got, msg)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for scoped replay message")
+		}
+	}
+
+	assert.Equal(t, []string{"e-1", "e-2", "e-3"}, got)
+}
+
+// --- WithDropOldest tests ---
+
+func TestWithDropOldest_DropsOldMessage(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(2), WithDropOldest())
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	// Fill buffer and overflow.
+	b.Publish("topic", "msg-1")
+	b.Publish("topic", "msg-2")
+	b.Publish("topic", "msg-3")
+
+	// Should get msg-2 and msg-3 (msg-1 was dropped as oldest).
+	var got []string
+	for i := 0; i < 2; i++ {
+		select {
+		case msg := <-ch:
+			got = append(got, msg)
+		case <-time.After(time.Second):
+			t.Fatal("timed out")
+		}
+	}
+
+	assert.Equal(t, []string{"msg-2", "msg-3"}, got)
+}
+
+func TestWithDropOldest_DefaultDropNewest(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(2))
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	// Fill buffer and overflow — default drops newest.
+	b.Publish("topic", "msg-1")
+	b.Publish("topic", "msg-2")
+	b.Publish("topic", "msg-3") // dropped
+
+	var got []string
+	for i := 0; i < 2; i++ {
+		select {
+		case msg := <-ch:
+			got = append(got, msg)
+		case <-time.After(time.Second):
+			t.Fatal("timed out")
+		}
+	}
+
+	assert.Equal(t, []string{"msg-1", "msg-2"}, got)
+}
+
+func TestWithDropOldest_CountsDrops(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1), WithDropOldest())
+	defer b.Close()
+
+	_, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	b.Publish("topic", "msg-1")
+	b.Publish("topic", "msg-2") // drops msg-1
+
+	assert.Equal(t, int64(1), b.PublishDrops())
+}
+
+func TestWithDropOldest_WorksWithPublishTo(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(2), WithDropOldest())
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("topic", "scope-1")
+	defer unsub()
+
+	b.PublishTo("topic", "scope-1", "msg-1")
+	b.PublishTo("topic", "scope-1", "msg-2")
+	b.PublishTo("topic", "scope-1", "msg-3")
+
+	var got []string
+	for i := 0; i < 2; i++ {
+		select {
+		case msg := <-ch:
+			got = append(got, msg)
+		case <-time.After(time.Second):
+			t.Fatal("timed out")
+		}
+	}
+
+	assert.Equal(t, []string{"msg-2", "msg-3"}, got)
 }
