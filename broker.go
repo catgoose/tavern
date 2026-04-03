@@ -30,6 +30,8 @@ type SSEBroker struct {
 	publishers        sync.WaitGroup
 	logger            *slog.Logger
 	keepaliveInterval time.Duration
+	topicTTL          time.Duration
+	topicEmpty        map[string]time.Time
 	done              chan struct{}
 }
 
@@ -76,6 +78,15 @@ func WithKeepalive(interval time.Duration) BrokerOption {
 	}
 }
 
+// WithTopicTTL sets how long a topic with zero subscribers may remain in the
+// broker before it is automatically removed. A background goroutine sweeps at
+// half the TTL interval. A zero or negative TTL disables auto-cleanup.
+func WithTopicTTL(ttl time.Duration) BrokerOption {
+	return func(b *SSEBroker) {
+		b.topicTTL = ttl
+	}
+}
+
 // NewSSEBroker creates a ready-to-use [SSEBroker] with no active topics or
 // subscribers. It accepts optional [BrokerOption] values to override defaults.
 func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
@@ -83,6 +94,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 		topics:       make(map[string]map[chan string]struct{}),
 		scopedTopics: make(map[string]map[chan string]scopedSub),
 		replayCache:  make(map[string]string),
+		topicEmpty:   make(map[string]time.Time),
 		bufferSize:   10,
 		done:         make(chan struct{}),
 	}
@@ -91,6 +103,9 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	}
 	if b.keepaliveInterval > 0 {
 		go b.keepaliveLoop()
+	}
+	if b.topicTTL > 0 {
+		go b.startTopicSweep()
 	}
 	return b
 }
@@ -118,6 +133,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 	}
 	b.topics[topic][ch] = struct{}{}
 	replay, hasReplay := b.replayCache[topic]
+	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
 	if hasReplay {
 		select {
@@ -130,6 +146,9 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		if _, ok := b.topics[topic][ch]; ok {
 			delete(b.topics[topic], ch)
 			close(ch)
+			if len(b.topics[topic])+len(b.scopedTopics[topic]) == 0 {
+				b.topicEmpty[topic] = time.Now()
+			}
 		}
 		b.mu.Unlock()
 	}
@@ -153,6 +172,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 	}
 	b.scopedTopics[topic][ch] = scopedSub{scope: scope}
 	replay, hasReplay := b.replayCache[topic]
+	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
 	if hasReplay {
 		select {
@@ -165,6 +185,9 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		if _, ok := b.scopedTopics[topic][ch]; ok {
 			delete(b.scopedTopics[topic], ch)
 			close(ch)
+			if len(b.topics[topic])+len(b.scopedTopics[topic]) == 0 {
+				b.topicEmpty[topic] = time.Now()
+			}
 		}
 		b.mu.Unlock()
 	}
@@ -445,5 +468,28 @@ func (b *SSEBroker) Close() {
 			close(ch)
 		}
 		delete(b.scopedTopics, topic)
+	}
+}
+
+// startTopicSweep periodically removes topics that have had zero subscribers
+// for longer than the configured TTL. It runs until the broker is closed.
+func (b *SSEBroker) startTopicSweep() {
+	ticker := time.NewTicker(b.topicTTL / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-b.done:
+			return
+		case now := <-ticker.C:
+			b.mu.Lock()
+			for topic, emptyAt := range b.topicEmpty {
+				if now.Sub(emptyAt) >= b.topicTTL {
+					delete(b.topics, topic)
+					delete(b.scopedTopics, topic)
+					delete(b.topicEmpty, topic)
+				}
+			}
+			b.mu.Unlock()
+		}
 	}
 }

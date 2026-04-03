@@ -848,3 +848,98 @@ func TestWithKeepalive_DoesNotCountDrops(t *testing.T) {
 	// Keepalive drops must not be counted.
 	assert.Equal(t, int64(0), b.PublishDrops())
 }
+
+func TestWithTopicTTL_CleansUpEmptyTopics(t *testing.T) {
+	b := NewSSEBroker(WithTopicTTL(50 * time.Millisecond))
+	defer b.Close()
+
+	_, unsub := b.Subscribe("ephemeral")
+	unsub()
+
+	// Topic map entry still exists right after unsub.
+	counts := b.TopicCounts()
+	assert.Contains(t, counts, "ephemeral")
+
+	// After the sweep, topic should be removed.
+	assert.Eventually(t, func() bool {
+		return len(b.TopicCounts()) == 0
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestWithTopicTTL_DoesNotCleanActiveTopics(t *testing.T) {
+	b := NewSSEBroker(WithTopicTTL(50 * time.Millisecond))
+	defer b.Close()
+
+	_, unsub := b.Subscribe("active")
+	defer unsub()
+
+	// Wait longer than the TTL.
+	time.Sleep(100 * time.Millisecond)
+
+	counts := b.TopicCounts()
+	assert.Equal(t, 1, counts["active"])
+}
+
+func TestWithTopicTTL_ResubscribeResetsTimer(t *testing.T) {
+	b := NewSSEBroker(WithTopicTTL(80 * time.Millisecond))
+	defer b.Close()
+
+	// First subscribe/unsubscribe.
+	_, unsub1 := b.Subscribe("topic")
+	unsub1()
+
+	// Wait less than TTL.
+	time.Sleep(30 * time.Millisecond)
+
+	// Resubscribe resets the timer, then unsubscribe again.
+	_, unsub2 := b.Subscribe("topic")
+	unsub2()
+
+	// Wait less than TTL from the second unsubscribe — topic should still exist.
+	time.Sleep(30 * time.Millisecond)
+	counts := b.TopicCounts()
+	assert.Contains(t, counts, "topic")
+
+	// Eventually it should be cleaned up.
+	assert.Eventually(t, func() bool {
+		return len(b.TopicCounts()) == 0
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestWithTopicTTL_DefaultOff(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	_, unsub := b.Subscribe("persistent")
+	unsub()
+
+	// Without TTL, the empty topic map entry persists.
+	time.Sleep(50 * time.Millisecond)
+	counts := b.TopicCounts()
+	assert.Contains(t, counts, "persistent")
+}
+
+func TestWithTopicTTL_StopsOnClose(t *testing.T) {
+	b := NewSSEBroker(WithTopicTTL(50 * time.Millisecond))
+
+	_, unsub := b.Subscribe("topic")
+	unsub()
+
+	// Close should not panic and should stop the sweep goroutine.
+	assert.NotPanics(t, func() { b.Close() })
+	// Double close should also not panic.
+	assert.NotPanics(t, func() { b.Close() })
+}
+
+func TestWithTopicTTL_ScopedTopics(t *testing.T) {
+	b := NewSSEBroker(WithTopicTTL(50 * time.Millisecond))
+	defer b.Close()
+
+	_, unsub := b.SubscribeScoped("events", "acct-1")
+	unsub()
+
+	// After TTL, scoped topic entry should be cleaned up.
+	assert.Eventually(t, func() bool {
+		return len(b.TopicCounts()) == 0
+	}, time.Second, 10*time.Millisecond)
+}
