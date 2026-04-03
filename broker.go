@@ -23,8 +23,9 @@ import (
 type SSEBroker struct {
 	topics            map[string]map[chan string]struct{}
 	scopedTopics      map[string]map[chan string]scopedSub
-	replayCache       map[string][]string // topic → recent messages (ring buffer)
-	replaySize        map[string]int      // topic → max messages to keep
+	replayCache       map[string][]string       // topic → recent messages (ring buffer)
+	replaySize        map[string]int            // topic → max messages to keep
+	replayLog         map[string][]ReplayEntry  // topic → ordered log with IDs for Last-Event-ID resumption
 	lastHash          map[string]uint64 // topic → FNV hash of last published message via PublishIfChanged
 	onFirst           map[string][]func(string)
 	onLast            map[string][]func(string)
@@ -114,6 +115,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 		scopedTopics: make(map[string]map[chan string]scopedSub),
 		replayCache:  make(map[string][]string),
 		replaySize:   make(map[string]int),
+		replayLog:    make(map[string][]ReplayEntry),
 		topicEmpty:   make(map[string]time.Time),
 		lastHash:     make(map[string]uint64),
 		onFirst:      make(map[string][]func(string)),
@@ -466,11 +468,15 @@ func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 	if n <= 0 {
 		delete(b.replaySize, topic)
 		delete(b.replayCache, topic)
+		delete(b.replayLog, topic)
 		return
 	}
 	b.replaySize[topic] = n
 	if msgs := b.replayCache[topic]; len(msgs) > n {
 		b.replayCache[topic] = msgs[len(msgs)-n:]
+	}
+	if logs := b.replayLog[topic]; len(logs) > n {
+		b.replayLog[topic] = logs[len(logs)-n:]
 	}
 }
 
@@ -480,6 +486,7 @@ func (b *SSEBroker) ClearReplay(topic string) {
 	b.mu.Lock()
 	delete(b.replayCache, topic)
 	delete(b.replaySize, topic)
+	delete(b.replayLog, topic)
 	b.mu.Unlock()
 }
 
@@ -650,6 +657,7 @@ func (b *SSEBroker) Close() {
 	close(b.done)
 	b.replayCache = nil
 	b.replaySize = nil
+	b.replayLog = nil
 	b.lastHash = nil
 	for topic, subs := range b.topics {
 		for ch := range subs {
