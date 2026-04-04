@@ -210,6 +210,125 @@ func TestPublishIfChangedOOBTo_ScopedDelivery(t *testing.T) {
 	}
 }
 
+func TestPublishLazyOOB_SkipsWithoutSubscribers(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	called := false
+	b.PublishLazyOOB("t", func() []Fragment {
+		called = true
+		return []Fragment{Replace("el", "<b>hi</b>")}
+	})
+	assert.False(t, called, "renderFn should not be called without subscribers")
+}
+
+func TestPublishLazyOOB_CallsWithSubscribers(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	b.PublishLazyOOB("t", func() []Fragment {
+		return []Fragment{Replace("el", "<b>hi</b>")}
+	})
+
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "hi")
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestPublishLazyOOB_EmptyFragments(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	b.PublishLazyOOB("t", func() []Fragment {
+		return nil
+	})
+
+	select {
+	case <-ch:
+		t.Fatal("should not receive message for empty fragments")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestPublishLazyIfChangedOOB_SkipsDuplicate(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	render := func() []Fragment {
+		return []Fragment{Replace("el", "<b>same</b>")}
+	}
+
+	ok1 := b.PublishLazyIfChangedOOB("t", render)
+	assert.True(t, ok1)
+	<-ch
+
+	ok2 := b.PublishLazyIfChangedOOB("t", render)
+	assert.False(t, ok2)
+}
+
+func TestPublishLazyIfChangedOOB_NoSubscribers(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	called := false
+	ok := b.PublishLazyIfChangedOOB("t", func() []Fragment {
+		called = true
+		return []Fragment{Replace("el", "<b>hi</b>")}
+	})
+	assert.False(t, ok)
+	assert.False(t, called)
+}
+
+func TestPublishLazyOOBTo_ScopedDelivery(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("t", "user-1")
+	defer unsub()
+
+	b.PublishLazyOOBTo("t", "user-1", func() []Fragment {
+		return []Fragment{Replace("el", "<b>scoped</b>")}
+	})
+
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "scoped")
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestPublishLazyIfChangedOOBTo_ScopedDedup(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("t", "s1")
+	defer unsub()
+
+	render := func() []Fragment {
+		return []Fragment{Replace("el", "<b>same</b>")}
+	}
+
+	ok1 := b.PublishLazyIfChangedOOBTo("t", "s1", render)
+	assert.True(t, ok1)
+	<-ch
+
+	ok2 := b.PublishLazyIfChangedOOBTo("t", "s1", render)
+	assert.False(t, ok2)
+}
+
 func TestRenderComponentError_EscapesComment(t *testing.T) {
 	// An error message containing --> must not break out of the HTML comment.
 	// escapeAttr replaces > with &gt;, turning --> into --&gt; inside the comment body.

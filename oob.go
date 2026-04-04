@@ -121,3 +121,61 @@ func (b *SSEBroker) PublishIfChangedOOBTo(topic, scope string, fragments ...Frag
 	msg := NewSSEMessage("oob", RenderFragments(fragments...)).String()
 	return b.PublishIfChangedTo(topic, scope, msg)
 }
+
+// PublishLazyOOB calls renderFn only if the topic has subscribers, then
+// publishes the rendered fragments. This avoids expensive rendering (DB
+// queries, template execution) when nobody is listening. If renderFn returns
+// no fragments, no message is published.
+func (b *SSEBroker) PublishLazyOOB(topic string, renderFn func() []Fragment) {
+	if !b.HasSubscribers(topic) {
+		return
+	}
+	fragments := renderFn()
+	if len(fragments) == 0 {
+		return
+	}
+	b.PublishOOB(topic, fragments...)
+}
+
+// PublishLazyIfChangedOOB calls renderFn only if the topic has subscribers,
+// then publishes the rendered fragments only if the content differs from the
+// last publish. Combines the subscriber guard with deduplication. Returns true
+// if published (content changed), false if skipped (no subscribers, no
+// fragments, or identical content).
+func (b *SSEBroker) PublishLazyIfChangedOOB(topic string, renderFn func() []Fragment) bool {
+	if !b.HasSubscribers(topic) {
+		return false
+	}
+	fragments := renderFn()
+	if len(fragments) == 0 {
+		return false
+	}
+	return b.PublishIfChangedOOB(topic, fragments...)
+}
+
+// PublishLazyOOBTo calls renderFn only if the topic has subscribers, then
+// publishes the rendered fragments to scoped subscribers matching the scope.
+func (b *SSEBroker) PublishLazyOOBTo(topic, scope string, renderFn func() []Fragment) {
+	if !b.HasSubscribers(topic) {
+		return
+	}
+	fragments := renderFn()
+	if len(fragments) == 0 {
+		return
+	}
+	b.PublishOOBTo(topic, scope, fragments...)
+}
+
+// PublishLazyIfChangedOOBTo calls renderFn only if the topic has subscribers,
+// then publishes the rendered fragments to scoped subscribers only if the
+// content differs from the last publish for that topic+scope.
+func (b *SSEBroker) PublishLazyIfChangedOOBTo(topic, scope string, renderFn func() []Fragment) bool {
+	if !b.HasSubscribers(topic) {
+		return false
+	}
+	fragments := renderFn()
+	if len(fragments) == 0 {
+		return false
+	}
+	return b.PublishIfChangedOOBTo(topic, scope, fragments...)
+}
