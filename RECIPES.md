@@ -693,3 +693,222 @@ func sseHandler(broker *tavern.SSEBroker) echo.HandlerFunc {
 > windows (e.g., 30 seconds of messages). If the client is offline longer
 > than the buffer covers, it gets only live messages -- which is usually the
 > right trade-off.
+
+---
+
+## 12. Live dashboard with linkwell navigation
+
+Tavern pushes real-time widget updates via `ScheduledPublisher`. The OOB
+fragments include [linkwell](https://github.com/catgoose/linkwell) navigation
+controls so breadcrumbs and nav state stay in sync across all connected clients.
+
+> See also: [linkwell RECIPES](https://github.com/catgoose/linkwell/blob/main/RECIPES.md)
+> for the navigation setup side.
+
+### Go setup
+
+```go
+import (
+    "github.com/catgoose/tavern"
+    "github.com/catgoose/linkwell"
+)
+
+// Register link graph at startup
+reg := linkwell.NewRegistry()
+reg.Hub("app",
+    linkwell.Link{Rel: "dashboard", Href: "/dashboard", Label: "Dashboard"},
+    linkwell.Link{Rel: "settings", Href: "/settings", Label: "Settings"},
+)
+
+pub := broker.NewScheduledPublisher("dashboard", tavern.WithBaseTick(100*time.Millisecond))
+
+pub.Register("stats", 1*time.Second, func(ctx context.Context, buf *bytes.Buffer) error {
+    stats := collectStats()
+    // Render stats widget + linkwell breadcrumbs in one OOB batch
+    frags := tavern.RenderFragments(
+        tavern.ReplaceComponent("stats-panel", views.StatsPanel(stats)),
+        tavern.Replace("breadcrumbs",
+            renderBreadcrumbs(reg.Breadcrumbs("/dashboard"))),
+    )
+    buf.WriteString(frags)
+    return nil
+})
+
+broker.RunPublisher(ctx, pub.Start)
+```
+
+### HTML
+
+```html
+<nav id="breadcrumbs"><!-- updated via SSE --></nav>
+
+<div id="stats-panel"
+     hx-ext="sse"
+     sse-connect="/sse?topic=dashboard"
+     sse-swap="message">
+  <!-- real-time stats + nav in sync -->
+</div>
+```
+
+---
+
+## 13. Real-time table with linkwell row actions
+
+Tavern broadcasts row updates via SSE. Each row includes
+[linkwell](https://github.com/catgoose/linkwell) action controls so the
+server decides which actions are available per row — edit, delete, view —
+based on permissions and state.
+
+> See also: [linkwell RECIPES](https://github.com/catgoose/linkwell/blob/main/RECIPES.md)
+> for action pattern setup.
+
+### Go handler
+
+```go
+func updateTask(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        id := c.Param("id")
+        task := updateTaskInDB(db, id, c)
+
+        // linkwell determines available actions based on task state
+        actions := linkwell.TableRowActions(
+            linkwell.Control{Label: "Edit", URL: "/tasks/" + id + "/edit", Method: "GET"},
+            linkwell.Control{Label: "Delete", URL: "/tasks/" + id, Method: "DELETE",
+                HXConfirm: "Delete this task?"},
+        )
+        if task.Completed {
+            actions = linkwell.TableRowActions(
+                linkwell.Control{Label: "Reopen", URL: "/tasks/" + id + "/reopen", Method: "POST"},
+            )
+        }
+
+        // Broadcast updated row with server-driven actions
+        broker.PublishOOB("tasks",
+            tavern.ReplaceComponent("task-"+id,
+                views.TaskRow(task, actions)),
+        )
+
+        return c.NoContent(http.StatusOK)
+    }
+}
+```
+
+### HTML
+
+```html
+<table hx-ext="sse" sse-connect="/sse?topic=tasks" sse-swap="message">
+  <tbody>
+    <tr id="task-42">
+      <td>Deploy v2</td>
+      <td><!-- linkwell actions rendered server-side --></td>
+    </tr>
+  </tbody>
+</table>
+```
+
+---
+
+## 14. Delete broadcast with linkwell error recovery
+
+Tavern broadcasts deletes to all clients. On failure, the rollback fragment
+includes [linkwell](https://github.com/catgoose/linkwell) error controls
+so the user gets actionable recovery options — not just an error message.
+
+> See also: [linkwell RECIPES](https://github.com/catgoose/linkwell/blob/main/RECIPES.md)
+> for error control patterns.
+
+### Go handler
+
+```go
+func deleteProject(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        id := c.Param("id")
+
+        if err := db.ExecContext(c.Request().Context(),
+            "DELETE FROM projects WHERE id = ?", id).Err(); err != nil {
+
+            // linkwell provides error-specific controls
+            errCtx := linkwell.NewErrorContext(http.StatusInternalServerError,
+                linkwell.Control{Label: "Retry", URL: "/projects/" + id, Method: "DELETE"},
+                linkwell.Control{Label: "Dismiss", HXSwapOOB: "delete"},
+            )
+
+            broker.PublishOOB("projects",
+                tavern.ReplaceComponent("project-"+id,
+                    views.ProjectRowError(id, errCtx)),
+            )
+            return c.NoContent(http.StatusInternalServerError)
+        }
+
+        broker.PublishOOB("projects", tavern.Delete("project-"+id))
+        return c.NoContent(http.StatusOK)
+    }
+}
+```
+
+---
+
+## 15. Lifecycle-aware publishing with linkwell controls
+
+Tavern's lifecycle hooks start publishers only when someone is listening.
+The published fragments include [linkwell](https://github.com/catgoose/linkwell)
+controls that adapt to live state — the server sends both the data and the
+available actions in one SSE message.
+
+> See also: [linkwell RECIPES](https://github.com/catgoose/linkwell/blob/main/RECIPES.md)
+> for control composition patterns.
+
+### Go setup
+
+```go
+var cancelDashboard context.CancelFunc
+
+broker.OnFirstSubscriber("dashboard", func(topic string) {
+    ctx, cancel := context.WithCancel(appCtx)
+    cancelDashboard = cancel
+
+    broker.RunPublisher(ctx, func(ctx context.Context) {
+        ticker := time.NewTicker(time.Second)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                stats := collectDashboardStats()
+
+                // Controls change based on live state
+                var actions []linkwell.Control
+                if stats.AlertCount > 0 {
+                    actions = append(actions,
+                        linkwell.Control{Label: "View Alerts", URL: "/alerts", Method: "GET"},
+                        linkwell.Control{Label: "Acknowledge All", URL: "/alerts/ack", Method: "POST"},
+                    )
+                }
+
+                broker.PublishLazyIfChangedOOB("dashboard", func() []tavern.Fragment {
+                    return []tavern.Fragment{
+                        tavern.ReplaceComponent("stats", views.DashboardStats(stats)),
+                        tavern.ReplaceComponent("actions", views.DashboardActions(actions)),
+                    }
+                })
+            }
+        }
+    })
+})
+
+broker.OnLastUnsubscribe("dashboard", func(topic string) {
+    if cancelDashboard != nil {
+        cancelDashboard()
+    }
+})
+```
+
+### HTML
+
+```html
+<div hx-ext="sse" sse-connect="/sse?topic=dashboard" sse-swap="message">
+  <div id="stats"><!-- live stats --></div>
+  <div id="actions"><!-- server-driven actions adapt to state --></div>
+</div>
+```
