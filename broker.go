@@ -43,6 +43,10 @@ type SSEBroker struct {
 	debounce          debouncer
 	throttle          throttler
 	metrics           *metricsState // nil when metrics disabled
+	evictThreshold    int                          // 0 = disabled
+	evictCallback     func(topic string)           // optional callback on eviction
+	dropCounts        map[chan string]*atomic.Int64 // per-channel consecutive drop counter
+	dropCountsMu      sync.RWMutex                 // separate lock for drop counts (avoid nesting with main mu)
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -108,6 +112,26 @@ func WithDropOldest() BrokerOption {
 	}
 }
 
+// WithSlowSubscriberEviction enables automatic disconnection of subscribers
+// that have dropped more than threshold consecutive messages. When a subscriber
+// is evicted, its channel is closed, triggering the client's EventSource to
+// reconnect. The counter resets when a message is successfully delivered.
+// A threshold of 0 disables eviction (the default).
+func WithSlowSubscriberEviction(threshold int) BrokerOption {
+	return func(b *SSEBroker) {
+		b.evictThreshold = threshold
+	}
+}
+
+// WithSlowSubscriberCallback sets a function that is called when a subscriber
+// is evicted due to slow consumption. The callback receives the topic name
+// and runs in its own goroutine.
+func WithSlowSubscriberCallback(fn func(topic string)) BrokerOption {
+	return func(b *SSEBroker) {
+		b.evictCallback = fn
+	}
+}
+
 // NewSSEBroker creates a ready-to-use [SSEBroker] with no active topics or
 // subscribers. It accepts optional [BrokerOption] values to override defaults.
 func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
@@ -129,6 +153,9 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	}
 	b.debounce.timers = make(map[string]*debounceEntry)
 	b.throttle.state = make(map[string]*throttleEntry)
+	if b.evictThreshold > 0 {
+		b.dropCounts = make(map[chan string]*atomic.Int64)
+	}
 	if b.keepaliveInterval > 0 {
 		go b.keepaliveLoop()
 	}
@@ -170,6 +197,11 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 			b.metrics.peakSubs[topic] = total
 		}
 	}
+	if b.evictThreshold > 0 {
+		b.dropCountsMu.Lock()
+		b.dropCounts[ch] = &atomic.Int64{}
+		b.dropCountsMu.Unlock()
+	}
 	replayMsgs := append([]string(nil), b.replayCache[topic]...)
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
@@ -195,6 +227,11 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 			}
 		}
 		b.mu.Unlock()
+		if b.evictThreshold > 0 {
+			b.dropCountsMu.Lock()
+			delete(b.dropCounts, ch)
+			b.dropCountsMu.Unlock()
+		}
 		for _, fn := range lastHooks {
 			go fn(topic)
 		}
@@ -228,6 +265,11 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 			b.metrics.peakSubs[topic] = total
 		}
 	}
+	if b.evictThreshold > 0 {
+		b.dropCountsMu.Lock()
+		b.dropCounts[ch] = &atomic.Int64{}
+		b.dropCountsMu.Unlock()
+	}
 	replayMsgs := append([]string(nil), b.replayCache[topic]...)
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
@@ -253,6 +295,11 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 			}
 		}
 		b.mu.Unlock()
+		if b.evictThreshold > 0 {
+			b.dropCountsMu.Lock()
+			delete(b.dropCounts, ch)
+			b.dropCountsMu.Unlock()
+		}
 		for _, fn := range lastHooks {
 			go fn(topic)
 		}
@@ -404,6 +451,91 @@ func (b *SSEBroker) send(ch chan string, msg string) bool {
 	}
 }
 
+// publishToChannels fans out msg to the given channels, tracking drops and
+// evicting slow subscribers when configured.
+func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg string) (sent, dropped int) {
+	for _, ch := range channels {
+		func() {
+			defer func() { _ = recover() }()
+			if b.send(ch, msg) {
+				sent++
+				if b.evictThreshold > 0 {
+					b.resetDropCount(ch)
+				}
+			} else {
+				b.drops.Add(1)
+				dropped++
+				if b.evictThreshold > 0 {
+					if b.incrementDropCount(ch) >= int64(b.evictThreshold) {
+						b.evictSubscriber(topic, ch)
+					}
+				}
+			}
+		}()
+	}
+	return
+}
+
+func (b *SSEBroker) resetDropCount(ch chan string) {
+	b.dropCountsMu.RLock()
+	counter, ok := b.dropCounts[ch]
+	b.dropCountsMu.RUnlock()
+	if ok {
+		counter.Store(0)
+	}
+}
+
+func (b *SSEBroker) incrementDropCount(ch chan string) int64 {
+	b.dropCountsMu.RLock()
+	counter, ok := b.dropCounts[ch]
+	b.dropCountsMu.RUnlock()
+	if !ok {
+		return 0
+	}
+	return counter.Add(1)
+}
+
+func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
+	b.mu.Lock()
+	if _, ok := b.topics[topic][ch]; ok {
+		delete(b.topics[topic], ch)
+		close(ch)
+		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
+		var lastHooks []func(string)
+		if total == 0 {
+			lastHooks = b.onLast[topic]
+			b.topicEmpty[topic] = time.Now()
+		}
+		b.mu.Unlock()
+		for _, fn := range lastHooks {
+			go fn(topic)
+		}
+	} else if _, ok := b.scopedTopics[topic][ch]; ok {
+		delete(b.scopedTopics[topic], ch)
+		close(ch)
+		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
+		var lastHooks []func(string)
+		if total == 0 {
+			lastHooks = b.onLast[topic]
+			b.topicEmpty[topic] = time.Now()
+		}
+		b.mu.Unlock()
+		for _, fn := range lastHooks {
+			go fn(topic)
+		}
+	} else {
+		b.mu.Unlock()
+	}
+	// Clean up drop counter.
+	b.dropCountsMu.Lock()
+	delete(b.dropCounts, ch)
+	b.dropCountsMu.Unlock()
+	// Fire callback.
+	if b.evictCallback != nil {
+		go b.evictCallback(topic)
+	}
+}
+
 // Publish fans out msg to every subscriber of the given topic. It is
 // non-blocking: if a subscriber's channel buffer is full, the message is
 // silently dropped for that subscriber rather than blocking the publisher.
@@ -421,20 +553,7 @@ func (b *SSEBroker) Publish(topic, msg string) {
 	}
 	b.mu.RUnlock()
 
-	var sent, dropped int
-	for _, ch := range channels {
-		// Channel may have been closed by unsub() between the snapshot and now.
-		// Recover from the resulting panic rather than adding complex synchronization.
-		func() {
-			defer func() { _ = recover() }()
-			if b.send(ch, msg) {
-				sent++
-			} else {
-				b.drops.Add(1)
-				dropped++
-			}
-		}()
-	}
+	sent, dropped := b.publishToChannels(topic, channels, msg)
 	if b.metrics != nil {
 		tc := b.metrics.counter(topic)
 		tc.published.Add(int64(sent))
@@ -469,18 +588,7 @@ func (b *SSEBroker) PublishWithReplay(topic, msg string) {
 	}
 	b.mu.Unlock()
 
-	var sent, dropped int
-	for _, ch := range channels {
-		func() {
-			defer func() { _ = recover() }()
-			if b.send(ch, msg) {
-				sent++
-			} else {
-				b.drops.Add(1)
-				dropped++
-			}
-		}()
-	}
+	sent, dropped := b.publishToChannels(topic, channels, msg)
 	if b.metrics != nil {
 		tc := b.metrics.counter(topic)
 		tc.published.Add(int64(sent))
@@ -538,18 +646,7 @@ func (b *SSEBroker) PublishTo(topic, scope, msg string) {
 	}
 	b.mu.RUnlock()
 
-	var sent, dropped int
-	for _, ch := range channels {
-		func() {
-			defer func() { _ = recover() }()
-			if b.send(ch, msg) {
-				sent++
-			} else {
-				b.drops.Add(1)
-				dropped++
-			}
-		}()
-	}
+	sent, dropped := b.publishToChannels(topic, channels, msg)
 	if b.metrics != nil {
 		tc := b.metrics.counter(topic)
 		tc.published.Add(int64(sent))
@@ -594,18 +691,7 @@ func (b *SSEBroker) PublishIfChanged(topic, msg string) bool {
 	}
 	b.mu.Unlock()
 
-	var sent, dropped int
-	for _, ch := range channels {
-		func() {
-			defer func() { _ = recover() }()
-			if b.send(ch, msg) {
-				sent++
-			} else {
-				b.drops.Add(1)
-				dropped++
-			}
-		}()
-	}
+	sent, dropped := b.publishToChannels(topic, channels, msg)
 	if b.metrics != nil {
 		tc := b.metrics.counter(topic)
 		tc.published.Add(int64(sent))
@@ -645,18 +731,7 @@ func (b *SSEBroker) PublishIfChangedTo(topic, scope, msg string) bool {
 	}
 	b.mu.Unlock()
 
-	var sent, dropped int
-	for _, ch := range channels {
-		func() {
-			defer func() { _ = recover() }()
-			if b.send(ch, msg) {
-				sent++
-			} else {
-				b.drops.Add(1)
-				dropped++
-			}
-		}()
-	}
+	sent, dropped := b.publishToChannels(topic, channels, msg)
 	if b.metrics != nil {
 		tc := b.metrics.counter(topic)
 		tc.published.Add(int64(sent))
@@ -806,6 +881,11 @@ func (b *SSEBroker) Close() {
 	b.replaySize = nil
 	b.replayLog = nil
 	b.lastHash = nil
+	if b.dropCounts != nil {
+		b.dropCountsMu.Lock()
+		b.dropCounts = nil
+		b.dropCountsMu.Unlock()
+	}
 	for topic, subs := range b.topics {
 		for ch := range subs {
 			delete(subs, ch)

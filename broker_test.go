@@ -1641,3 +1641,123 @@ func TestSetRetryAll_EmptyBroker(t *testing.T) {
 	defer b.Close()
 	assert.NotPanics(t, func() { b.SetRetryAll(time.Second) })
 }
+
+func TestSlowSubscriberEviction_EvictsAfterThreshold(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1), WithSlowSubscriberEviction(3))
+	defer b.Close()
+
+	ch, _ := b.Subscribe("t") // don't defer unsub — it will be evicted
+
+	// Fill buffer
+	b.Publish("t", "msg1")
+	// Now 3 drops to hit threshold
+	b.Publish("t", "drop1")
+	b.Publish("t", "drop2")
+	b.Publish("t", "drop3") // should trigger eviction
+
+	// Channel should be closed
+	time.Sleep(10 * time.Millisecond)
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return // closed, test passes
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("channel not closed after eviction")
+			return
+		}
+	}
+}
+
+func TestSlowSubscriberEviction_ResetsOnSuccess(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1), WithSlowSubscriberEviction(3))
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	// 2 drops (below threshold)
+	b.Publish("t", "fill")
+	b.Publish("t", "drop1")
+	b.Publish("t", "drop2")
+
+	// Drain to reset
+	<-ch
+
+	// 2 more drops — still below threshold because counter reset
+	b.Publish("t", "fill2")
+	b.Publish("t", "drop3")
+	b.Publish("t", "drop4")
+
+	// Should still be subscribed
+	assert.True(t, b.HasSubscribers("t"))
+}
+
+func TestSlowSubscriberEviction_CallbackFires(t *testing.T) {
+	fired := make(chan string, 1)
+	b := NewSSEBroker(
+		WithBufferSize(1),
+		WithSlowSubscriberEviction(2),
+		WithSlowSubscriberCallback(func(topic string) {
+			fired <- topic
+		}),
+	)
+	defer b.Close()
+
+	b.Subscribe("t")
+
+	b.Publish("t", "fill")
+	b.Publish("t", "drop1")
+	b.Publish("t", "drop2") // evict
+
+	select {
+	case topic := <-fired:
+		assert.Equal(t, "t", topic)
+	case <-time.After(time.Second):
+		t.Fatal("callback not fired")
+	}
+}
+
+func TestSlowSubscriberEviction_Disabled(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1))
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	// Many drops without eviction
+	b.Publish("t", "fill")
+	for range 100 {
+		b.Publish("t", "drop")
+	}
+
+	// Still subscribed
+	assert.True(t, b.HasSubscribers("t"))
+	_ = ch
+}
+
+func TestSlowSubscriberEviction_ScopedSubscriber(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1), WithSlowSubscriberEviction(2))
+	defer b.Close()
+
+	ch, _ := b.SubscribeScoped("t", "s1")
+
+	b.PublishTo("t", "s1", "fill")
+	b.PublishTo("t", "s1", "drop1")
+	b.PublishTo("t", "s1", "drop2") // evict
+
+	// Drain buffered message then check closure
+	time.Sleep(10 * time.Millisecond)
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return // closed, test passes
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("scoped channel not closed after eviction")
+			return
+		}
+	}
+}
