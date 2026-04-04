@@ -1,6 +1,9 @@
 package tavern
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // ReplayEntry pairs a message with its event ID for resumption support.
 type ReplayEntry struct {
@@ -43,18 +46,7 @@ func (b *SSEBroker) PublishWithID(topic, id, msg string) {
 	}
 	b.mu.Unlock()
 
-	var sent, dropped int
-	for _, ch := range channels {
-		func() {
-			defer func() { _ = recover() }()
-			if b.send(ch, msg) {
-				sent++
-			} else {
-				b.drops.Add(1)
-				dropped++
-			}
-		}()
-	}
+	sent, dropped := b.publishToChannels(topic, channels, msg)
 	if b.metrics != nil {
 		tc := b.metrics.counter(topic)
 		tc.published.Add(int64(sent))
@@ -114,6 +106,11 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		// If ID not found, replayMsgs stays nil: gap too large, no replay.
 	}
 
+	if b.evictThreshold > 0 {
+		b.dropCountsMu.Lock()
+		b.dropCounts[ch] = &atomic.Int64{}
+		b.dropCountsMu.Unlock()
+	}
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
 
@@ -139,6 +136,11 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 			}
 		}
 		b.mu.Unlock()
+		if b.evictThreshold > 0 {
+			b.dropCountsMu.Lock()
+			delete(b.dropCounts, ch)
+			b.dropCountsMu.Unlock()
+		}
 		for _, fn := range lastHooks {
 			go fn(topic)
 		}
