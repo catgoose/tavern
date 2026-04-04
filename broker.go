@@ -738,6 +738,55 @@ func (b *SSEBroker) sendKeepalive() {
 	}
 }
 
+// SetRetry sends an SSE retry directive to all subscribers of the given topic,
+// including both unscoped and scoped subscribers. The browser's EventSource
+// stores this value and uses it for the next reconnect attempt. Call before
+// [SSEBroker.Close] in a graceful shutdown sequence to prevent clients from
+// thundering-herding against new pods.
+func (b *SSEBroker) SetRetry(topic string, d time.Duration) {
+	msg := fmt.Sprintf("retry: %d\n\n", d.Milliseconds())
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for ch := range b.topics[topic] {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+	for ch := range b.scopedTopics[topic] {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+}
+
+// SetRetryAll sends an SSE retry directive to all subscribers across all
+// topics, including both unscoped and scoped subscribers. This is a
+// convenience for graceful shutdown scenarios where every connected client
+// should back off before reconnecting.
+func (b *SSEBroker) SetRetryAll(d time.Duration) {
+	msg := fmt.Sprintf("retry: %d\n\n", d.Milliseconds())
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, subs := range b.topics {
+		for ch := range subs {
+			select {
+			case ch <- msg:
+			default:
+			}
+		}
+	}
+	for _, subs := range b.scopedTopics {
+		for ch := range subs {
+			select {
+			case ch <- msg:
+			default:
+			}
+		}
+	}
+}
+
 // Close shuts down the broker. It first waits for all publisher goroutines
 // started via [SSEBroker.RunPublisher] to return, then closes all subscriber
 // channels and removes all topics. After Close returns, any pending reads on

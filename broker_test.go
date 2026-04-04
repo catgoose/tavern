@@ -1571,3 +1571,73 @@ func TestPublishIfChangedTo_AfterClose(t *testing.T) {
 	ok := b.PublishIfChangedTo("t", "s", "msg")
 	assert.False(t, ok)
 }
+
+func TestSetRetry_SendsDirective(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	b.SetRetry("t", 30*time.Second)
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "retry: 30000\n\n", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestSetRetry_ReachesScopedSubscribers(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeScoped("t", "user-1")
+	defer unsub()
+
+	b.SetRetry("t", 5*time.Second)
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "retry: 5000\n\n", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestSetRetryAll_AllTopics(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch1, unsub1 := b.Subscribe("a")
+	defer unsub1()
+	ch2, unsub2 := b.Subscribe("b")
+	defer unsub2()
+	ch3, unsub3 := b.SubscribeScoped("c", "s1")
+	defer unsub3()
+
+	b.SetRetryAll(10 * time.Second)
+
+	expected := "retry: 10000\n\n"
+	for _, ch := range []<-chan string{ch1, ch2, ch3} {
+		select {
+		case msg := <-ch:
+			assert.Equal(t, expected, msg)
+		case <-time.After(time.Second):
+			t.Fatal("timed out")
+		}
+	}
+}
+
+func TestSetRetry_NoSubscribers(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+	assert.NotPanics(t, func() { b.SetRetry("empty", time.Second) })
+}
+
+func TestSetRetryAll_EmptyBroker(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+	assert.NotPanics(t, func() { b.SetRetryAll(time.Second) })
+}
