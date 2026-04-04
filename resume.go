@@ -76,6 +76,7 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		b.topics[topic] = make(map[chan string]struct{})
 	}
 	b.topics[topic][ch] = struct{}{}
+	b.subscriberMeta[ch] = &SubscriberInfo{Topic: topic, ConnectedAt: time.Now()}
 	total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 	var firstHooks []func(string)
 	if total == 1 {
@@ -117,6 +118,7 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 	for _, fn := range firstHooks {
 		go fn(topic)
 	}
+	b.publishConnectionEvent("subscribe", topic, total)
 	for _, msg := range replayMsgs {
 		select {
 		case ch <- msg:
@@ -128,6 +130,7 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		var lastHooks []func(string)
 		if _, ok := b.topics[topic][ch]; ok {
 			delete(b.topics[topic], ch)
+			delete(b.subscriberMeta, ch)
 			close(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
@@ -144,5 +147,6 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		for _, fn := range lastHooks {
 			go fn(topic)
 		}
+		b.publishConnectionEvent("unsubscribe", topic, -1)
 	}
 }

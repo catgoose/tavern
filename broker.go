@@ -47,6 +47,8 @@ type SSEBroker struct {
 	evictCallback     func(topic string)           // optional callback on eviction
 	dropCounts        map[chan string]*atomic.Int64 // per-channel consecutive drop counter
 	dropCountsMu      sync.RWMutex                 // separate lock for drop counts (avoid nesting with main mu)
+	subscriberMeta    map[chan string]*SubscriberInfo // channel → subscriber info
+	connEventsTopic   string                         // empty = connection events disabled
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -132,21 +134,32 @@ func WithSlowSubscriberCallback(fn func(topic string)) BrokerOption {
 	}
 }
 
+// WithConnectionEvents enables publishing subscriber connect/disconnect
+// events to the given meta topic. Events are JSON-formatted messages
+// containing the event type, topic, and current subscriber count.
+// The meta topic itself does not generate recursive events.
+func WithConnectionEvents(metaTopic string) BrokerOption {
+	return func(b *SSEBroker) {
+		b.connEventsTopic = metaTopic
+	}
+}
+
 // NewSSEBroker creates a ready-to-use [SSEBroker] with no active topics or
 // subscribers. It accepts optional [BrokerOption] values to override defaults.
 func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	b := &SSEBroker{
-		topics:       make(map[string]map[chan string]struct{}),
-		scopedTopics: make(map[string]map[chan string]scopedSub),
-		replayCache:  make(map[string][]string),
-		replaySize:   make(map[string]int),
-		replayLog:    make(map[string][]ReplayEntry),
-		topicEmpty:   make(map[string]time.Time),
-		lastHash:     make(map[string]uint64),
-		onFirst:      make(map[string][]func(string)),
-		onLast:       make(map[string][]func(string)),
-		bufferSize:   10,
-		done:         make(chan struct{}),
+		topics:         make(map[string]map[chan string]struct{}),
+		scopedTopics:   make(map[string]map[chan string]scopedSub),
+		replayCache:    make(map[string][]string),
+		replaySize:     make(map[string]int),
+		replayLog:      make(map[string][]ReplayEntry),
+		topicEmpty:     make(map[string]time.Time),
+		lastHash:       make(map[string]uint64),
+		onFirst:        make(map[string][]func(string)),
+		onLast:         make(map[string][]func(string)),
+		subscriberMeta: make(map[chan string]*SubscriberInfo),
+		bufferSize:     10,
+		done:           make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -187,6 +200,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		b.topics[topic] = make(map[chan string]struct{})
 	}
 	b.topics[topic][ch] = struct{}{}
+	b.subscriberMeta[ch] = &SubscriberInfo{Topic: topic, ConnectedAt: time.Now()}
 	total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 	var firstHooks []func(string)
 	if total == 1 {
@@ -208,6 +222,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 	for _, fn := range firstHooks {
 		go fn(topic)
 	}
+	b.publishConnectionEvent("subscribe", topic, total)
 	for _, msg := range replayMsgs {
 		select {
 		case ch <- msg:
@@ -219,6 +234,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		var lastHooks []func(string)
 		if _, ok := b.topics[topic][ch]; ok {
 			delete(b.topics[topic], ch)
+			delete(b.subscriberMeta, ch)
 			close(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
@@ -235,6 +251,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		for _, fn := range lastHooks {
 			go fn(topic)
 		}
+		b.publishConnectionEvent("unsubscribe", topic, -1)
 	}
 }
 
@@ -255,6 +272,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		b.scopedTopics[topic] = make(map[chan string]scopedSub)
 	}
 	b.scopedTopics[topic][ch] = scopedSub{scope: scope}
+	b.subscriberMeta[ch] = &SubscriberInfo{Topic: topic, Scope: scope, ConnectedAt: time.Now()}
 	total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 	var firstHooks []func(string)
 	if total == 1 {
@@ -276,6 +294,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 	for _, fn := range firstHooks {
 		go fn(topic)
 	}
+	b.publishConnectionEvent("subscribe", topic, total)
 	for _, msg := range replayMsgs {
 		select {
 		case ch <- msg:
@@ -287,6 +306,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		var lastHooks []func(string)
 		if _, ok := b.scopedTopics[topic][ch]; ok {
 			delete(b.scopedTopics[topic], ch)
+			delete(b.subscriberMeta, ch)
 			close(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
@@ -303,6 +323,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		for _, fn := range lastHooks {
 			go fn(topic)
 		}
+		b.publishConnectionEvent("unsubscribe", topic, -1)
 	}
 }
 
@@ -499,6 +520,7 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 	b.mu.Lock()
 	if _, ok := b.topics[topic][ch]; ok {
 		delete(b.topics[topic], ch)
+		delete(b.subscriberMeta, ch)
 		close(ch)
 		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 		var lastHooks []func(string)
@@ -512,6 +534,7 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 		}
 	} else if _, ok := b.scopedTopics[topic][ch]; ok {
 		delete(b.scopedTopics[topic], ch)
+		delete(b.subscriberMeta, ch)
 		close(ch)
 		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 		var lastHooks []func(string)
@@ -881,6 +904,7 @@ func (b *SSEBroker) Close() {
 	b.replaySize = nil
 	b.replayLog = nil
 	b.lastHash = nil
+	b.subscriberMeta = nil
 	if b.dropCounts != nil {
 		b.dropCountsMu.Lock()
 		b.dropCounts = nil
