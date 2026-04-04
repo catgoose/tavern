@@ -11,6 +11,8 @@
     - [Subscribe and unsubscribe](#subscribe-and-unsubscribe)
     - [Publish](#publish)
     - [Scoped subscriptions](#scoped-subscriptions)
+    - [Multiplexed subscriptions](#multiplexed-subscriptions)
+    - [Snapshot + delta](#snapshot--delta)
     - [Format SSE messages](#format-sse-messages)
     - [Graceful shutdown](#graceful-shutdown)
   - [Publishing variants](#publishing-variants)
@@ -24,15 +26,21 @@
     - [WithDropOldest](#withdropoldest)
     - [WithKeepalive](#withkeepalive)
     - [WithTopicTTL](#withtopicttl)
+    - [WithSlowSubscriberEviction](#withslowsubscribereviction)
     - [WithLogger](#withlogger)
     - [SetReplayPolicy](#setreplaypolicy)
+    - [SetRetry / SetRetryAll](#setretry--setretryall)
   - [Lifecycle hooks](#lifecycle-hooks)
     - [OnFirstSubscriber / OnLastUnsubscribe](#onfirstsubscriber--onlastunsubscribe)
   - [Scheduled publisher](#scheduled-publisher)
     - [RunPublisher](#runpublisher)
+  - [Subscriber management](#subscriber-management)
+    - [Subscriber metadata](#subscriber-metadata)
+    - [Connection events](#connection-events)
   - [OOB fragments](#oob-fragments)
     - [Component interface](#component-interface)
     - [Raw fragment rendering](#raw-fragment-rendering)
+    - [Lazy rendering](#lazy-rendering)
   - [Observability](#observability)
     - [Check for subscribers](#check-for-subscribers)
     - [Topic metrics](#topic-metrics)
@@ -73,6 +81,9 @@ Tavern provides a minimal, concurrent-safe message broker that fans out string
 messages to subscribers by topic. It is designed to sit behind an HTTP handler
 (Echo, Chi, net/http, etc.) and push real-time events to browser clients over
 SSE.
+
+For practical patterns and integration examples, see the
+[Recipe Cookbook](RECIPES.md).
 
 ## Why
 
@@ -271,6 +282,35 @@ Scoped and unscoped subscribers on the same topic are fully independent.
 `Publish` delivers only to unscoped subscribers; `PublishTo` delivers only to
 matching scoped subscribers. `HasSubscribers` and `TopicCounts` count both.
 
+### Multiplexed subscriptions
+
+Subscribe to multiple topics on a single channel. Each message is tagged
+with its source topic, eliminating the need for `reflect.Select`:
+
+```go
+ch, unsub := broker.SubscribeMulti("network", "services", "alerts")
+defer unsub()
+
+for msg := range ch {
+    sse := tavern.NewSSEMessage(msg.Topic, msg.Data).String()
+    fmt.Fprint(w, sse)
+}
+```
+
+### Snapshot + delta
+
+Send a computed snapshot as the first message, then live updates. Eliminates
+the dual-render pattern where page handlers and publishers independently
+render the same initial state:
+
+```go
+ch, unsub := broker.SubscribeWithSnapshot("dashboard", func() string {
+    return renderFullDashboard()
+})
+defer unsub()
+// First message is the snapshot, then live publishes follow
+```
+
 ### Format SSE messages
 
 `SSEMessage` builds wire-format SSE text. Chain `WithID` and `WithRetry` for
@@ -450,6 +490,29 @@ per-resource topics. A background goroutine sweeps at half the TTL interval.
 broker := tavern.NewSSEBroker(tavern.WithTopicTTL(5 * time.Minute))
 ```
 
+### WithSlowSubscriberEviction
+
+> Student ask Grug about complexity.
+>
+> Grug say: "complexity is apex predator."
+>
+> -- The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
+
+Dead connections are complexity hiding in your subscriber list.
+Auto-disconnect subscribers that drop too many consecutive messages:
+
+```go
+broker := tavern.NewSSEBroker(
+    tavern.WithSlowSubscriberEviction(100), // evict after 100 consecutive drops
+    tavern.WithSlowSubscriberCallback(func(topic string) {
+        slog.Warn("slow subscriber evicted", "topic", topic)
+    }),
+)
+```
+
+The evicted client's `EventSource` automatically reconnects. The drop counter
+resets when a message is successfully delivered.
+
 ### WithLogger
 
 Logs publisher panics and errors when set. Accepts a standard `*slog.Logger`.
@@ -469,6 +532,24 @@ Use `n=0` to disable replay for the topic.
 broker.SetReplayPolicy("activity", 10)
 broker.PublishWithReplay("activity", msg) // last 10 cached
 ```
+
+### SetRetry / SetRetryAll
+
+Control client reconnect timing for graceful deploys:
+
+```go
+// Tell dashboard subscribers to wait 30s before reconnecting
+broker.SetRetry("dashboard", 30 * time.Second)
+
+// Tell ALL subscribers across all topics
+broker.SetRetryAll(30 * time.Second)
+
+// Then shut down
+broker.Close()
+```
+
+Sends an SSE `retry:` directive that the browser's `EventSource` stores for
+the next reconnect attempt. Prevents thundering-herd on rolling deploys.
 
 ## Lifecycle hooks
 
@@ -525,6 +606,53 @@ broker.RunPublisher(ctx, func(ctx context.Context) {
 })
 ```
 
+## Subscriber management
+
+### Subscriber metadata
+
+Tag subscribers with metadata for admin panels and debugging:
+
+```go
+ch, unsub := broker.SubscribeWithMeta("dashboard", tavern.SubscribeMeta{
+    ID:   sessionID,
+    Meta: map[string]string{"user": userName, "addr": remoteAddr},
+})
+defer unsub()
+```
+
+Query who is subscribed:
+
+```go
+subs := broker.Subscribers("dashboard")
+for _, s := range subs {
+    fmt.Printf("id=%s topic=%s connected=%s\n", s.ID, s.Topic, s.ConnectedAt)
+}
+```
+
+Disconnect a specific subscriber by ID:
+
+```go
+broker.Disconnect("dashboard", sessionID) // closes the subscriber's channel
+```
+
+### Connection events
+
+Publish subscriber connect/disconnect as SSE events on a meta topic:
+
+```go
+broker := tavern.NewSSEBroker(tavern.WithConnectionEvents("_meta"))
+```
+
+Subscribe to `_meta` to monitor connections in real time:
+
+```go
+ch, unsub := broker.Subscribe("_meta")
+// Receives: {"event":"subscribe","topic":"dashboard","subscribers":3}
+// Receives: {"event":"unsubscribe","topic":"dashboard","subscribers":2}
+```
+
+The meta topic does not generate recursive events for its own subscribers.
+
 ## OOB fragments
 
 > The whole point -- the ENTIRE POINT -- of hypermedia is that the server tells
@@ -579,6 +707,32 @@ html := tavern.RenderFragments(
 	tavern.Delete("old-banner"),
 )
 broker.Publish("events", tavern.NewSSEMessage("oob", html).String())
+```
+
+### Lazy rendering
+
+Skip expensive rendering when nobody is listening. `PublishLazyOOB` only
+calls the render function if the topic has subscribers:
+
+```go
+broker.PublishLazyOOB("dashboard", func() []tavern.Fragment {
+    // DB queries and template rendering only happen if someone is watching
+    stats := fetchStats(db)
+    return []tavern.Fragment{
+        tavern.ReplaceComponent("stats", views.StatsPanel(stats)),
+    }
+})
+```
+
+Combine with deduplication:
+
+```go
+broker.PublishLazyIfChangedOOB("dashboard", func() []tavern.Fragment {
+    stats := fetchStats(db)
+    return []tavern.Fragment{
+        tavern.ReplaceComponent("stats", views.StatsPanel(stats)),
+    }
+})
 ```
 
 ## Observability
