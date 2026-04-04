@@ -6,6 +6,7 @@
   - [Why](#why)
   - [Install](#install)
   - [Quick start](#quick-start)
+    - [Built-in SSE handler](#built-in-sse-handler)
   - [Core concepts](#core-concepts)
     - [Subscribe and unsubscribe](#subscribe-and-unsubscribe)
     - [Publish](#publish)
@@ -178,6 +179,30 @@ func sseHandler(broker *tavern.SSEBroker) echo.HandlerFunc {
 		}
 	}
 }
+```
+
+### Built-in SSE handler
+
+Or use the built-in handler that does the same thing in one line:
+
+```go
+// Standard library
+mux.Handle("/sse/events", broker.SSEHandler("events"))
+
+// Echo
+e.GET("/sse/events", echo.WrapHandler(broker.SSEHandler("events")))
+```
+
+The built-in handler sets SSE headers, handles `Last-Event-ID` resumption, and
+streams messages with flush. Override the write step for custom formatting:
+
+```go
+mux.Handle("/sse", broker.SSEHandler("events",
+    tavern.WithSSEWriter(func(w http.ResponseWriter, msg string) error {
+        // use htmx-go, custom framing, logging, etc.
+        return myCustomWrite(w, msg)
+    }),
+))
 ```
 
 ## Core concepts
