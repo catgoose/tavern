@@ -42,7 +42,8 @@ func (b *SSEBroker) SubscribeWithMeta(topic string, meta SubscribeMeta) (msgs <-
 	for c := range b.topics[topic] {
 		// A read-only channel derived from a bidirectional channel compares
 		// equal when converted. We use a type-safe comparison via the info pointer.
-		if info, ok := b.subscriberMeta[c]; ok && info.ID == "" && (<-chan string)(c) == ch {
+		readOnly := (<-chan string)(c) //nolint:gocritic // parens required for channel type conversion
+		if info, ok := b.subscriberMeta[c]; ok && info.ID == "" && readOnly == ch {
 			info.ID = meta.ID
 			info.Meta = meta.Meta
 			break
@@ -92,53 +93,57 @@ func (b *SSEBroker) Disconnect(topic, subscriberID string) bool {
 	b.mu.Lock()
 	// Search unscoped subscribers.
 	for ch := range b.topics[topic] {
-		if info, ok := b.subscriberMeta[ch]; ok && info.ID == subscriberID {
-			delete(b.topics[topic], ch)
-			delete(b.subscriberMeta, ch)
-			close(ch)
-			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-			var lastHooks []func(string)
-			if total == 0 {
-				lastHooks = b.onLast[topic]
-				b.topicEmpty[topic] = time.Now()
-			}
-			b.mu.Unlock()
-			if b.evictThreshold > 0 {
-				b.dropCountsMu.Lock()
-				delete(b.dropCounts, ch)
-				b.dropCountsMu.Unlock()
-			}
-			for _, fn := range lastHooks {
-				go fn(topic)
-			}
-			b.publishConnectionEvent("disconnect", topic, -1)
-			return true
+		info, ok := b.subscriberMeta[ch]
+		if !ok || info.ID != subscriberID {
+			continue
 		}
+		delete(b.topics[topic], ch)
+		delete(b.subscriberMeta, ch)
+		close(ch)
+		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
+		var lastHooks []func(string)
+		if total == 0 {
+			lastHooks = b.onLast[topic]
+			b.topicEmpty[topic] = time.Now()
+		}
+		b.mu.Unlock()
+		if b.evictThreshold > 0 {
+			b.dropCountsMu.Lock()
+			delete(b.dropCounts, ch)
+			b.dropCountsMu.Unlock()
+		}
+		for _, fn := range lastHooks {
+			go fn(topic)
+		}
+		b.publishConnectionEvent("disconnect", topic, -1)
+		return true
 	}
 	// Search scoped subscribers.
 	for ch := range b.scopedTopics[topic] {
-		if info, ok := b.subscriberMeta[ch]; ok && info.ID == subscriberID {
-			delete(b.scopedTopics[topic], ch)
-			delete(b.subscriberMeta, ch)
-			close(ch)
-			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-			var lastHooks []func(string)
-			if total == 0 {
-				lastHooks = b.onLast[topic]
-				b.topicEmpty[topic] = time.Now()
-			}
-			b.mu.Unlock()
-			if b.evictThreshold > 0 {
-				b.dropCountsMu.Lock()
-				delete(b.dropCounts, ch)
-				b.dropCountsMu.Unlock()
-			}
-			for _, fn := range lastHooks {
-				go fn(topic)
-			}
-			b.publishConnectionEvent("disconnect", topic, -1)
-			return true
+		info, ok := b.subscriberMeta[ch]
+		if !ok || info.ID != subscriberID {
+			continue
 		}
+		delete(b.scopedTopics[topic], ch)
+		delete(b.subscriberMeta, ch)
+		close(ch)
+		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
+		var lastHooks []func(string)
+		if total == 0 {
+			lastHooks = b.onLast[topic]
+			b.topicEmpty[topic] = time.Now()
+		}
+		b.mu.Unlock()
+		if b.evictThreshold > 0 {
+			b.dropCountsMu.Lock()
+			delete(b.dropCounts, ch)
+			b.dropCountsMu.Unlock()
+		}
+		for _, fn := range lastHooks {
+			go fn(topic)
+		}
+		b.publishConnectionEvent("disconnect", topic, -1)
+		return true
 	}
 	b.mu.Unlock()
 	return false

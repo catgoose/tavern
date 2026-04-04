@@ -37,7 +37,7 @@ func TestSSEHandler_BasicStreaming(t *testing.T) {
 	b.PublishWithReplay("events", "hello")
 
 	rec := newFlushRecorder()
-	req := httptest.NewRequest("GET", "/sse", nil)
+	req := httptest.NewRequest("GET", "/sse", http.NoBody)
 	ctx, cancel := contextWithCancel(req)
 	req = req.WithContext(ctx)
 
@@ -70,7 +70,7 @@ func TestSSEHandler_LastEventID(t *testing.T) {
 	handler := b.SSEHandler("events")
 
 	rec := newFlushRecorder()
-	req := httptest.NewRequest("GET", "/sse", nil)
+	req := httptest.NewRequest("GET", "/sse", http.NoBody)
 	req.Header.Set("Last-Event-ID", "1") // should replay 2 and 3
 	ctx, cancel := contextWithCancel(req)
 	req = req.WithContext(ctx)
@@ -104,7 +104,7 @@ func TestSSEHandler_CustomWriter(t *testing.T) {
 	b.PublishWithReplay("events", "custom-msg")
 
 	rec := newFlushRecorder()
-	req := httptest.NewRequest("GET", "/sse", nil)
+	req := httptest.NewRequest("GET", "/sse", http.NoBody)
 	ctx, cancel := contextWithCancel(req)
 	req = req.WithContext(ctx)
 
@@ -128,7 +128,7 @@ func TestSSEHandler_BrokerClose(t *testing.T) {
 	handler := b.SSEHandler("events")
 
 	rec := newFlushRecorder()
-	req := httptest.NewRequest("GET", "/sse", nil)
+	req := httptest.NewRequest("GET", "/sse", http.NoBody)
 
 	done := make(chan struct{})
 	go func() {
@@ -156,7 +156,7 @@ func TestSSEHandler_Flushes(t *testing.T) {
 	b.PublishWithReplay("events", "flush-test")
 
 	rec := newFlushRecorder()
-	req := httptest.NewRequest("GET", "/sse", nil)
+	req := httptest.NewRequest("GET", "/sse", http.NoBody)
 	ctx, cancel := contextWithCancel(req)
 	req = req.WithContext(ctx)
 

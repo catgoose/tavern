@@ -70,12 +70,13 @@ func TestSubscribeMulti_LifecycleHooks(t *testing.T) {
 	defer unsub()
 
 	topics := make([]string, 0, 2)
+loop:
 	for range 2 {
 		select {
 		case topic := <-fired:
 			topics = append(topics, topic)
 		case <-time.After(time.Second):
-			break
+			break loop
 		}
 	}
 	sort.Strings(topics)
