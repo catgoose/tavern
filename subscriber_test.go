@@ -198,7 +198,7 @@ func TestConnectionEvents_Disabled(t *testing.T) {
 	defer b.Close()
 
 	_, unsub := b.Subscribe("t")
-	defer unsub()
+	unsub()
 
 	// Should not panic — events just aren't published.
 }
