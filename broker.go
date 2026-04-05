@@ -82,6 +82,7 @@ type SSEBroker struct {
 	maxSubsPerTopic   int                              // 0 = unlimited per-topic subscribers
 	admissionFn       func(topic string, currentCount int) bool // nil = no custom admission
 	orderedTopics     map[string]*sync.Mutex             // topic → per-topic ordering mutex
+	onPublishDropFn   func(topic string, droppedForCount int) // nil = no drop callback
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -681,6 +682,9 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 				}
 			}
 		}()
+	}
+	if dropped > 0 && b.onPublishDropFn != nil {
+		b.onPublishDropFn(topic, dropped)
 	}
 	return
 }
