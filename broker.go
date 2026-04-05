@@ -71,6 +71,8 @@ type SSEBroker struct {
 	adaptive          *adaptiveBackpressure          // nil = adaptive backpressure disabled
 	obs               *observabilityState              // nil when observability disabled
 	multiSubs         map[string]*multiSub             // subscriberID → managed multi-subscription
+	globSubs          []*globSub                       // glob/wildcard subscriptions
+	globMu            sync.RWMutex                     // protects globSubs
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -752,23 +754,22 @@ func (b *SSEBroker) publishDirect(topic, msg string) {
 		start = time.Now()
 	}
 	b.mu.RLock()
-	subscribers, exists := b.topics[topic]
-	if !exists || len(subscribers) == 0 {
-		b.mu.RUnlock()
-		return
-	}
+	subscribers := b.topics[topic]
 	channels := make([]chan string, 0, len(subscribers))
 	for ch := range subscribers {
 		channels = append(channels, ch)
 	}
 	b.mu.RUnlock()
 
-	sent, dropped := b.publishToChannels(topic, channels, msg)
-	if b.metrics != nil {
-		tc := b.metrics.counter(topic)
-		tc.published.Add(int64(sent))
-		tc.dropped.Add(int64(dropped))
+	if len(channels) > 0 {
+		sent, dropped := b.publishToChannels(topic, channels, msg)
+		if b.metrics != nil {
+			tc := b.metrics.counter(topic)
+			tc.published.Add(int64(sent))
+			tc.dropped.Add(int64(dropped))
+		}
 	}
+	b.dispatchToGlobSubscribers(topic, "", msg)
 	if b.obs != nil {
 		now := time.Now()
 		b.obs.recordPublishLatency(topic, now.Sub(start))
@@ -815,12 +816,15 @@ func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
 	}
 	b.mu.Unlock()
 
-	sent, dropped := b.publishToChannels(topic, channels, msg)
-	if b.metrics != nil {
-		tc := b.metrics.counter(topic)
-		tc.published.Add(int64(sent))
-		tc.dropped.Add(int64(dropped))
+	if len(channels) > 0 {
+		sent, dropped := b.publishToChannels(topic, channels, msg)
+		if b.metrics != nil {
+			tc := b.metrics.counter(topic)
+			tc.published.Add(int64(sent))
+			tc.dropped.Add(int64(dropped))
+		}
 	}
+	b.dispatchToGlobSubscribers(topic, "", msg)
 	if b.obs != nil {
 		now := time.Now()
 		b.obs.recordPublishLatency(topic, now.Sub(start))
@@ -885,11 +889,7 @@ func (b *SSEBroker) publishToDirect(topic, scope, msg string) {
 		start = time.Now()
 	}
 	b.mu.RLock()
-	scopedSubs, exists := b.scopedTopics[topic]
-	if !exists || len(scopedSubs) == 0 {
-		b.mu.RUnlock()
-		return
-	}
+	scopedSubs := b.scopedTopics[topic]
 	channels := make([]chan string, 0, len(scopedSubs))
 	for ch, sub := range scopedSubs {
 		if sub.scope == scope {
@@ -898,12 +898,15 @@ func (b *SSEBroker) publishToDirect(topic, scope, msg string) {
 	}
 	b.mu.RUnlock()
 
-	sent, dropped := b.publishToChannels(topic, channels, msg)
-	if b.metrics != nil {
-		tc := b.metrics.counter(topic)
-		tc.published.Add(int64(sent))
-		tc.dropped.Add(int64(dropped))
+	if len(channels) > 0 {
+		sent, dropped := b.publishToChannels(topic, channels, msg)
+		if b.metrics != nil {
+			tc := b.metrics.counter(topic)
+			tc.published.Add(int64(sent))
+			tc.dropped.Add(int64(dropped))
+		}
 	}
+	b.dispatchToGlobSubscribers(topic, scope, msg)
 	if b.obs != nil {
 		now := time.Now()
 		b.obs.recordPublishLatency(topic, now.Sub(start))
@@ -1148,6 +1151,12 @@ func (b *SSEBroker) Close() {
 		delete(b.scopedTopics, topic)
 	}
 	b.mu.Unlock()
+	b.globMu.Lock()
+	for _, gs := range b.globSubs {
+		close(gs.ch)
+	}
+	b.globSubs = nil
+	b.globMu.Unlock()
 	b.debounce.mu.Lock()
 	for topic, entry := range b.debounce.timers {
 		entry.timer.Stop()
