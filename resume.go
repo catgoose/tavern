@@ -90,13 +90,16 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 
 	// Find messages after lastEventID.
 	var replayMsgs []string
+	var gapDetected bool
 	if lastEventID == "" {
 		// No Last-Event-ID: replay all cached (same as regular Subscribe).
 		replayMsgs = append([]string(nil), b.replayCache[topic]...)
 	} else {
 		log := b.replayLog[topic]
+		found := false
 		for i, entry := range log {
 			if entry.ID == lastEventID {
+				found = true
 				// Replay everything after this entry.
 				for _, e := range log[i+1:] {
 					replayMsgs = append(replayMsgs, e.Msg)
@@ -104,8 +107,21 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 				break
 			}
 		}
-		// If ID not found, replayMsgs stays nil: gap too large, no replay.
+		if !found {
+			gapDetected = true
+		}
 	}
+
+	// Collect gap handling state while still holding the lock.
+	var gapCallbacks []ReplayGapCallback
+	var gapStrategy GapStrategy
+	var gapSnapshotFn func() string
+	if gapDetected {
+		gapCallbacks = b.onReplayGap[topic]
+		gapStrategy = b.replayGapStrategy[topic]
+		gapSnapshotFn = b.replayGapSnapshot[topic]
+	}
+	subInfo := b.subscriberMeta[ch]
 
 	if b.evictThreshold > 0 {
 		b.dropCountsMu.Lock()
@@ -119,6 +135,31 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		go fn(topic)
 	}
 	b.publishConnectionEvent("subscribe", topic, total)
+
+	// Handle replay gap: fire callbacks, optionally send control event and snapshot.
+	if gapDetected {
+		// Fire registered gap callbacks regardless of strategy.
+		for _, fn := range gapCallbacks {
+			go fn(subInfo, lastEventID)
+		}
+		// For non-silent strategies, send control event and apply the strategy.
+		if gapStrategy != GapSilent {
+			controlMsg := replayGapControlEvent(lastEventID)
+			select {
+			case ch <- controlMsg:
+			default:
+			}
+			if gapStrategy == GapFallbackToSnapshot && gapSnapshotFn != nil {
+				if snap := gapSnapshotFn(); snap != "" {
+					select {
+					case ch <- snap:
+					default:
+					}
+				}
+			}
+		}
+	}
+
 	for _, msg := range replayMsgs {
 		select {
 		case ch <- msg:

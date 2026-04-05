@@ -173,6 +173,45 @@ func TestSSEHandler_Flushes(t *testing.T) {
 	assert.Greater(t, rec.flushed, 0, "expected at least one flush")
 }
 
+func TestSSEHandler_GapDetection(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("events", 2)
+	b.PublishWithID("events", "1", "msg-1")
+	b.PublishWithID("events", "2", "msg-2")
+	b.PublishWithID("events", "3", "msg-3")
+	// ID "1" has rolled out of the log.
+
+	b.SetReplayGapPolicy("events", GapFallbackToSnapshot, func() string {
+		return "event: snapshot\ndata: full-state\n\n"
+	})
+
+	handler := b.SSEHandler("events")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse", http.NoBody)
+	req.Header.Set("Last-Event-ID", "1") // gap: ID not in log
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: tavern-replay-gap")
+	assert.Contains(t, body, "full-state")
+	// Should not contain the original messages since the ID was not found.
+	assert.NotContains(t, body, "msg-1")
+}
+
 // contextWithCancel creates a cancellable context from a request.
 func contextWithCancel(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithCancel(r.Context())
