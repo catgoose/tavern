@@ -77,6 +77,7 @@ type SSEBroker struct {
 	globMu            sync.RWMutex                     // protects globSubs
 	backend           backend.Backend                  // nil = no cross-process fan-out
 	afterHookSem      chan struct{}                     // semaphore limiting concurrent After hook goroutines
+	coalescingChans   map[chan string]*coalescingState  // channel → coalescing state (nil = normal delivery)
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -608,6 +609,13 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 			// Check filter predicate — non-matching messages are silently
 			// skipped without counting toward drops or backpressure.
 			if pred := b.filterPredicate(ch); pred != nil && !pred(msg) {
+				return
+			}
+
+			// Coalescing: store latest value atomically and signal the
+			// reader goroutine. Replaced messages do not count as drops.
+			if b.coalesceStore(ch, msg) {
+				sent++
 				return
 			}
 
@@ -1147,6 +1155,7 @@ func (b *SSEBroker) Close() {
 	b.lastHash = nil
 	b.subscriberMeta = nil
 	b.filterPredicates = nil
+	b.coalescingChans = nil
 	b.multiSubs = nil
 	b.onReplayGap = nil
 	b.replayGapStrategy = nil
