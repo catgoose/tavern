@@ -25,10 +25,18 @@ type ScheduledPublisher struct {
 	logger   *slog.Logger
 }
 
+// SectionOptions configures optional behavior for a registered section.
+type SectionOptions struct {
+	// CircuitBreaker enables circuit breaker protection for the section.
+	// When nil, the section renders normally without circuit breaker logic.
+	CircuitBreaker *CircuitBreakerConfig
+}
+
 type section struct {
 	name     string
 	interval time.Duration
 	render   RenderFunc
+	cb       *circuitBreaker // nil when no circuit breaker configured
 }
 
 // ScheduledPublisherOption configures the scheduled publisher.
@@ -58,13 +66,17 @@ func (b *SSEBroker) NewScheduledPublisher(event string, opts ...ScheduledPublish
 
 // Register adds a named section with an interval and render function.
 // Sections are rendered in registration order.
-func (p *ScheduledPublisher) Register(name string, interval time.Duration, fn RenderFunc) {
-	p.mu.Lock()
-	p.sections = append(p.sections, section{
+func (p *ScheduledPublisher) Register(name string, interval time.Duration, fn RenderFunc, opts ...SectionOptions) {
+	s := section{
 		name:     name,
 		interval: interval,
 		render:   fn,
-	})
+	}
+	if len(opts) > 0 && opts[0].CircuitBreaker != nil {
+		s.cb = newCircuitBreaker(*opts[0].CircuitBreaker)
+	}
+	p.mu.Lock()
+	p.sections = append(p.sections, s)
 	p.mu.Unlock()
 }
 
@@ -114,16 +126,7 @@ func (p *ScheduledPublisher) Start(ctx context.Context) {
 				if now.Sub(lastSent[s.name]) < s.interval {
 					continue
 				}
-				if err := p.renderSection(ctx, s, buf); err != nil {
-					if p.logger != nil {
-						p.logger.Error("section render error",
-							"section", s.name,
-							"event", p.event,
-							"error", err,
-						)
-					}
-					continue
-				}
+				p.tickSection(ctx, s, buf, now)
 				lastSent[s.name] = now
 			}
 			p.mu.RUnlock()
@@ -133,6 +136,56 @@ func (p *ScheduledPublisher) Start(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// tickSection handles a single section render with circuit breaker and error callback support.
+func (p *ScheduledPublisher) tickSection(ctx context.Context, s *section, buf *bytes.Buffer, now time.Time) {
+	// No circuit breaker — render directly.
+	if s.cb == nil {
+		if err := p.renderSection(ctx, s, buf); err != nil {
+			p.handleSectionError(s, err, now, 1)
+		}
+		return
+	}
+
+	// Circuit breaker is configured.
+	if !s.cb.allow() {
+		// Circuit is open — use fallback if available.
+		if s.cb.config.FallbackRender != nil {
+			buf.WriteString(s.cb.config.FallbackRender())
+		}
+		return
+	}
+
+	if err := p.renderSection(ctx, s, buf); err != nil {
+		count := s.cb.recordFailure()
+		p.handleSectionError(s, err, now, count)
+		// If circuit just opened and fallback exists, render fallback.
+		if s.cb.currentState() == circuitOpen && s.cb.config.FallbackRender != nil {
+			buf.WriteString(s.cb.config.FallbackRender())
+		}
+		return
+	}
+
+	s.cb.recordSuccess()
+}
+
+// handleSectionError logs the error and fires the broker's render error callback.
+func (p *ScheduledPublisher) handleSectionError(s *section, err error, now time.Time, count int) {
+	if p.logger != nil {
+		p.logger.Error("section render error",
+			"section", s.name,
+			"event", p.event,
+			"error", err,
+		)
+	}
+	p.broker.fireRenderError(&RenderError{
+		Topic:     p.event,
+		Section:   s.name,
+		Err:       err,
+		Timestamp: now,
+		Count:     count,
+	})
 }
 
 // renderSection calls the render func with panic recovery.

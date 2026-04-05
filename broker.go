@@ -58,6 +58,7 @@ type SSEBroker struct {
 	dynGroupsMu       sync.RWMutex                   // protects dynGroups
 	middlewares       []Middleware                    // global publish middleware
 	topicMiddlewares  []topicMiddleware               // topic-scoped publish middleware
+	onRenderError     func(*RenderError)             // nil = no callback
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -366,6 +367,28 @@ func (b *SSEBroker) OnLastUnsubscribe(topic string, fn func(topic string)) {
 		return
 	}
 	b.onLast[topic] = append(b.onLast[topic], fn)
+}
+
+// OnRenderError registers a callback that fires when a render function fails.
+// This applies to lazy OOB renders and scheduled section renders. Only one
+// callback is supported; subsequent calls replace the previous callback.
+// The callback receives a [*RenderError] with structured information about
+// the failure. The callback runs synchronously in the goroutine where the
+// error occurred — avoid blocking operations.
+func (b *SSEBroker) OnRenderError(fn func(*RenderError)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onRenderError = fn
+}
+
+// fireRenderError invokes the registered render error callback, if any.
+func (b *SSEBroker) fireRenderError(re *RenderError) {
+	b.mu.RLock()
+	fn := b.onRenderError
+	b.mu.RUnlock()
+	if fn != nil {
+		fn(re)
+	}
 }
 
 // HasSubscribers reports whether the given topic has at least one active
