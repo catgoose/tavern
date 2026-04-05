@@ -3,6 +3,7 @@ package tavern
 import (
 	"fmt"
 	"net/http"
+	"sync"
 )
 
 // groupDef is a static topic group definition.
@@ -122,13 +123,29 @@ func (h *dynamicGroupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 // serveGroupSSE is the shared streaming loop for static and dynamic group
 // handlers. It subscribes to all topics via SubscribeMulti and writes each
-// message as an SSE event with the topic as the event type.
+// message as an SSE event with the topic as the event type. When the request
+// includes a Last-Event-ID header, cached messages after that ID are replayed
+// for each topic before the live stream begins.
 func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, topics []string, writer SSEWriterFunc) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch, unsub := broker.SubscribeMulti(topics...)
+	lastID := r.Header.Get("Last-Event-ID")
+
+	var ch <-chan TopicMessage
+	var unsub func()
+
+	if lastID != "" {
+		// When Last-Event-ID is present, use subscribeMultiFromID to replay
+		// only messages after the given ID from each topic's replay log.
+		ch, unsub = broker.subscribeMultiFromID(topics, lastID, writer, w)
+		if ch == nil {
+			return // writer error during replay
+		}
+	} else {
+		ch, unsub = broker.SubscribeMulti(topics...)
+	}
 	defer unsub()
 
 	for {
@@ -144,6 +161,104 @@ func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, to
 		case <-r.Context().Done():
 			return // client disconnected
 		}
+	}
+}
+
+// subscribeMultiFromID subscribes to multiple topics using SubscribeFromID for
+// each topic (with the same lastEventID), then replays the missed messages
+// formatted as SSE events via the writer. It returns a merged channel and
+// unsubscribe function like SubscribeMulti. If a write error occurs during
+// replay, it returns nil for the channel.
+func (b *SSEBroker) subscribeMultiFromID(topics []string, lastEventID string, writer SSEWriterFunc, w http.ResponseWriter) (msgs <-chan TopicMessage, unsubscribe func()) {
+	out := make(chan TopicMessage, b.bufferSize)
+	unsubs := make([]func(), 0, len(topics))
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Collect per-topic channels via SubscribeFromID.
+	perTopic := make([]<-chan string, len(topics))
+	for i, topic := range topics {
+		ch, unsub := b.SubscribeFromID(topic, lastEventID)
+		unsubs = append(unsubs, unsub)
+		perTopic[i] = ch
+	}
+
+	// Drain replay messages from each per-topic channel and write them
+	// directly as SSE events. These are the messages that SubscribeFromID
+	// buffered during subscribe.
+	for i, topic := range topics {
+		ch := perTopic[i]
+	drainTopic:
+		for {
+			select {
+			case msg, ok := <-ch:
+				if !ok {
+					break drainTopic
+				}
+				sseMsg := NewSSEMessage(topic, msg).String()
+				if err := writer(w, sseMsg); err != nil {
+					// Clean up on write error.
+					for _, unsub := range unsubs {
+						unsub()
+					}
+					close(out)
+					return nil, func() {}
+				}
+			default:
+				break drainTopic
+			}
+		}
+	}
+
+	// Start fan-in goroutines for live messages.
+	for i, topic := range topics {
+		ch := perTopic[i]
+		t := topic
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case msg, ok := <-ch:
+					if !ok {
+						return
+					}
+					select {
+					case out <- TopicMessage{Topic: t, Data: msg}:
+					case <-done:
+						return
+					}
+				case <-done:
+					return
+				}
+			}
+		}()
+	}
+
+	var closeOnce sync.Once
+	closeOut := func() {
+		closeOnce.Do(func() { close(out) })
+	}
+
+	var unsubOnce sync.Once
+	doUnsub := func() {
+		unsubOnce.Do(func() {
+			close(done)
+			for _, unsub := range unsubs {
+				unsub()
+			}
+		})
+	}
+
+	go func() {
+		wg.Wait()
+		closeOut()
+	}()
+
+	return out, func() {
+		doUnsub()
+		wg.Wait()
+		closeOut()
 	}
 }
 

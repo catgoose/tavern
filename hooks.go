@@ -9,6 +9,10 @@ import (
 // infinite cycles (e.g., After A publishes to B, After B publishes to A).
 const maxAfterDepth = 8
 
+// defaultAfterHookConcurrency is the default limit for concurrent After hook
+// goroutines. When the semaphore is full, hooks run synchronously.
+const defaultAfterHookConcurrency = 64
+
 // afterChain tracks the nesting depth and visited topics within a single
 // After hook execution chain.
 type afterChain struct {
@@ -139,8 +143,9 @@ func (b *SSEBroker) fireAfterHooks(topic string) {
 		return
 	}
 
-	// Top-level publish — fire hooks asynchronously in a new goroutine.
-	go func() {
+	// Top-level publish — fire hooks asynchronously in a new goroutine if the
+	// semaphore has capacity, otherwise run synchronously to avoid dropping hooks.
+	run := func() {
 		chain = &afterChain{
 			depth: 1,
 			seen:  map[string]struct{}{topic: {}},
@@ -152,6 +157,18 @@ func (b *SSEBroker) fireAfterHooks(topic string) {
 		for _, fn := range fns {
 			fn()
 		}
-	}()
+	}
+
+	select {
+	case b.afterHookSem <- struct{}{}:
+		// Acquired semaphore slot — run in a new goroutine.
+		go func() {
+			defer func() { <-b.afterHookSem }()
+			run()
+		}()
+	default:
+		// Semaphore full — run synchronously to avoid dropping the hook.
+		run()
+	}
 }
 

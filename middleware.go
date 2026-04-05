@@ -1,6 +1,9 @@
 package tavern
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // PublishFunc is the function signature for publish operations.
 // Middleware wraps this to intercept, transform, or swallow publishes.
@@ -75,6 +78,20 @@ func (b *SSEBroker) applyMiddleware(topic string, base PublishFunc) PublishFunc 
 	}
 	for i := len(globals) - 1; i >= 0; i-- {
 		fn = globals[i](fn)
+	}
+
+	// Wrap the outermost middleware call with panic recovery so a panicking
+	// middleware does not crash the process.
+	wrapped := fn
+	fn = func(topic, msg string) {
+		defer func() {
+			if r := recover(); r != nil {
+				if b.logger != nil {
+					b.logger.Error("middleware panic recovered", "topic", topic, "panic", fmt.Sprint(r))
+				}
+			}
+		}()
+		wrapped(topic, msg)
 	}
 	return fn
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 // Component renders itself to a writer. This interface is intentionally
@@ -142,8 +143,22 @@ func (b *SSEBroker) PublishLazyOOB(topic string, renderFn func() []Fragment) {
 	if !b.HasSubscribers(topic) {
 		return
 	}
-	fragments := renderFn()
-	if len(fragments) == 0 {
+	var fragments []Fragment
+	panicked := true
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				b.fireRenderError(&RenderError{
+					Topic:     topic,
+					Err:       fmt.Errorf("lazy render panic: %v", r),
+					Timestamp: time.Now(),
+				})
+			}
+		}()
+		fragments = renderFn()
+		panicked = false
+	}()
+	if panicked || len(fragments) == 0 {
 		return
 	}
 	b.PublishOOB(topic, fragments...)
@@ -158,8 +173,22 @@ func (b *SSEBroker) PublishLazyIfChangedOOB(topic string, renderFn func() []Frag
 	if !b.HasSubscribers(topic) {
 		return false
 	}
-	fragments := renderFn()
-	if len(fragments) == 0 {
+	var fragments []Fragment
+	panicked := true
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				b.fireRenderError(&RenderError{
+					Topic:     topic,
+					Err:       fmt.Errorf("lazy render panic: %v", r),
+					Timestamp: time.Now(),
+				})
+			}
+		}()
+		fragments = renderFn()
+		panicked = false
+	}()
+	if panicked || len(fragments) == 0 {
 		return false
 	}
 	return b.PublishIfChangedOOB(topic, fragments...)
@@ -171,8 +200,22 @@ func (b *SSEBroker) PublishLazyOOBTo(topic, scope string, renderFn func() []Frag
 	if !b.HasSubscribers(topic) {
 		return
 	}
-	fragments := renderFn()
-	if len(fragments) == 0 {
+	var fragments []Fragment
+	panicked := true
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				b.fireRenderError(&RenderError{
+					Topic:     topic,
+					Err:       fmt.Errorf("lazy render panic: %v", r),
+					Timestamp: time.Now(),
+				})
+			}
+		}()
+		fragments = renderFn()
+		panicked = false
+	}()
+	if panicked || len(fragments) == 0 {
 		return
 	}
 	b.PublishOOBTo(topic, scope, fragments...)
@@ -185,8 +228,22 @@ func (b *SSEBroker) PublishLazyIfChangedOOBTo(topic, scope string, renderFn func
 	if !b.HasSubscribers(topic) {
 		return false
 	}
-	fragments := renderFn()
-	if len(fragments) == 0 {
+	var fragments []Fragment
+	panicked := true
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				b.fireRenderError(&RenderError{
+					Topic:     topic,
+					Err:       fmt.Errorf("lazy render panic: %v", r),
+					Timestamp: time.Now(),
+				})
+			}
+		}()
+		fragments = renderFn()
+		panicked = false
+	}()
+	if panicked || len(fragments) == 0 {
 		return false
 	}
 	return b.PublishIfChangedOOBTo(topic, scope, fragments...)

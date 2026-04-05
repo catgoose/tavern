@@ -329,6 +329,67 @@ func TestPublishLazyIfChangedOOBTo_ScopedDedup(t *testing.T) {
 	assert.False(t, ok2)
 }
 
+func TestPublishLazyOOBPanicRecovery(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	// Should not crash when renderFn panics.
+	b.PublishLazyOOB("t", func() []Fragment {
+		panic("render exploded")
+	})
+
+	// No message should be published.
+	select {
+	case msg := <-ch:
+		t.Fatalf("unexpected message after panic: %s", msg)
+	case <-time.After(50 * time.Millisecond):
+		// expected
+	}
+
+	// Broker should still be functional.
+	b.Publish("t", "after-panic")
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "after-panic", msg)
+	case <-time.After(time.Second):
+		t.Fatal("broker not functional after lazy render panic")
+	}
+}
+
+func TestPublishLazyOOBPanicFiresOnRenderError(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	var gotErr *RenderError
+	b.OnRenderError(func(re *RenderError) {
+		gotErr = re
+	})
+
+	b.PublishLazyOOB("t", func() []Fragment {
+		panic("kaboom")
+	})
+
+	// Give the synchronous callback time to fire (it runs in the same goroutine).
+	time.Sleep(20 * time.Millisecond)
+
+	assert.NotNil(t, gotErr, "OnRenderError should have been called")
+	assert.Equal(t, "t", gotErr.Topic)
+	assert.Contains(t, gotErr.Err.Error(), "kaboom")
+
+	// No message should have been sent.
+	select {
+	case msg := <-ch:
+		t.Fatalf("unexpected message: %s", msg)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestRenderComponentError_EscapesComment(t *testing.T) {
 	// An error message containing --> must not break out of the HTML comment.
 	// escapeAttr replaces > with &gt;, turning --> into --&gt; inside the comment body.
