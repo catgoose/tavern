@@ -99,6 +99,7 @@ func (b *SSEBroker) Disconnect(topic, subscriberID string) bool {
 		}
 		delete(b.topics[topic], ch)
 		delete(b.subscriberMeta, ch)
+		delete(b.filterPredicates, ch)
 		close(ch)
 		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 		var lastHooks []func(string)
@@ -126,6 +127,7 @@ func (b *SSEBroker) Disconnect(topic, subscriberID string) bool {
 		}
 		delete(b.scopedTopics[topic], ch)
 		delete(b.subscriberMeta, ch)
+		delete(b.filterPredicates, ch)
 		close(ch)
 		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 		var lastHooks []func(string)
