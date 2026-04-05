@@ -14,6 +14,10 @@ type MessageEnvelope struct {
 	Data string `json:"data"`
 	// Scope restricts delivery to scoped subscribers when non-empty.
 	Scope string `json:"scope,omitempty"`
+	// TTL is the message time-to-live. Zero means no expiry.
+	TTL int64 `json:"ttl,omitempty"`
+	// ID is an optional message identifier for replay/resumption.
+	ID string `json:"id,omitempty"`
 }
 
 // Backend is the interface that cross-process fan-out implementations must
@@ -38,4 +42,38 @@ type Backend interface {
 	// Close shuts down the backend and releases all resources. Any open
 	// subscription channels are closed.
 	Close() error
+}
+
+// HealthAwareBackend is an optional interface that backends may implement to
+// support health checking and reconnection notifications. When a broker
+// detects an unhealthy backend, it skips backend publishes until the
+// backend reports healthy again. On reconnect, the broker re-subscribes
+// to all active topics.
+type HealthAwareBackend interface {
+	Backend
+	// Healthy reports whether the backend is currently able to send and
+	// receive messages.
+	Healthy() bool
+	// OnReconnect registers a callback that the backend invokes when it
+	// re-establishes its connection after a failure. The broker uses this
+	// to re-subscribe to all active topics.
+	OnReconnect(fn func())
+}
+
+// BackendStats is a point-in-time snapshot of backend operational metrics.
+type BackendStats struct {
+	// Connected indicates whether the backend is currently connected.
+	Connected bool
+	// MessagesSent is the total number of envelopes published.
+	MessagesSent int64
+	// MessagesReceived is the total number of envelopes received.
+	MessagesReceived int64
+}
+
+// ObservableBackend is an optional interface that backends may implement to
+// expose operational metrics.
+type ObservableBackend interface {
+	Backend
+	// Stats returns a point-in-time snapshot of backend metrics.
+	Stats() BackendStats
 }

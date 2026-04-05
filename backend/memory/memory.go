@@ -81,18 +81,24 @@ func (b *bus) removeAll(be *Backend) {
 // shared bus. Use [New] to create one. Call [Backend.Fork] to create a linked
 // instance that shares the same bus — publishes on either instance are visible
 // to subscribers on the other.
+//
+// Backend also implements [backend.HealthAwareBackend] for health checking
+// and reconnection notifications.
 type Backend struct {
-	bus    *bus
-	mu     sync.Mutex
-	subs   map[string]chan backend.MessageEnvelope
-	closed bool
+	bus         *bus
+	mu         sync.Mutex
+	subs       map[string]chan backend.MessageEnvelope
+	closed     bool
+	healthy    bool
+	reconnectFn func()
 }
 
 // New creates a new in-process Backend with its own bus.
 func New() *Backend {
 	return &Backend{
-		bus:  newBus(),
-		subs: make(map[string]chan backend.MessageEnvelope),
+		bus:     newBus(),
+		subs:    make(map[string]chan backend.MessageEnvelope),
+		healthy: true,
 	}
 }
 
@@ -101,8 +107,9 @@ func New() *Backend {
 // all other forks (but not back to the publisher).
 func (b *Backend) Fork() *Backend {
 	return &Backend{
-		bus:  b.bus,
-		subs: make(map[string]chan backend.MessageEnvelope),
+		bus:     b.bus,
+		subs:    make(map[string]chan backend.MessageEnvelope),
+		healthy: true,
 	}
 }
 
@@ -161,6 +168,38 @@ func (b *Backend) Close() error {
 	b.bus.removeAll(b)
 	b.subs = nil
 	return nil
+}
+
+// Healthy reports whether the backend is currently healthy. Returns false
+// when the backend is closed or has been marked unhealthy via [SetHealthy].
+func (b *Backend) Healthy() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return false
+	}
+	return b.healthy
+}
+
+// OnReconnect registers a callback that fires when the backend transitions
+// from unhealthy to healthy. The callback is invoked from [SetHealthy].
+func (b *Backend) OnReconnect(fn func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.reconnectFn = fn
+}
+
+// SetHealthy sets the health state. When transitioning from unhealthy to
+// healthy, the registered OnReconnect callback is fired.
+func (b *Backend) SetHealthy(healthy bool) {
+	b.mu.Lock()
+	wasHealthy := b.healthy
+	b.healthy = healthy
+	fn := b.reconnectFn
+	b.mu.Unlock()
+	if healthy && !wasHealthy && fn != nil {
+		fn()
+	}
 }
 
 // ErrClosed is returned when an operation is attempted on a closed backend.
