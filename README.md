@@ -1,59 +1,5 @@
 # tavern
 
-<!--toc:start-->
-
-- [tavern](#tavern)
-  - [Why](#why)
-  - [Install](#install)
-  - [Quick start](#quick-start)
-    - [Built-in SSE handler](#built-in-sse-handler)
-  - [Core concepts](#core-concepts)
-    - [Subscribe and unsubscribe](#subscribe-and-unsubscribe)
-    - [Publish](#publish)
-    - [Scoped subscriptions](#scoped-subscriptions)
-    - [Multiplexed subscriptions](#multiplexed-subscriptions)
-    - [Snapshot + delta](#snapshot--delta)
-    - [Format SSE messages](#format-sse-messages)
-    - [Graceful shutdown](#graceful-shutdown)
-  - [Publishing variants](#publishing-variants)
-    - [PublishWithReplay](#publishwithreplay)
-    - [PublishWithID / SubscribeFromID](#publishwithid--subscribefromid)
-    - [PublishIfChanged](#publishifchanged)
-    - [PublishDebounced](#publishdebounced)
-    - [PublishThrottled](#publishthrottled)
-  - [Broker configuration](#broker-configuration)
-    - [WithBufferSize](#withbuffersize)
-    - [WithDropOldest](#withdropoldest)
-    - [WithKeepalive](#withkeepalive)
-    - [WithTopicTTL](#withtopicttl)
-    - [WithSlowSubscriberEviction](#withslowsubscribereviction)
-    - [WithLogger](#withlogger)
-    - [SetReplayPolicy](#setreplaypolicy)
-    - [SetRetry / SetRetryAll](#setretry--setretryall)
-  - [Lifecycle hooks](#lifecycle-hooks)
-    - [OnFirstSubscriber / OnLastUnsubscribe](#onfirstsubscriber--onlastunsubscribe)
-  - [Scheduled publisher](#scheduled-publisher)
-    - [RunPublisher](#runpublisher)
-  - [Subscriber management](#subscriber-management)
-    - [Subscriber metadata](#subscriber-metadata)
-    - [Connection events](#connection-events)
-  - [OOB fragments](#oob-fragments)
-    - [Component interface](#component-interface)
-    - [Raw fragment rendering](#raw-fragment-rendering)
-    - [Lazy rendering](#lazy-rendering)
-  - [Observability](#observability)
-    - [Check for subscribers](#check-for-subscribers)
-    - [Topic metrics](#topic-metrics)
-    - [Per-topic metrics](#per-topic-metrics)
-  - [Testing](#testing)
-  - [Topic constants](#topic-constants)
-  - [Thread safety](#thread-safety)
-  - [Philosophy](#philosophy)
-  - [Architecture](#architecture)
-    - [SSE flow](#sse-flow)
-  - [License](#license)
-  <!--toc:end-->
-
 [![Go Reference](https://pkg.go.dev/badge/github.com/catgoose/tavern.svg)](https://pkg.go.dev/github.com/catgoose/tavern)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -78,61 +24,13 @@ Thread-safe, topic-based pub/sub broker for Server-Sent Events (SSE) in Go.
 > -- The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
 
 Tavern provides a minimal, concurrent-safe message broker that fans out string
-messages to subscribers by topic. It is designed to sit behind an HTTP handler
-(Echo, Chi, net/http, etc.) and push real-time events to browser clients over
-SSE.
+messages to subscribers by topic. It sits behind any HTTP handler and pushes
+real-time events to browser clients over SSE. No JavaScript framework required.
 
 For practical patterns and integration examples, see the
 [Recipe Cookbook](RECIPES.md).
 
-## Why
-
-**Without tavern:**
-
-```go
-var (
-	mu          sync.RWMutex
-	subscribers map[string][]chan string
-)
-
-func publish(topic, msg string) {
-	mu.RLock()
-	defer mu.RUnlock()
-	for _, ch := range subscribers[topic] {
-		select {
-		case ch <- msg: // non-blocking send
-		default: // drop if full
-		}
-	}
-}
-
-func subscribe(topic string) (chan string, func()) {
-	mu.Lock()
-	ch := make(chan string, 16)
-	subscribers[topic] = append(subscribers[topic], ch)
-	mu.Unlock()
-	return ch, func() {
-		mu.Lock()
-		defer mu.Unlock()
-		// find and remove ch from the slice, close it...
-	}
-}
-
-// Now handle graceful shutdown, topic cleanup, subscriber counting...
-```
-
-**With tavern:**
-
-```go
-broker := tavern.NewSSEBroker()
-defer broker.Close()
-
-ch, unsub := broker.Subscribe("events")
-defer unsub()
-
-broker.Publish("events", tavern.NewSSEMessage("update", data).String())
-// Thread-safe. Non-blocking. Cleanup on Close(). Done.
-```
+---
 
 ## Install
 
@@ -142,150 +40,109 @@ go get github.com/catgoose/tavern
 
 ## Quick start
 
-Create a broker, subscribe, publish, and wire up an SSE endpoint:
-
 ```go
 broker := tavern.NewSSEBroker()
 defer broker.Close()
-```
 
-Subscribe to a topic and publish a message:
-
-```go
 ch, unsub := broker.Subscribe("events")
 defer unsub()
 
 broker.Publish("events", tavern.NewSSEMessage("update", `{"id":1}`).String())
 
 for msg := range ch {
-	// handle msg
+    // handle msg
 }
 ```
 
-Wire it up to an HTTP handler (Echo shown, works with any router):
+Wire it up to an HTTP handler (works with any router):
+
+```go
+// One line -- sets SSE headers, handles Last-Event-ID, streams with flush
+mux.Handle("/sse/events", broker.SSEHandler("events"))
+```
+
+Or the manual way (Echo shown):
 
 ```go
 func sseHandler(broker *tavern.SSEBroker) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		c.Response().Header().Set("Content-Type", "text/event-stream")
-		c.Response().Header().Set("Cache-Control", "no-cache")
-		c.Response().Header().Set("Connection", "keep-alive")
+    return func(c echo.Context) error {
+        c.Response().Header().Set("Content-Type", "text/event-stream")
+        c.Response().Header().Set("Cache-Control", "no-cache")
+        c.Response().Header().Set("Connection", "keep-alive")
 
-		ch, unsub := broker.Subscribe("events")
-		defer unsub()
+        ch, unsub := broker.Subscribe("events")
+        defer unsub()
 
-		for {
-			select {
-			case msg, ok := <-ch:
-				if !ok {
-					return nil // broker closed
-				}
-				if _, err := fmt.Fprint(c.Response(), msg); err != nil {
-					return nil // client disconnected
-				}
-				c.Response().Flush()
-			case <-c.Request().Context().Done():
-				return nil
-			}
-		}
-	}
+        for {
+            select {
+            case msg, ok := <-ch:
+                if !ok {
+                    return nil
+                }
+                if _, err := fmt.Fprint(c.Response(), msg); err != nil {
+                    return nil
+                }
+                c.Response().Flush()
+            case <-c.Request().Context().Done():
+                return nil
+            }
+        }
+    }
 }
 ```
 
-### Built-in SSE handler
-
-Or use the built-in handler that does the same thing in one line:
-
-```go
-// Standard library
-mux.Handle("/sse/events", broker.SSEHandler("events"))
-
-// Echo
-e.GET("/sse/events", echo.WrapHandler(broker.SSEHandler("events")))
-```
-
-The built-in handler sets SSE headers, handles `Last-Event-ID` resumption, and
-streams messages with flush. Override the write step for custom formatting:
+Override the built-in handler's write step for custom formatting:
 
 ```go
 mux.Handle("/sse", broker.SSEHandler("events",
     tavern.WithSSEWriter(func(w http.ResponseWriter, msg string) error {
-        // use htmx-go, custom framing, logging, etc.
         return myCustomWrite(w, msg)
     }),
 ))
 ```
 
-## Core concepts
+---
 
-### Subscribe and unsubscribe
+## Core pub/sub
 
 > The server sends a representation. The representation contains links and
 > forms. The client follows them. THAT IS THE ENTIRE INTERACTION MODEL.
 >
 > -- The Wisdom of the Uniform Interface, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
 
-The server speaks; the client listens. This is the natural order. `Subscribe` returns a read-only channel and an unsubscribe function. Always
-defer the unsubscribe to avoid leaking goroutines and channels.
+The server speaks; the client listens. This is the natural order.
+
+### Subscribe / Publish / Unsubscribe / Close
 
 ```go
 ch, unsub := broker.Subscribe("events")
 defer unsub()
 
-for msg := range ch {
-	// handle msg
-}
-```
-
-### Publish
-
-`Publish` fans out a message to every subscriber of a topic. It is
-non-blocking: if a subscriber's channel buffer is full, the message is silently
-dropped for that subscriber.
-
-```go
 broker.Publish("events", "hello, world")
+broker.Close() // closes all channels, removes all topics
 ```
 
-### Scoped subscriptions
+`Publish` fans out to every subscriber. Non-blocking -- if a subscriber's buffer
+is full, the message is silently dropped for that subscriber.
 
-Sometimes different clients need to see different slices of the same topic —
-per-user notifications, per-tenant feeds, or per-session state. `SubscribeScoped`
-tags a subscriber with a scope key. Only messages published via `PublishTo` with
-a matching key are delivered to that subscriber.
+### Scoped subscriptions (PublishTo)
+
+Per-user, per-tenant, or per-resource message delivery:
 
 ```go
-// Client subscribes to their own user feed
 ch, unsub := broker.SubscribeScoped("notifications", userID)
 defer unsub()
 
-for msg := range ch {
-	// only messages published to this userID arrive here
-}
+broker.PublishTo("notifications", userID, msg)
+broker.PublishOOBTo("notifications", userID, tavern.Replace("badge", `<span>3</span>`))
 ```
 
-Publish to a specific scope:
+Scoped and unscoped subscribers are fully independent. `Publish` delivers only
+to unscoped; `PublishTo` delivers only to matching scoped subscribers.
 
-```go
-broker.PublishTo("notifications", userID, tavern.NewSSEMessage("alert", payload).String())
-```
+### Multiplexed subscriptions (SubscribeMulti)
 
-For OOB fragments targeted to a single scope:
-
-```go
-broker.PublishOOBTo("notifications", userID,
-	tavern.Replace("alert-badge", `<span>3</span>`),
-)
-```
-
-Scoped and unscoped subscribers on the same topic are fully independent.
-`Publish` delivers only to unscoped subscribers; `PublishTo` delivers only to
-matching scoped subscribers. `HasSubscribers` and `TopicCounts` count both.
-
-### Multiplexed subscriptions
-
-Subscribe to multiple topics on a single channel. Each message is tagged
-with its source topic, eliminating the need for `reflect.Select`:
+Subscribe to multiple topics on a single channel, eliminating `reflect.Select`:
 
 ```go
 ch, unsub := broker.SubscribeMulti("network", "services", "alerts")
@@ -297,50 +154,24 @@ for msg := range ch {
 }
 ```
 
-### Snapshot + delta
+### Hierarchical topics with glob wildcards (SubscribeGlob)
 
-Send a computed snapshot as the first message, then live updates. Eliminates
-the dual-render pattern where page handlers and publishers independently
-render the same initial state:
+Pattern-based subscriptions across topic hierarchies. Topics use `/` as the
+separator; `*` matches one segment, `**` matches zero or more:
 
 ```go
-ch, unsub := broker.SubscribeWithSnapshot("dashboard", func() string {
-    return renderFullDashboard()
-})
+// All services under monitoring
+ch, unsub := broker.SubscribeGlob("monitoring/services/*")
 defer unsub()
-// First message is the snapshot, then live publishes follow
+
+// Everything under monitoring at any depth
+ch, unsub := broker.SubscribeGlob("monitoring/**")
+defer unsub()
 ```
 
-### Format SSE messages
+Messages arrive as `TopicMessage` values tagged with the actual publish topic.
 
-`SSEMessage` builds wire-format SSE text. Chain `WithID` and `WithRetry` for
-optional fields.
-
-```go
-// Minimal message
-msg := tavern.NewSSEMessage("update", `{"id":1}`).String()
-// event: update
-// data: {"id":1}
-
-// With ID and retry
-msg := tavern.NewSSEMessage("update", `{"id":1}`).
-	WithID("42").
-	WithRetry(5000).
-	String()
-// event: update
-// data: {"id":1}
-// id: 42
-// retry: 5000
-```
-
-### Graceful shutdown
-
-`Close` closes all subscriber channels and removes all topics. Pending reads
-on subscriber channels will receive the zero value after `Close` returns.
-
-```go
-broker.Close()
-```
+---
 
 ## Publishing variants
 
@@ -350,267 +181,181 @@ broker.Close()
 >
 > -- The Wisdom of the Uniform Interface, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
 
-Tavern's publish methods are how the server exercises that affordance in real
-time. The state changed; the server tells it.
+### PublishWithReplay / PublishWithID / SubscribeFromID
 
-### PublishWithReplay
-
-Cache recent messages so new subscribers get them immediately on connect:
+Cache recent messages so new subscribers get them on connect:
 
 ```go
-// Default: replays last 1 message
-broker.PublishWithReplay("dashboard", msg)
-
-// Replay last 10 messages (activity feed, chat)
-broker.SetReplayPolicy("activity", 10)
-broker.PublishWithReplay("activity", msg) // last 10 cached
+broker.SetReplayPolicy("activity", 10) // keep last 10
+broker.PublishWithReplay("activity", msg)
 ```
-
-Clear the cache:
-
-```go
-broker.ClearReplay("dashboard")
-```
-
-### PublishWithID / SubscribeFromID
 
 Track message IDs for gap-free reconnection:
 
 ```go
-// Publish with an event ID
-broker.SetReplayPolicy("events", 100) // keep last 100 for resumption
 broker.PublishWithID("events", "evt-42", msg)
-broker.PublishWithID("events", "evt-43", msg2)
+
+// On reconnect, browser sends Last-Event-ID -- replay only missed messages
+ch, unsub := broker.SubscribeFromID("events", lastEventID)
 ```
-
-When a client reconnects, the browser sends the `Last-Event-ID` header.
-Use `SubscribeFromID` to replay only the missed messages:
-
-```go
-func sseHandler(broker *tavern.SSEBroker) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		lastID := r.Header.Get("Last-Event-ID")
-		ch, unsub := broker.SubscribeFromID("events", lastID)
-		defer unsub()
-		// ... write messages to response ...
-	}
-}
-```
-
-If `lastID` is empty (first connection), all cached messages are replayed.
-If `lastID` is found, only newer messages are replayed. If `lastID` is not
-in the replay log (too old), no replay occurs and only live messages are
-delivered.
 
 ### PublishIfChanged
 
-Skip redundant publishes with content-based deduplication. `PublishIfChanged`
-compares the FNV-64a hash of the message against the last published value for
-that topic and only publishes when the content actually changed. Returns `true`
-if published, `false` if skipped.
+Content-based deduplication using FNV-64a hashing. Only publishes when the
+message actually differs:
 
 ```go
-// Only publishes when the rendered HTML differs from last time
 broker.PublishIfChanged("dashboard", renderDashboard())
 ```
 
-The dedup state is per-topic and independent of `Publish`. Reset it with
-`ClearDedup`:
+### PublishDebounced / PublishThrottled
 
 ```go
-broker.ClearDedup("dashboard")
-```
-
-### PublishDebounced
-
-Debounce waits for a quiet period — if new messages keep arriving, the timer
-resets and only the final message is published. Best for user input where you
-want the settled state.
-
-```go
-// Publish only after 200ms of quiet (typing indicators, search)
+// Wait for 200ms of quiet, then publish the final value
 broker.PublishDebounced("search-results", html, 200*time.Millisecond)
-```
 
-### PublishThrottled
-
-Throttle publishes the first message immediately, then rate-limits to at
-most one message per interval. If messages arrive during the cooldown, the most
-recent one is published when the interval elapses. Best for continuous data
-where you want bounded latency.
-
-```go
-// Publish at most once per second, first call immediate
+// At most once per second, first call immediate
 broker.PublishThrottled("live-stats", html, time.Second)
 ```
 
-## Broker configuration
+### PublishWithTTL
 
-`NewSSEBroker` accepts functional options to override defaults.
-
-### WithBufferSize
-
-Sets the channel buffer capacity for every new subscriber.
-The default is 10. Increase it if your publisher bursts faster than subscribers
-drain, or decrease it to tighten back-pressure.
+Ephemeral messages that auto-expire from the replay cache. Current subscribers
+get them immediately; new subscribers only see them if the TTL hasn't elapsed:
 
 ```go
-broker := tavern.NewSSEBroker(tavern.WithBufferSize(64))
-defer broker.Close()
-```
-
-### WithDropOldest
-
-Changes the buffer strategy from drop-newest (default) to
-drop-oldest. When a subscriber's buffer is full, the oldest queued message is
-discarded to make room for the new one. Use this for dashboards where stale
-data is worse than gaps.
-
-```go
-broker := tavern.NewSSEBroker(tavern.WithBufferSize(5), tavern.WithDropOldest())
-```
-
-### WithKeepalive
-
-Sends `: keepalive\n` comment to all subscribers at the configured interval.
-SSE comments are ignored by `EventSource` but keep TCP connections alive
-through proxies and load balancers that close idle connections.
-
-```go
-broker := tavern.NewSSEBroker(tavern.WithKeepalive(15 * time.Second))
-```
-
-### WithTopicTTL
-
-Topics with zero subscribers for longer than the TTL are automatically removed
-from the broker's internal maps. Prevents memory leaks from ephemeral
-per-resource topics. A background goroutine sweeps at half the TTL interval.
-
-```go
-broker := tavern.NewSSEBroker(tavern.WithTopicTTL(5 * time.Minute))
-```
-
-### WithSlowSubscriberEviction
-
-> Student ask Grug about complexity.
->
-> Grug say: "complexity is apex predator."
->
-> -- The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
-
-Dead connections are complexity hiding in your subscriber list.
-Auto-disconnect subscribers that drop too many consecutive messages:
-
-```go
-broker := tavern.NewSSEBroker(
-    tavern.WithSlowSubscriberEviction(100), // evict after 100 consecutive drops
-    tavern.WithSlowSubscriberCallback(func(topic string) {
-        slog.Warn("slow subscriber evicted", "topic", topic)
-    }),
+// Toast notification that expires in 5 seconds
+broker.PublishWithTTL("toasts", toastHTML, 5*time.Second,
+    tavern.WithAutoRemove("toast-42"), // sends OOB delete on expiry
 )
 ```
 
-The evicted client's `EventSource` automatically reconnects. The drop counter
-resets when a message is successfully delivered.
+Also available: `PublishOOBWithTTL`, `PublishToWithTTL`, `PublishIfChangedWithTTL`.
 
-### WithLogger
+### Batch publishing (Batch / Flush)
 
-Logs publisher panics and errors when set. Accepts a standard `*slog.Logger`.
+Buffer multiple publishes and deliver them as a single write per subscriber:
 
 ```go
-broker := tavern.NewSSEBroker(tavern.WithLogger(slog.Default()))
+batch := broker.Batch()
+batch.PublishOOB("dashboard", tavern.Replace("stats", statsHTML))
+batch.PublishOOB("dashboard", tavern.Replace("chart", chartHTML))
+batch.PublishOOB("dashboard", tavern.Replace("activity", feedHTML))
+batch.Flush() // one atomic write per subscriber
 ```
 
-### SetReplayPolicy
+---
 
-Controls how many recent messages to cache for replay on a given topic. New
-subscribers receive up to `n` cached messages in order before live messages.
-Use `n=0` to disable replay for the topic.
+## OOB (out-of-band) fragments
+
+> The whole point -- the ENTIRE POINT -- of hypermedia is that the server tells
+> the client what to do next IN THE RESPONSE ITSELF.
+>
+> -- The Wisdom of the Uniform Interface, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
+
+OOB swaps are SSE's answer to this. The server sends the exact DOM mutations
+to apply:
 
 ```go
-// Replay last 10 messages (activity feed, chat)
-broker.SetReplayPolicy("activity", 10)
-broker.PublishWithReplay("activity", msg) // last 10 cached
+broker.PublishOOB("events",
+    tavern.Replace("stats-bar", "<span>42</span>"),
+    tavern.Delete("task-row-5"),
+    tavern.Append("activity-feed", "<li>New item</li>"),
+    tavern.Prepend("alert-list", "<li>Alert!</li>"),
+)
 ```
 
-### SetRetry / SetRetryAll
+### Component interface (templ integration)
 
-Control client reconnect timing for graceful deploys:
+`Component` renders itself to a writer. The interface matches `templ.Component`
+exactly -- pass templ components directly, no imports needed:
 
 ```go
-// Tell dashboard subscribers to wait 30s before reconnecting
-broker.SetRetry("dashboard", 30 * time.Second)
-
-// Tell ALL subscribers across all topics
-broker.SetRetryAll(30 * time.Second)
-
-// Then shut down
-broker.Close()
+broker.PublishOOB("events",
+    tavern.ReplaceComponent("stats-bar", views.StatsBar(stats)),
+    tavern.AppendComponent("feed", views.FeedItem(item)),
+)
 ```
 
-Sends an SSE `retry:` directive that the browser's `EventSource` stores for
-the next reconnect attempt. Prevents thundering-herd on rolling deploys.
+If rendering fails, the fragment contains an HTML comment with the error
+rather than a partial render.
 
-## Lifecycle hooks
+### Lazy rendering (PublishLazyOOB)
 
-### OnFirstSubscriber / OnLastUnsubscribe
-
-Register callbacks that fire when a topic goes from zero to one subscriber
-or from one to zero subscribers. Both scoped and unscoped subscribers are
-counted. Callbacks run in their own goroutine and do not block
-Subscribe/unsubscribe. Multiple hooks per topic are allowed. Hooks survive
-across subscriber cycles.
+Skip expensive rendering when nobody is listening:
 
 ```go
-broker.OnFirstSubscriber("dashboard", func(topic string) {
-	go startDashboardPublisher(ctx)
+broker.PublishLazyOOB("dashboard", func() []tavern.Fragment {
+    stats := fetchStats(db) // only runs if someone is subscribed
+    return []tavern.Fragment{
+        tavern.ReplaceComponent("stats", views.StatsPanel(stats)),
+    }
 })
 
-broker.OnLastUnsubscribe("dashboard", func(topic string) {
-	cancelDashboardPublisher()
-})
+// With deduplication
+broker.PublishLazyIfChangedOOB("dashboard", func() []tavern.Fragment { ... })
 ```
 
-## Scheduled publisher
+### PublishOOBWithTTL
 
-`ScheduledPublisher` manages multiple named sections with independent
-intervals. It ticks on a fast base interval, renders due sections into a
-shared buffer, and publishes one batched message per tick. Skips rendering
-when no subscribers are listening. Includes panic recovery per section.
+Ephemeral OOB fragments:
 
 ```go
-pub := broker.NewScheduledPublisher("dashboard", tavern.WithBaseTick(100*time.Millisecond))
-
-pub.Register("network", 1*time.Second, func(ctx context.Context, buf *bytes.Buffer) error {
-	return views.NetworkChart(snap).Render(ctx, buf)
-})
-pub.Register("services", 3*time.Second, func(ctx context.Context, buf *bytes.Buffer) error {
-	return views.ServicesPanel(services).Render(ctx, buf)
-})
-
-// Blocks until ctx is cancelled. Handles ticking, isDue checks, batching.
-broker.RunPublisher(ctx, pub.Start)
-
-// Runtime interval changes
-pub.SetInterval("network", 500*time.Millisecond)
+broker.PublishOOBWithTTL("toasts", 5*time.Second,
+    tavern.Replace("toast-area", toastHTML),
+)
 ```
 
-### RunPublisher
+---
 
-Launches a publisher goroutine with panic recovery. Tracked by the broker's
-internal WaitGroup so `Close()` waits for all publishers to return.
+## SSE handlers
+
+### SSEHandler
+
+The built-in handler sets SSE headers, handles `Last-Event-ID` resumption, and
+streams messages with flush:
 
 ```go
-broker.RunPublisher(ctx, func(ctx context.Context) {
-	// long-running publisher logic
-})
+mux.Handle("/sse/events", broker.SSEHandler("events"))
 ```
+
+### Topic groups (GroupHandler / DynamicGroupHandler)
+
+Serve multiple topics on a single SSE connection:
+
+```go
+// Static group -- same topics for everyone
+broker.DefineGroup("dashboard", []string{"stats", "alerts", "activity"})
+mux.Handle("/sse/dashboard", broker.GroupHandler("dashboard"))
+
+// Dynamic group -- per-request topic resolution (authorization, etc.)
+broker.DynamicGroup("user-dashboard", func(r *http.Request) []string {
+    user := auth.FromContext(r.Context())
+    return topicsForRole(user.Role)
+})
+mux.Handle("/sse/user", broker.DynamicGroupHandler("user-dashboard"))
+```
+
+### Snapshot + delta (SubscribeWithSnapshot)
+
+Send a computed snapshot as the first message, then live updates. Eliminates
+the dual-render pattern:
+
+```go
+ch, unsub := broker.SubscribeWithSnapshot("dashboard", func() string {
+    return renderFullDashboard()
+})
+defer unsub()
+// First message is the snapshot, then live publishes follow
+```
+
+---
 
 ## Subscriber management
 
-### Subscriber metadata
+### Metadata (SubscribeWithMeta)
 
-Tag subscribers with metadata for admin panels and debugging:
+Tag subscribers for admin panels and debugging:
 
 ```go
 ch, unsub := broker.SubscribeWithMeta("dashboard", tavern.SubscribeMeta{
@@ -618,34 +363,63 @@ ch, unsub := broker.SubscribeWithMeta("dashboard", tavern.SubscribeMeta{
     Meta: map[string]string{"user": userName, "addr": remoteAddr},
 })
 defer unsub()
-```
 
-Query who is subscribed:
-
-```go
 subs := broker.Subscribers("dashboard")
-for _, s := range subs {
-    fmt.Printf("id=%s topic=%s connected=%s\n", s.ID, s.Topic, s.ConnectedAt)
-}
+broker.Disconnect("dashboard", sessionID) // force disconnect
 ```
 
-Disconnect a specific subscriber by ID:
+### Subscriber filtering (SubscribeWithFilter)
+
+Per-subscriber message filtering in the publish path:
 
 ```go
-broker.Disconnect("dashboard", sessionID) // closes the subscriber's channel
+ch, unsub := broker.SubscribeWithFilter("activity", func(msg string) bool {
+    return strings.Contains(msg, userID) // only this user's activity
+})
+defer unsub()
 ```
 
-### Connection events
+Non-matching messages are silently skipped without counting toward drops or
+backpressure.
 
-Publish subscriber connect/disconnect as SSE events on a meta topic:
+### Per-subscriber rate limiting (SubscribeWithRate)
+
+```go
+ch, unsub := broker.SubscribeWithRate("live-data", tavern.Rate{
+    MaxPerSecond: 5, // at most 5 msg/s to this subscriber
+})
+defer unsub()
+```
+
+Messages faster than the rate are held; the most recent held message is
+delivered when the interval elapses (latest-wins). Does not affect other
+subscribers.
+
+### Server-initiated subscription changes (AddTopic / RemoveTopic)
+
+Dynamically modify a subscriber's topic set without reconnecting:
+
+```go
+// Add a topic -- subscriber starts receiving it immediately
+broker.AddTopic(subscriberID, "new-topic", true) // true = send control event
+
+// Remove a topic
+broker.RemoveTopic(subscriberID, "old-topic", true)
+
+// Scope-wide changes
+broker.AddTopicForScope("admin", "audit-log", true)
+```
+
+A `tavern-topics-changed` control event notifies the client so it can set up
+new SSE-swap targets.
+
+### Connection events (WithConnectionEvents)
+
+Publish subscribe/unsubscribe as SSE events on a meta topic:
 
 ```go
 broker := tavern.NewSSEBroker(tavern.WithConnectionEvents("_meta"))
-```
 
-Subscribe to `_meta` to monitor connections in real time:
-
-```go
 ch, unsub := broker.Subscribe("_meta")
 // Receives: {"event":"subscribe","topic":"dashboard","subscribers":3}
 // Receives: {"event":"unsubscribe","topic":"dashboard","subscribers":2}
@@ -653,225 +427,405 @@ ch, unsub := broker.Subscribe("_meta")
 
 The meta topic does not generate recursive events for its own subscribers.
 
-## OOB fragments
+---
 
-> The whole point -- the ENTIRE POINT -- of hypermedia is that the server tells
-> the client what to do next IN THE RESPONSE ITSELF.
->
-> -- The Wisdom of the Uniform Interface, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
+## Reactive hooks
 
-OOB swaps are SSE's answer to this. The server doesn't just tell the client
-that something changed -- it sends the exact DOM mutations to apply. Build
-targeted swaps and publish them as a single event:
+### After hooks (topic dependencies)
+
+Fire callbacks after a successful publish to chain dependent updates:
 
 ```go
-// Replace, Append, Prepend, Delete — plain string helpers
-broker.PublishOOB("events",
-	tavern.Replace("stats-bar", "<span>42</span>"),
-	tavern.Delete("task-row-5"),
-	tavern.Append("activity-feed", "<li>New item</li>"),
-)
+broker.After("orders", func() {
+    broker.PublishOOB("dashboard",
+        tavern.ReplaceComponent("order-count", views.OrderCount(db)),
+    )
+})
 ```
 
-### Component interface
+Hooks run asynchronously in a new goroutine. Cycle detection prevents infinite
+loops (max depth 8, skips already-visited topics in the chain).
 
-`Component` renders itself to a writer. The interface is identical to
-`templ.Component`, so templ components can be passed directly — tavern does
-not import templ.
+### OnMutate / NotifyMutate
+
+Decouple mutation signals from specific topics. Register handlers for logical
+resources, trigger them from your business logic:
 
 ```go
-type Component interface {
-	Render(ctx context.Context, w io.Writer) error
-}
+broker.OnMutate("orders", func(evt tavern.MutationEvent) {
+    order := evt.Data.(*Order)
+    broker.PublishOOB("order-detail",
+        tavern.ReplaceComponent("order-"+order.ID, views.OrderRow(order)),
+    )
+    broker.PublishOOB("dashboard",
+        tavern.ReplaceComponent("order-stats", views.OrderStats(db)),
+    )
+})
+
+// In your handler:
+broker.NotifyMutate("orders", tavern.MutationEvent{ID: orderID, Data: order})
 ```
 
-Use the component helpers to render and wrap in one call:
+### Publish middleware (Use / UseTopics)
+
+Intercept, transform, or swallow publishes:
 
 ```go
-broker.PublishOOB("events",
-	tavern.ReplaceComponent("stats-bar", views.StatsBar(stats)),
-	tavern.AppendComponent("feed", views.FeedItem(item)),
-)
-```
+// Global middleware -- runs on every publish
+broker.Use(func(next tavern.PublishFunc) tavern.PublishFunc {
+    return func(topic, msg string) {
+        slog.Info("publish", "topic", topic, "size", len(msg))
+        next(topic, msg)
+    }
+})
 
-If rendering fails, the fragment contains an HTML comment with the error
-message rather than a partial render.
-
-### Raw fragment rendering
-
-For manual control, render fragments to a string and publish directly:
-
-```go
-html := tavern.RenderFragments(
-	tavern.Replace("header", "<h1>Updated</h1>"),
-	tavern.Delete("old-banner"),
-)
-broker.Publish("events", tavern.NewSSEMessage("oob", html).String())
-```
-
-### Lazy rendering
-
-Skip expensive rendering when nobody is listening. `PublishLazyOOB` only
-calls the render function if the topic has subscribers:
-
-```go
-broker.PublishLazyOOB("dashboard", func() []tavern.Fragment {
-    // DB queries and template rendering only happen if someone is watching
-    stats := fetchStats(db)
-    return []tavern.Fragment{
-        tavern.ReplaceComponent("stats", views.StatsPanel(stats)),
+// Topic-scoped -- wildcards with ":" separator
+broker.UseTopics("admin:*", func(next tavern.PublishFunc) tavern.PublishFunc {
+    return func(topic, msg string) {
+        auditLog(topic, msg)
+        next(topic, msg)
     }
 })
 ```
 
-Combine with deduplication:
+---
+
+## Reconnection and resilience
+
+### Replay gap detection (OnReplayGap / SetReplayGapPolicy)
+
+Handle reconnections where the client's Last-Event-ID has rolled out of the
+replay log:
 
 ```go
-broker.PublishLazyIfChangedOOB("dashboard", func() []tavern.Fragment {
-    stats := fetchStats(db)
-    return []tavern.Fragment{
-        tavern.ReplaceComponent("stats", views.StatsPanel(stats)),
-    }
+broker.OnReplayGap("dashboard", func(sub *tavern.SubscriberInfo, lastID string) {
+    slog.Warn("replay gap", "subscriber", sub.ID, "lastID", lastID)
+})
+
+// Fall back to a full snapshot when a gap is detected
+broker.SetReplayGapPolicy("dashboard", tavern.GapFallbackToSnapshot, func() string {
+    return renderFullDashboard()
 })
 ```
+
+### Reconnection UX (OnReconnect / BundleOnReconnect)
+
+```go
+broker.OnReconnect("dashboard", func(info tavern.ReconnectInfo) {
+    slog.Info("reconnect", "topic", info.Topic, "gap", info.Gap, "missed", info.MissedCount)
+    // Send a welcome-back message directly to this subscriber
+    info.SendToSubscriber(tavern.NewSSEMessage("reconnected", "welcome back").String())
+})
+
+// Bundle replay messages into a single write to reduce DOM churn
+broker.SetBundleOnReconnect("dashboard", true)
+```
+
+### Adaptive backpressure
+
+Tiered response to slow subscribers -- throttle, simplify, then disconnect:
+
+```go
+broker := tavern.NewSSEBroker(
+    tavern.WithAdaptiveBackpressure(tavern.AdaptiveBackpressure{
+        ThrottleAt:   5,   // deliver every 2nd message
+        SimplifyAt:   20,  // apply simplified renderer
+        DisconnectAt: 50,  // evict the subscriber
+    }),
+)
+
+// Register a lightweight renderer for the simplify tier
+broker.SetSimplifiedRenderer("dashboard", func(msg string) string {
+    return `<div id="dashboard">Loading...</div>`
+})
+
+// Get notified on tier changes
+broker.OnBackpressureTierChange(func(sub *tavern.SubscriberInfo, old, new tavern.BackpressureTier) {
+    slog.Warn("backpressure", "subscriber", sub.ID, "old", old, "new", new)
+})
+```
+
+### Slow subscriber eviction
+
+Simple threshold-based eviction without the full adaptive tier system:
+
+```go
+broker := tavern.NewSSEBroker(
+    tavern.WithSlowSubscriberEviction(100),
+    tavern.WithSlowSubscriberCallback(func(topic string) {
+        slog.Warn("slow subscriber evicted", "topic", topic)
+    }),
+)
+```
+
+---
+
+## Error handling
+
+### OnRenderError callback
+
+Centralized error handling for render failures in scheduled publishers:
+
+```go
+broker.OnRenderError(func(err *tavern.RenderError) {
+    slog.Error("render failed",
+        "topic", err.Topic,
+        "section", err.Section,
+        "error", err.Err,
+        "count", err.Count,
+    )
+})
+```
+
+### Circuit breaker for ScheduledPublisher
+
+Protect scheduled sections from cascading failures:
+
+```go
+pub.Register("services", 3*time.Second, renderServices, tavern.SectionOptions{
+    CircuitBreaker: &tavern.CircuitBreakerConfig{
+        FailureThreshold: 3,
+        RecoveryInterval: 30 * time.Second,
+        FallbackRender: func() string {
+            return `<div id="services">Service data temporarily unavailable</div>`
+        },
+    },
+})
+```
+
+After 3 consecutive failures, the circuit opens and renders the fallback. After
+30 seconds, a probe request tests recovery.
+
+---
+
+## Scheduled publishing
+
+`ScheduledPublisher` manages multiple named sections with independent
+intervals. It ticks on a fast base interval, renders due sections into a
+shared buffer, and publishes one batched message per tick. Skips rendering
+when no subscribers are listening.
+
+```go
+pub := broker.NewScheduledPublisher("dashboard", tavern.WithBaseTick(100*time.Millisecond))
+
+pub.Register("network", 1*time.Second, func(ctx context.Context, buf *bytes.Buffer) error {
+    return views.NetworkChart(snap).Render(ctx, buf)
+})
+pub.Register("services", 3*time.Second, func(ctx context.Context, buf *bytes.Buffer) error {
+    return views.ServicesPanel(services).Render(ctx, buf)
+})
+
+broker.RunPublisher(ctx, pub.Start)
+
+// Runtime interval changes
+pub.SetInterval("network", 500*time.Millisecond)
+```
+
+`RunPublisher` launches a publisher goroutine with panic recovery, tracked by
+the broker's WaitGroup so `Close()` waits for all publishers to return.
+
+---
 
 ## Observability
 
-### Check for subscribers
-
-Skip expensive serialization when nobody is listening:
+### Basic stats
 
 ```go
 if broker.HasSubscribers("system-stats") {
-	stats := collectStats()
-	broker.Publish("system-stats", toJSON(stats))
+    broker.Publish("system-stats", renderStats())
 }
-```
 
-> Grug say: "before enlightenment: fetch JSON, parse JSON, validate JSON,
-> transform JSON, store JSON in client state, derive view from client state,
-> diff virtual DOM, reconcile DOM, hydrate DOM, subscribe to store, dispatch
-> action, reduce state, re-derive view, re-diff virtual DOM."
->
-> Student say: "and after enlightenment?"
->
-> Grug say: "`hx-get`"
->
-> -- The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
+counts := broker.TopicCounts()           // map[string]int
+total := broker.SubscriberCount()        // int
+drops := broker.PublishDrops()           // int64
 
-With tavern, after enlightenment: `broker.Publish`.
-
-### Topic metrics
-
-```go
-// Per-topic subscriber counts
-counts := broker.TopicCounts()
-for topic, n := range counts {
-	fmt.Printf("%s: %d subscribers\n", topic, n)
-}
-```
-
-`SubscriberCount` returns the total across all topics in a single call:
-
-```go
-fmt.Println("total subscribers:", broker.SubscriberCount())
-```
-
-`PublishDrops` reports the running count of messages silently dropped because a
-subscriber's buffer was full:
-
-```go
-fmt.Println("dropped messages:", broker.PublishDrops())
-```
-
-`Stats` combines all three into a single lock acquisition:
-
-```go
 s := broker.Stats()
 // BrokerStats{Topics: int, Subscribers: int, PublishDrops: int64}
-fmt.Printf("topics=%d subs=%d drops=%d\n", s.Topics, s.Subscribers, s.PublishDrops)
 ```
 
-These are useful for health endpoints, structured logging, and alerting on
-unexpected drop rates:
+### Per-topic metrics (WithMetrics)
 
-```go
-go func() {
-	for range time.Tick(30 * time.Second) {
-		s := broker.Stats()
-		slog.Info("broker", "topics", s.Topics, "subs", s.Subscribers, "drops", s.PublishDrops)
-	}
-}()
-```
-
-### Per-topic metrics
-
-Enable detailed per-topic publish and drop counters with `WithMetrics`:
+Opt-in publish and drop counters per topic:
 
 ```go
 broker := tavern.NewSSEBroker(tavern.WithMetrics())
-
-// ... publish messages ...
 
 m := broker.Metrics()
 for topic, stats := range m.TopicStats {
     fmt.Printf("%s: published=%d dropped=%d peak_subs=%d\n",
         topic, stats.Published, stats.Dropped, stats.PeakSubscribers)
 }
-fmt.Printf("totals: published=%d dropped=%d\n", m.TotalPublished, m.TotalDropped)
 ```
 
-Metrics are opt-in — when `WithMetrics` is not set, there is zero overhead on
-publish operations. Use this to identify topics with high drop rates, track
-publish throughput, and find peak subscriber counts for capacity planning.
+### Enhanced observability (WithObservability)
+
+Latency histograms, subscriber lag, throughput, and connection durations:
+
+```go
+broker := tavern.NewSSEBroker(tavern.WithObservability(tavern.ObservabilityConfig{
+    PublishLatency:     true,
+    SubscriberLag:      true,
+    ConnectionDuration: true,
+    TopicThroughput:    true,
+}))
+
+obs := broker.Observability()
+p99 := obs.PublishLatencyP99("dashboard")
+lag := obs.SubscriberLag("dashboard", broker)
+rate := obs.TopicThroughput("dashboard")
+snap := obs.Snapshot(broker) // all topics at once
+```
+
+Zero overhead when not configured.
+
+---
 
 ## Testing
 
-The `taverntest` subpackage provides helpers for testing code that uses tavern:
+The `taverntest` subpackage provides test helpers:
 
 ```go
 import "github.com/catgoose/tavern/taverntest"
 
-func TestMyPublisher(t *testing.T) {
-    broker := tavern.NewSSEBroker()
-    defer broker.Close()
-
-    rec := taverntest.NewRecorder(broker, "events")
-    defer rec.Close()
-
-    // ... code under test publishes to "events" ...
-    myPublisher(broker)
-
-    rec.WaitFor(3, time.Second)
-    rec.AssertCount(t, 3)
-    rec.AssertContains(t, "expected-message")
-    rec.AssertNthMessage(t, 0, "first-message")
-}
-```
-
-`NewScopedRecorder` works the same way for scoped subscriptions:
-
-```go
-rec := taverntest.NewScopedRecorder(broker, "notifications", userID)
+// Recorder -- subscribe and collect messages
+rec := taverntest.NewRecorder(broker, "events")
 defer rec.Close()
+rec.WaitFor(3, time.Second)
+rec.AssertCount(t, 3)
+rec.AssertContains(t, "expected-message")
+
+// Capture -- declarative assertions
+cap := taverntest.NewCapture(broker, "events")
+defer cap.Close()
+cap.WaitFor(2, time.Second)
+cap.AssertMessages(t, "first", "second")
+
+// MockBroker -- record publishes without a real broker
+mock := taverntest.NewMockBroker()
+mock.Publish("events", "msg")
+mock.AssertPublished(t, "events", "msg")
+
+// SlowSubscriber -- test backpressure and eviction
+slow := taverntest.NewSlowSubscriber(broker, "events", taverntest.SlowSubscriberConfig{
+    ReadDelay: 100 * time.Millisecond,
+})
+defer slow.Close()
+
+// SimulatedConnection -- test reconnection and Last-Event-ID
+conn := taverntest.NewSimulatedConnection(broker, "events")
+conn.Disconnect()
+conn.Reconnect()
+conn.AssertReconnectMessages(t, ...)
+
+// SSERecorder -- capture SSE wire output for handler tests
+rec := taverntest.NewSSERecorder()
+handler.ServeHTTP(rec, req)
+rec.AssertEventCount(t, 3)
+rec.AssertEvent(t, 0, taverntest.SSEEvent{Event: "update", Data: "hello"})
 ```
 
-## Topic constants
+---
 
-Tavern ships topic name constants as conventions for common use cases. These
-are optional -- any string works as a topic name.
+## Subpackages
+
+### presence/ -- Structured presence tracking
+
+Heartbeat-based presence with stale detection and optional OOB publishing:
 
 ```go
-broker.Publish(tavern.TopicActivityFeed, eventJSON)
+import "github.com/catgoose/tavern/presence"
+
+tracker := presence.New(broker, presence.Config{
+    StaleTimeout: 30 * time.Second,
+    RenderFunc: func(topic string, users []presence.Info) string {
+        return renderPresenceList(users)
+    },
+    OnJoin:  func(topic string, info presence.Info) { /* ... */ },
+    OnLeave: func(topic string, info presence.Info) { /* ... */ },
+})
+defer tracker.Close()
+
+tracker.Join("doc-123", presence.Info{UserID: userID, Name: userName})
+tracker.Heartbeat("doc-123", userID)
+tracker.Update("doc-123", userID, map[string]any{"cursor": pos})
+tracker.Leave("doc-123", userID)
+
+users := tracker.List("doc-123")
 ```
+
+### backend/ -- Distributed fan-out interface
+
+The `backend.Backend` interface enables cross-process fan-out. Publishes on one
+broker instance reach subscribers on another.
+
+### backend/memory/ -- In-process backend for testing
+
+Simulate multi-instance deployments in tests:
+
+```go
+import "github.com/catgoose/tavern/backend/memory"
+
+mem := memory.New()
+fork := mem.Fork() // shares the same message bus
+
+broker1 := tavern.NewSSEBroker(tavern.WithBackend(mem))
+broker2 := tavern.NewSSEBroker(tavern.WithBackend(fork))
+
+// publish on broker1, subscribers on broker2 receive it
+```
+
+---
+
+## Configuration
+
+`NewSSEBroker` accepts functional options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithBufferSize(n)` | 10 | Subscriber channel buffer capacity |
+| `WithDropOldest()` | drop newest | Discard oldest queued message when buffer full |
+| `WithKeepalive(d)` | disabled | Send SSE comment keepalives at interval |
+| `WithTopicTTL(d)` | disabled | Auto-remove topics with no subscribers after TTL |
+| `WithSlowSubscriberEviction(n)` | disabled | Evict after n consecutive drops |
+| `WithAdaptiveBackpressure(cfg)` | disabled | Tiered backpressure (throttle/simplify/disconnect) |
+| `WithMetrics()` | disabled | Per-topic publish/drop counters |
+| `WithObservability(cfg)` | disabled | Latency, lag, throughput, connection duration |
+| `WithConnectionEvents(topic)` | disabled | Publish subscribe/unsubscribe events |
+| `WithLogger(l)` | nil | Log panics and errors via slog |
+| `WithBackend(b)` | nil | Cross-process fan-out backend |
+
+Additional runtime configuration:
+
+```go
+broker.SetReplayPolicy("topic", 10)        // replay cache size
+broker.SetRetry("topic", 30*time.Second)   // client reconnect delay
+broker.SetRetryAll(30*time.Second)          // all topics
+broker.OnRenderError(func(err *tavern.RenderError) { ... })
+```
+
+---
+
+## SSE message format
+
+```go
+msg := tavern.NewSSEMessage("update", `{"id":1}`).String()
+// event: update\ndata: {"id":1}\n\n
+
+msg := tavern.NewSSEMessage("update", data).WithID("42").WithRetry(5000).String()
+// event: update\ndata: ...\nid: 42\nretry: 5000\n\n
+```
+
+---
 
 ## Thread safety
 
-All `SSEBroker` methods are safe for concurrent use. The broker uses an
+All `SSEBroker` methods are safe for concurrent use. The broker uses
 `sync.RWMutex` internally: subscribing and unsubscribing take a write lock,
-while publishing and reading counts take a read lock. `Publish` snapshots the
+publishing and reading counts take a read lock. `Publish` snapshots the
 subscriber set under the read lock, then sends outside it, so publishers never
 block each other.
+
+---
 
 ## Philosophy
 
@@ -892,17 +846,19 @@ Server publish event. Browser receive event. What is difficult?
 > event stream is just another representation -- the server speaks, the client
 > listens, and nobody had to install an npm package to make it work.
 
+---
+
 ## Architecture
 
-### SSE flow
+```
+  handler --> broker.Publish("topic", msg)
+                      |
+                      +---> subscriber A (chan) ---> SSE endpoint ---> browser A
+                      +---> subscriber B (chan) ---> SSE endpoint ---> browser B
+                      +---> subscriber C (chan) ---> SSE endpoint ---> browser C
+```
 
-```
-  handler ──► broker.Publish("topic", msg)
-                      │
-                      ├──► subscriber A (chan) ──► SSE endpoint ──► browser A
-                      ├──► subscriber B (chan) ──► SSE endpoint ──► browser B
-                      └──► subscriber C (chan) ──► SSE endpoint ──► browser C
-```
+---
 
 ## License
 
