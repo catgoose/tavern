@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/catgoose/tavern/backend"
 )
 
 // SSEBroker is a thread-safe, topic-based pub/sub message broker. Subscribers
@@ -73,6 +75,7 @@ type SSEBroker struct {
 	multiSubs         map[string]*multiSub             // subscriberID → managed multi-subscription
 	globSubs          []*globSub                       // glob/wildcard subscriptions
 	globMu            sync.RWMutex                     // protects globSubs
+	backend           backend.Backend                  // nil = no cross-process fan-out
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -218,6 +221,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	if b.topicTTL > 0 {
 		go b.startTopicSweep()
 	}
+	b.initBackend()
 	return b
 }
 
@@ -264,9 +268,13 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 	}
 	replayMsgs := append([]string(nil), b.replayCache[topic]...)
 	delete(b.topicEmpty, topic)
+	hasBackend := b.backend != nil
 	b.mu.Unlock()
 	for _, fn := range firstHooks {
 		go fn(topic)
+	}
+	if hasBackend && total == 1 {
+		b.backendSubscribe(topic)
 	}
 	b.publishConnectionEvent("subscribe", topic, total)
 	for _, msg := range replayMsgs {
@@ -279,6 +287,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 	return ch, func() {
 		b.mu.Lock()
 		var lastHooks []func(string)
+		var isLast bool
 		if _, ok := b.topics[topic][ch]; ok {
 			delete(b.topics[topic], ch)
 			delete(b.subscriberMeta, ch)
@@ -286,6 +295,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 			close(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
+				isLast = true
 				lastHooks = b.onLast[topic]
 				b.topicEmpty[topic] = time.Now()
 			}
@@ -304,6 +314,9 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		}
 		for _, fn := range lastHooks {
 			go fn(topic)
+		}
+		if hasBackend && isLast {
+			b.backendUnsubscribe(topic)
 		}
 		b.publishConnectionEvent("unsubscribe", topic, -1)
 	}
@@ -346,10 +359,14 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		b.adaptive.getState(ch) // pre-create state
 	}
 	replayMsgs := append([]string(nil), b.replayCache[topic]...)
+	hasBackendScoped := b.backend != nil
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
 	for _, fn := range firstHooks {
 		go fn(topic)
+	}
+	if hasBackendScoped && total == 1 {
+		b.backendSubscribe(topic)
 	}
 	b.publishConnectionEvent("subscribe", topic, total)
 	for _, msg := range replayMsgs {
@@ -362,6 +379,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 	return ch, func() {
 		b.mu.Lock()
 		var lastHooks []func(string)
+		var isLastScoped bool
 		if _, ok := b.scopedTopics[topic][ch]; ok {
 			delete(b.scopedTopics[topic], ch)
 			delete(b.subscriberMeta, ch)
@@ -369,6 +387,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 			close(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
+				isLastScoped = true
 				lastHooks = b.onLast[topic]
 				b.topicEmpty[topic] = time.Now()
 			}
@@ -387,6 +406,9 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		}
 		for _, fn := range lastHooks {
 			go fn(topic)
+		}
+		if hasBackendScoped && isLastScoped {
+			b.backendUnsubscribe(topic)
 		}
 		b.publishConnectionEvent("unsubscribe", topic, -1)
 	}
@@ -775,6 +797,7 @@ func (b *SSEBroker) publishDirect(topic, msg string) {
 		b.obs.recordPublishLatency(topic, now.Sub(start))
 		b.obs.recordThroughput(topic, now)
 	}
+	b.backendPublish(topic, msg, "")
 	b.fireAfterHooks(topic)
 }
 
@@ -830,6 +853,7 @@ func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
 		b.obs.recordPublishLatency(topic, now.Sub(start))
 		b.obs.recordThroughput(topic, now)
 	}
+	b.backendPublish(topic, msg, "")
 	b.fireAfterHooks(topic)
 }
 
@@ -912,6 +936,7 @@ func (b *SSEBroker) publishToDirect(topic, scope, msg string) {
 		b.obs.recordPublishLatency(topic, now.Sub(start))
 		b.obs.recordThroughput(topic, now)
 	}
+	b.backendPublish(topic, msg, scope)
 	b.fireAfterHooks(topic)
 }
 
@@ -1172,6 +1197,9 @@ func (b *SSEBroker) Close() {
 	}
 	b.throttle.mu.Unlock()
 	b.rateLimit.stop()
+	if b.backend != nil {
+		b.backend.Close() //nolint:errcheck // best-effort cleanup
+	}
 }
 
 // startTopicSweep periodically removes topics that have had zero subscribers
