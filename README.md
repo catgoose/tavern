@@ -32,6 +32,40 @@ For practical patterns and integration examples, see the
 
 ---
 
+## Where Tavern Shines
+
+Tavern is general-purpose pub/sub plumbing, but some patterns fall out of it so
+naturally that they deserve a callout.
+
+**SaaS Notifications** -- Scoped subscriptions + filters + TTL + replay + OOB
+fragments = complete real-time notification system. Per-user streams, org-wide
+broadcasts, toast auto-expiry, reconnection recovery. Wire it up to your
+existing auth middleware and you have per-tenant push notifications without a
+third-party service.
+
+**Live Dashboards** -- Snapshot+delta streams, scheduled publisher with circuit
+breakers, adaptive backpressure for mixed client speeds, enhanced observability
+for monitoring the monitor. This is what tavern was built for.
+
+**Sports/Event Scoreboards** -- Topic groups for single-connection multi-game
+views, hierarchical topics for league/team filtering, gap detection for seamless
+reconnection, batch publish for atomic multi-region updates.
+
+**E-commerce Real-time** -- TTL for flash banners and cart timers, batch publish
+for inventory+price+availability in one flush, presence for "X people viewing,"
+middleware for audit trails.
+
+**HTMX Server-Driven UI** -- Tavern's home turf. OOB fragment swaps, lazy
+rendering that skips work when nobody's watching, templ component integration,
+mutation hooks that decouple handlers from SSE updates. The server owns the
+state, HTML goes over the wire.
+
+**Multi-Instance Deployment** -- Pluggable backend interface, memory backend for
+testing, scope-aware message envelopes. Publish on instance A, subscribers on
+instance B get it.
+
+---
+
 ## Install
 
 ```bash
