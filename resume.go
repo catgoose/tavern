@@ -6,9 +6,13 @@ import (
 )
 
 // ReplayEntry pairs a message with its event ID for resumption support.
+// When ExpiresAt is non-zero, the entry will be removed from the replay
+// cache after that time (see [SSEBroker.PublishWithTTL]).
 type ReplayEntry struct {
-	ID  string
-	Msg string
+	ID           string
+	Msg          string
+	ExpiresAt    time.Time // zero means no expiry
+	AutoRemoveID string    // element ID for OOB delete on expiry (empty = none)
 }
 
 // PublishWithID publishes msg to the topic with an associated event ID.
@@ -88,20 +92,34 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		}
 	}
 
-	// Find messages after lastEventID.
+	// Find messages after lastEventID, skipping expired TTL entries.
+	now := time.Now()
 	var replayMsgs []string
 	var gapDetected bool
 	if lastEventID == "" {
 		// No Last-Event-ID: replay all cached (same as regular Subscribe).
-		replayMsgs = append([]string(nil), b.replayCache[topic]...)
+		// Filter out expired entries from the replay log if present.
+		if log := b.replayLog[topic]; len(log) > 0 {
+			for _, e := range log {
+				if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
+					continue
+				}
+				replayMsgs = append(replayMsgs, e.Msg)
+			}
+		} else {
+			replayMsgs = append([]string(nil), b.replayCache[topic]...)
+		}
 	} else {
 		log := b.replayLog[topic]
 		found := false
 		for i, entry := range log {
 			if entry.ID == lastEventID {
 				found = true
-				// Replay everything after this entry.
+				// Replay everything after this entry, skipping expired.
 				for _, e := range log[i+1:] {
+					if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
+						continue
+					}
 					replayMsgs = append(replayMsgs, e.Msg)
 				}
 				break
