@@ -66,6 +66,7 @@ type SSEBroker struct {
 	ttlSweeperOnce    sync.Once                      // ensures TTL sweeper starts at most once
 	msgTTLSweep       time.Duration                  // override for TTL sweep interval (0 = default 1s)
 	rateLimit         *rateLimiter                     // per-subscriber rate limiting
+	adaptive          *adaptiveBackpressure          // nil = adaptive backpressure disabled
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -200,7 +201,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	b.debounce.timers = make(map[string]*debounceEntry)
 	b.throttle.state = make(map[string]*throttleEntry)
 	b.rateLimit = newRateLimiter()
-	if b.evictThreshold > 0 {
+	if b.evictThreshold > 0 || b.adaptive != nil {
 		b.dropCounts = make(map[chan string]*atomic.Int64)
 	}
 	if b.keepaliveInterval > 0 {
@@ -245,10 +246,13 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 			b.metrics.peakSubs[topic] = total
 		}
 	}
-	if b.evictThreshold > 0 {
+	if b.evictThreshold > 0 || b.adaptive != nil {
 		b.dropCountsMu.Lock()
 		b.dropCounts[ch] = &atomic.Int64{}
 		b.dropCountsMu.Unlock()
+	}
+	if b.adaptive != nil {
+		b.adaptive.getState(ch) // pre-create state
 	}
 	replayMsgs := append([]string(nil), b.replayCache[topic]...)
 	delete(b.topicEmpty, topic)
@@ -278,10 +282,13 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 			}
 		}
 		b.mu.Unlock()
-		if b.evictThreshold > 0 {
+		if b.evictThreshold > 0 || b.adaptive != nil {
 			b.dropCountsMu.Lock()
 			delete(b.dropCounts, ch)
 			b.dropCountsMu.Unlock()
+		}
+		if b.adaptive != nil {
+			b.adaptive.removeState(ch)
 		}
 		for _, fn := range lastHooks {
 			go fn(topic)
@@ -318,10 +325,13 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 			b.metrics.peakSubs[topic] = total
 		}
 	}
-	if b.evictThreshold > 0 {
+	if b.evictThreshold > 0 || b.adaptive != nil {
 		b.dropCountsMu.Lock()
 		b.dropCounts[ch] = &atomic.Int64{}
 		b.dropCountsMu.Unlock()
+	}
+	if b.adaptive != nil {
+		b.adaptive.getState(ch) // pre-create state
 	}
 	replayMsgs := append([]string(nil), b.replayCache[topic]...)
 	delete(b.topicEmpty, topic)
@@ -351,10 +361,13 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 			}
 		}
 		b.mu.Unlock()
-		if b.evictThreshold > 0 {
+		if b.evictThreshold > 0 || b.adaptive != nil {
 			b.dropCountsMu.Lock()
 			delete(b.dropCounts, ch)
 			b.dropCountsMu.Unlock()
+		}
+		if b.adaptive != nil {
+			b.adaptive.removeState(ch)
 		}
 		for _, fn := range lastHooks {
 			go fn(topic)
@@ -540,7 +553,9 @@ func (b *SSEBroker) send(ch chan string, msg string) bool {
 }
 
 // publishToChannels fans out msg to the given channels, tracking drops and
-// evicting slow subscribers when configured.
+// evicting slow subscribers when configured. When adaptive backpressure is
+// enabled, the message may be throttled, simplified, or the subscriber evicted
+// based on consecutive drop tiers.
 func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg string) (sent, dropped int) {
 	for _, ch := range channels {
 		func() {
@@ -555,10 +570,36 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 			if pred := b.filterPredicate(ch); pred != nil && !pred(msg) {
 				return
 			}
-			if b.send(ch, msg) {
+
+			// Adaptive backpressure: determine what to send based on tier.
+			outMsg := msg
+			if b.adaptive != nil {
+				st := b.adaptive.getState(ch)
+				switch st.tier {
+				case TierThrottle:
+					if b.adaptive.shouldThrottle(ch) {
+						// Skip this message for the throttled subscriber.
+						dropped++
+						b.drops.Add(1)
+						return
+					}
+				case TierSimplify:
+					if renderer := b.adaptive.getRenderer(topic); renderer != nil {
+						outMsg = renderer(msg)
+					}
+				}
+			}
+
+			if b.send(ch, outMsg) {
 				sent++
 				if b.evictThreshold > 0 {
 					b.resetDropCount(ch)
+				}
+				if b.adaptive != nil {
+					b.resetDropCount(ch)
+					if oldTier, changed := b.adaptive.resetState(ch); changed {
+						b.fireTierChange(ch, oldTier, TierNormal)
+					}
 				}
 			} else {
 				b.drops.Add(1)
@@ -568,10 +609,44 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 						b.evictSubscriber(topic, ch)
 					}
 				}
+				if b.adaptive != nil {
+					drops := b.incrementDropCount(ch)
+					oldTier, newTier, changed := b.adaptive.updateTier(ch, drops)
+					if changed {
+						b.fireTierChange(ch, oldTier, newTier)
+					}
+					if newTier == TierDisconnect {
+						b.evictSubscriber(topic, ch)
+					}
+				}
 			}
 		}()
 	}
 	return
+}
+
+// fireTierChange invokes the adaptive tier-change callback if registered.
+func (b *SSEBroker) fireTierChange(ch chan string, oldTier, newTier BackpressureTier) {
+	if b.adaptive == nil {
+		return
+	}
+	b.adaptive.mu.RLock()
+	fn := b.adaptive.tierChange
+	b.adaptive.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	b.mu.RLock()
+	info, ok := b.subscriberMeta[ch]
+	var infoCopy *SubscriberInfo
+	if ok {
+		cp := *info
+		infoCopy = &cp
+	}
+	b.mu.RUnlock()
+	if infoCopy != nil {
+		go fn(infoCopy, oldTier, newTier)
+	}
 }
 
 func (b *SSEBroker) resetDropCount(ch chan string) {
@@ -632,6 +707,10 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 	b.dropCountsMu.Lock()
 	delete(b.dropCounts, ch)
 	b.dropCountsMu.Unlock()
+	// Clean up adaptive state.
+	if b.adaptive != nil {
+		b.adaptive.removeState(ch)
+	}
 	// Fire callback.
 	if b.evictCallback != nil {
 		go b.evictCallback(topic)
@@ -1001,6 +1080,11 @@ func (b *SSEBroker) Close() {
 		b.dropCountsMu.Lock()
 		b.dropCounts = nil
 		b.dropCountsMu.Unlock()
+	}
+	if b.adaptive != nil {
+		b.adaptive.mu.Lock()
+		b.adaptive.states = nil
+		b.adaptive.mu.Unlock()
 	}
 	for topic, subs := range b.topics {
 		for ch := range subs {
