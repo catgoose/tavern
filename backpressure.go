@@ -1,6 +1,9 @@
 package tavern
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // BackpressureTier represents the current backpressure tier of a subscriber.
 type BackpressureTier int
@@ -49,8 +52,8 @@ type AdaptiveBackpressure struct {
 
 // adaptiveState holds per-subscriber adaptive backpressure state.
 type adaptiveState struct {
-	tier       BackpressureTier
-	publishSeq int64 // counts publishes seen by this subscriber for throttle modulo
+	tier       atomic.Int32 // BackpressureTier stored atomically for lock-free reads
+	publishSeq int64        // counts publishes seen by this subscriber for throttle modulo
 }
 
 // adaptiveBackpressure holds broker-level adaptive backpressure configuration and state.
@@ -153,15 +156,16 @@ func (ab *adaptiveBackpressure) removeState(ch chan string) {
 // resetState resets the adaptive state tier for a channel to normal and
 // returns the old tier (for tier-change callbacks).
 func (ab *adaptiveBackpressure) resetState(ch chan string) (oldTier BackpressureTier, changed bool) {
-	ab.mu.Lock()
+	ab.mu.RLock()
 	st, ok := ab.states[ch]
-	if ok && st.tier != TierNormal {
-		old := st.tier
-		st.tier = TierNormal
-		ab.mu.Unlock()
-		return old, true
+	ab.mu.RUnlock()
+	if ok {
+		old := BackpressureTier(st.tier.Load())
+		if old != TierNormal {
+			st.tier.Store(int32(TierNormal))
+			return old, true
+		}
 	}
-	ab.mu.Unlock()
 	return TierNormal, false
 }
 
@@ -169,19 +173,12 @@ func (ab *adaptiveBackpressure) resetState(ch chan string) (oldTier Backpressure
 // whether the tier changed and the old/new tiers.
 func (ab *adaptiveBackpressure) updateTier(ch chan string, drops int64) (oldTier, newTier BackpressureTier, changed bool) {
 	tier := ab.tierForDrops(drops)
-	ab.mu.Lock()
-	st, ok := ab.states[ch]
-	if !ok {
-		st = &adaptiveState{}
-		ab.states[ch] = st
-	}
-	old := st.tier
+	st := ab.getState(ch)
+	old := BackpressureTier(st.tier.Load())
 	if old != tier {
-		st.tier = tier
-		ab.mu.Unlock()
+		st.tier.Store(int32(tier))
 		return old, tier, true
 	}
-	ab.mu.Unlock()
 	return old, tier, false
 }
 

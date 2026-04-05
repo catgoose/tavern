@@ -613,7 +613,7 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 			outMsg := msg
 			if b.adaptive != nil {
 				st := b.adaptive.getState(ch)
-				switch st.tier {
+				switch BackpressureTier(st.tier.Load()) {
 				case TierThrottle:
 					if b.adaptive.shouldThrottle(ch) {
 						// Skip this message for the throttled subscriber.

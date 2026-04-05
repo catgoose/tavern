@@ -912,3 +912,566 @@ broker.OnLastUnsubscribe("dashboard", func(topic string) {
   <div id="actions"><!-- server-driven actions adapt to state --></div>
 </div>
 ```
+
+---
+
+## 16. Batch publish -- bulk action updating multiple UI regions
+
+When an admin action affects multiple topics, use `Batch` to buffer all
+publishes and deliver them as a single write per subscriber. This avoids
+intermediate DOM states where some regions are updated and others are stale.
+
+### Go handler
+
+```go
+func bulkApproveOrders(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        ids := c.FormValue("ids") // comma-separated order IDs
+        orderIDs := strings.Split(ids, ",")
+
+        approvedCount, _ := approveOrders(db, orderIDs)
+        stats := fetchOrderStats(db)
+        activity := renderRecentActivity(db)
+
+        batch := broker.Batch()
+        batch.PublishOOB("orders",
+            tavern.Replace("order-count",
+                fmt.Sprintf(`<span id="order-count">%d pending</span>`, stats.Pending)))
+        batch.PublishOOB("dashboard",
+            tavern.ReplaceComponent("order-stats", views.OrderStats(stats)))
+        batch.PublishOOB("activity",
+            tavern.Append("activity-feed", activity))
+        for _, id := range orderIDs {
+            batch.PublishOOB("orders",
+                tavern.Replace("order-"+id,
+                    fmt.Sprintf(`<tr id="order-%s"><td>Approved</td></tr>`, id)))
+        }
+        batch.Flush() // one atomic write per subscriber
+
+        return c.JSON(http.StatusOK, map[string]int{"approved": approvedCount})
+    }
+}
+```
+
+### HTML
+
+```html
+<div hx-ext="sse" sse-connect="/sse?topic=orders" sse-swap="message">
+  <span id="order-count">12 pending</span>
+  <table>
+    <tr id="order-42"><td>Pending</td></tr>
+    <tr id="order-43"><td>Pending</td></tr>
+  </table>
+</div>
+```
+
+---
+
+## 17. Topic groups -- single SSE connection for a dashboard
+
+Use `DefineGroup` and `GroupHandler` to stream multiple topics on one SSE
+connection. The client receives each topic as a separate SSE event type.
+
+### Go setup
+
+```go
+broker.DefineGroup("dashboard", []string{"stats", "alerts", "activity"})
+
+// Standard library
+mux.Handle("/sse/dashboard", broker.GroupHandler("dashboard"))
+
+// Dynamic group -- resolve topics per-request for authorization
+broker.DynamicGroup("user-dash", func(r *http.Request) []string {
+    user := auth.FromContext(r.Context())
+    topics := []string{"stats"}
+    if user.IsAdmin {
+        topics = append(topics, "alerts", "audit-log")
+    }
+    return topics
+})
+mux.Handle("/sse/user-dash", broker.DynamicGroupHandler("user-dash"))
+```
+
+### Go publisher
+
+```go
+// Each topic publishes independently -- the group handler multiplexes them
+broker.PublishOOB("stats",
+    tavern.ReplaceComponent("stats-panel", views.StatsPanel(stats)))
+broker.PublishOOB("alerts",
+    tavern.Replace("alert-badge", fmt.Sprintf(`<span id="alert-badge">%d</span>`, alertCount)))
+broker.PublishOOB("activity",
+    tavern.Append("activity-feed", renderActivityItem(event)))
+```
+
+### HTML
+
+```html
+<!-- Single SSE connection, multiple event types -->
+<div hx-ext="sse" sse-connect="/sse/dashboard">
+  <div id="stats-panel" sse-swap="stats"><!-- live stats --></div>
+  <div id="alert-badge" sse-swap="alerts">0</div>
+  <ul id="activity-feed" sse-swap="activity"><!-- live feed --></ul>
+</div>
+```
+
+---
+
+## 18. Subscriber filtering -- activity feed per-user
+
+Use `SubscribeWithFilter` to deliver only messages matching a predicate.
+The filter runs in the publish path, so messages that don't match are never
+sent to the subscriber's channel.
+
+### Go handler
+
+```go
+func activitySSE(broker *tavern.SSEBroker) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        c.Response().Header().Set("Content-Type", "text/event-stream")
+        c.Response().Header().Set("Cache-Control", "no-cache")
+        c.Response().Header().Set("Connection", "keep-alive")
+
+        userID := c.Get("user_id").(string)
+
+        // Only deliver activity events that mention this user
+        ch, unsub := broker.SubscribeWithFilter("activity", func(msg string) bool {
+            return strings.Contains(msg, fmt.Sprintf(`data-user="%s"`, userID))
+        })
+        defer unsub()
+
+        for {
+            select {
+            case msg, ok := <-ch:
+                if !ok {
+                    return nil
+                }
+                if _, err := fmt.Fprint(c.Response(), msg); err != nil {
+                    return nil
+                }
+                c.Response().Flush()
+            case <-c.Request().Context().Done():
+                return nil
+            }
+        }
+    }
+}
+```
+
+### Go publisher
+
+```go
+// Published to all subscribers, but only delivered to matching filters
+broker.PublishOOB("activity",
+    tavern.Append("activity-feed",
+        fmt.Sprintf(`<li data-user="%s">%s approved order #%s</li>`,
+            approverID, approverName, orderID)))
+```
+
+### HTML
+
+```html
+<ul id="activity-feed"
+    hx-ext="sse"
+    sse-connect="/sse/activity"
+    sse-swap="message">
+  <!-- only activity relevant to the logged-in user appears -->
+</ul>
+```
+
+---
+
+## 19. Adaptive backpressure -- mobile vs desktop
+
+Use adaptive backpressure to gracefully degrade for slow clients. Mobile
+clients on spotty connections get throttled, then simplified, then
+disconnected -- instead of silently dropping messages.
+
+### Go setup
+
+```go
+broker := tavern.NewSSEBroker(
+    tavern.WithBufferSize(16),
+    tavern.WithAdaptiveBackpressure(tavern.AdaptiveBackpressure{
+        ThrottleAt:   5,   // deliver every 2nd message after 5 consecutive drops
+        SimplifyAt:   15,  // switch to lightweight renderer after 15 drops
+        DisconnectAt: 40,  // evict after 40 drops (EventSource auto-reconnects)
+    }),
+)
+
+// Register a lightweight renderer for the simplify tier
+broker.SetSimplifiedRenderer("dashboard", func(msg string) string {
+    return `<div id="dashboard" class="simplified">
+        <p>Dashboard updating slowly. <a href="/dashboard">Refresh</a></p>
+    </div>`
+})
+
+// Log tier transitions for monitoring
+broker.OnBackpressureTierChange(func(sub *tavern.SubscriberInfo, oldTier, newTier tavern.BackpressureTier) {
+    slog.Warn("backpressure tier change",
+        "subscriber", sub.ID,
+        "topic", sub.Topic,
+        "from", oldTier.String(),
+        "to", newTier.String(),
+    )
+})
+```
+
+### Go publisher
+
+```go
+// Publish normally -- the broker handles per-subscriber degradation
+broker.PublishOOB("dashboard",
+    tavern.ReplaceComponent("charts", views.FullCharts(data)),
+)
+// Fast clients get full charts, throttled clients get every 2nd update,
+// simplified clients get the fallback message, and stuck clients get evicted.
+```
+
+---
+
+## 20. TTL messages -- toast notifications that auto-expire
+
+Use `PublishWithTTL` for ephemeral messages that disappear from the replay
+cache after a timeout. New subscribers who connect after the TTL don't see
+stale toasts.
+
+### Go handler
+
+```go
+func createToast(broker *tavern.SSEBroker) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        msg := c.FormValue("message")
+        toastID := fmt.Sprintf("toast-%d", time.Now().UnixNano())
+
+        html := fmt.Sprintf(
+            `<div id="%s" class="toast">%s</div>`,
+            toastID, msg,
+        )
+
+        // Visible for 5 seconds in replay cache, then auto-removed from DOM
+        broker.PublishWithTTL("toasts", html, 5*time.Second,
+            tavern.WithAutoRemove(toastID),
+        )
+
+        return c.NoContent(http.StatusOK)
+    }
+}
+```
+
+### HTML
+
+```html
+<div id="toast-area"
+     hx-ext="sse"
+     sse-connect="/sse?topic=toasts"
+     sse-swap="message">
+  <!-- toasts appear and auto-delete after TTL expires -->
+</div>
+```
+
+---
+
+## 21. Reactive hooks -- order approval cascading updates
+
+Use `After` hooks and `OnMutate` to cascade a single business event across
+multiple UI regions. When an order is approved, the order table, badge counts,
+charts, and activity feed all update without the handler knowing about each
+consumer.
+
+### Go setup
+
+```go
+// Register mutation handler -- decoupled from specific topics
+broker.OnMutate("orders", func(evt tavern.MutationEvent) {
+    order := evt.Data.(*Order)
+
+    broker.PublishOOB("order-detail",
+        tavern.ReplaceComponent("order-"+order.ID, views.OrderRow(order)))
+
+    stats := fetchOrderStats(db)
+    broker.PublishOOB("dashboard",
+        tavern.ReplaceComponent("order-stats", views.OrderStats(stats)))
+})
+
+// After hook -- when dashboard publishes, update the badge
+broker.After("dashboard", func() {
+    pending := countPendingOrders(db)
+    broker.PublishOOB("nav",
+        tavern.Replace("pending-badge",
+            fmt.Sprintf(`<span id="pending-badge" class="badge">%d</span>`, pending)))
+})
+
+// After hook -- log to activity feed after order-detail updates
+broker.After("order-detail", func() {
+    broker.PublishOOB("activity",
+        tavern.Append("activity-feed",
+            fmt.Sprintf(`<li>Order updated at %s</li>`, time.Now().Format("15:04:05"))))
+})
+```
+
+### Go handler
+
+```go
+func approveOrder(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        id := c.Param("id")
+        order := approveOrderInDB(db, id)
+
+        // One call cascades to order-detail, dashboard, nav badge, activity feed
+        broker.NotifyMutate("orders", tavern.MutationEvent{ID: id, Data: order})
+
+        return c.NoContent(http.StatusOK)
+    }
+}
+```
+
+---
+
+## 22. Middleware -- audit logging for admin topics
+
+Use `UseTopics` to add middleware that only runs for specific topic patterns.
+This keeps audit logic out of handlers.
+
+### Go setup
+
+```go
+broker.UseTopics("admin:*", func(next tavern.PublishFunc) tavern.PublishFunc {
+    return func(topic, msg string) {
+        slog.Info("admin publish",
+            "topic", topic,
+            "size", len(msg),
+            "time", time.Now().Format(time.RFC3339),
+        )
+        // Could also persist to an audit table
+        insertAuditLog(db, topic, msg)
+        next(topic, msg)
+    }
+})
+
+// Global middleware -- add timing to all publishes
+broker.Use(func(next tavern.PublishFunc) tavern.PublishFunc {
+    return func(topic, msg string) {
+        start := time.Now()
+        next(topic, msg)
+        slog.Debug("publish latency", "topic", topic, "duration", time.Since(start))
+    }
+})
+```
+
+### Go handler
+
+```go
+// Handlers publish normally -- middleware intercepts transparently
+broker.Publish("admin:users", renderUserTable())     // audited
+broker.Publish("admin:settings", renderSettings())   // audited
+broker.Publish("dashboard", renderDashboard())       // not audited
+```
+
+---
+
+## 23. Hierarchical topics -- wildcard monitoring dashboard
+
+Use `SubscribeGlob` to monitor an entire topic hierarchy from a single
+subscription. An ops dashboard can watch all services without knowing
+specific service names.
+
+### Go setup
+
+```go
+// Services publish to hierarchical topics
+broker.Publish("monitoring/services/api/health", renderHealthBadge("api", healthy))
+broker.Publish("monitoring/services/worker/health", renderHealthBadge("worker", degraded))
+broker.Publish("monitoring/services/db/health", renderHealthBadge("db", healthy))
+broker.Publish("monitoring/alerts/disk-full", renderAlert("disk-full"))
+```
+
+### Go handler
+
+```go
+func monitoringSSE(broker *tavern.SSEBroker) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "text/event-stream")
+        w.Header().Set("Cache-Control", "no-cache")
+        w.Header().Set("Connection", "keep-alive")
+
+        // Watch everything under monitoring/
+        ch, unsub := broker.SubscribeGlob("monitoring/**")
+        defer unsub()
+
+        for {
+            select {
+            case msg, ok := <-ch:
+                if !ok {
+                    return
+                }
+                // msg.Topic tells you which service published
+                sse := tavern.NewSSEMessage(msg.Topic, msg.Data).String()
+                if _, err := fmt.Fprint(w, sse); err != nil {
+                    return
+                }
+                if f, ok := w.(http.Flusher); ok {
+                    f.Flush()
+                }
+            case <-r.Context().Done():
+                return
+            }
+        }
+    }
+}
+```
+
+### HTML
+
+```html
+<div hx-ext="sse" sse-connect="/sse/monitoring">
+  <!-- Each service's events arrive with topic as event type -->
+  <div sse-swap="monitoring/services/api/health" id="api-health">--</div>
+  <div sse-swap="monitoring/services/worker/health" id="worker-health">--</div>
+  <div sse-swap="monitoring/services/db/health" id="db-health">--</div>
+  <div sse-swap="monitoring/alerts/disk-full" id="disk-alert"></div>
+</div>
+```
+
+---
+
+## 24. Presence tracking -- who's viewing a document
+
+Use the `presence` subpackage to track which users are viewing a resource
+and broadcast presence changes via OOB fragments.
+
+### Go setup
+
+```go
+import "github.com/catgoose/tavern/presence"
+
+tracker := presence.New(broker, presence.Config{
+    StaleTimeout: 30 * time.Second,
+    RenderFunc: func(topic string, users []presence.Info) string {
+        var buf strings.Builder
+        buf.WriteString(`<ul id="presence-list">`)
+        for _, u := range users {
+            buf.WriteString(fmt.Sprintf(
+                `<li><img src="%s" class="avatar" /> %s</li>`,
+                u.Avatar, u.Name,
+            ))
+        }
+        buf.WriteString("</ul>")
+        return buf.String()
+    },
+    OnJoin: func(topic string, info presence.Info) {
+        slog.Info("user joined", "topic", topic, "user", info.UserID)
+    },
+    OnLeave: func(topic string, info presence.Info) {
+        slog.Info("user left", "topic", topic, "user", info.UserID)
+    },
+})
+defer tracker.Close()
+```
+
+### Go handler
+
+```go
+func documentSSE(broker *tavern.SSEBroker, tracker *presence.Tracker) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        docID := c.Param("id")
+        userID := c.Get("user_id").(string)
+        userName := c.Get("user_name").(string)
+        topic := "doc-" + docID
+
+        tracker.Join(topic, presence.Info{
+            UserID: userID,
+            Name:   userName,
+            Avatar: fmt.Sprintf("/avatars/%s.png", userID),
+        })
+        defer tracker.Leave(topic, userID)
+
+        // Send heartbeats to keep presence alive
+        go func() {
+            ticker := time.NewTicker(10 * time.Second)
+            defer ticker.Stop()
+            for {
+                select {
+                case <-c.Request().Context().Done():
+                    return
+                case <-ticker.C:
+                    tracker.Heartbeat(topic, userID)
+                }
+            }
+        }()
+
+        // Stream document updates + presence changes
+        ch, unsub := broker.Subscribe(topic + ":presence")
+        defer unsub()
+
+        return streamSSE(c, ch)
+    }
+}
+```
+
+### HTML
+
+```html
+<div hx-ext="sse" sse-connect="/sse/doc/123" sse-swap="message">
+  <ul id="presence-list">
+    <!-- presence avatars updated via OOB -->
+  </ul>
+  <div id="doc-content">
+    <!-- document content -->
+  </div>
+</div>
+```
+
+---
+
+## 25. Distributed fan-out -- multi-instance deployment
+
+Use the `backend/memory` package to simulate cross-instance message delivery
+in tests, or implement the `backend.Backend` interface for production
+(Redis pub/sub, NATS, etc.).
+
+### Go setup (test / single-process simulation)
+
+```go
+import "github.com/catgoose/tavern/backend/memory"
+
+// Create two linked backends sharing the same message bus
+mem := memory.New()
+fork := mem.Fork()
+
+// Each broker instance gets its own backend
+broker1 := tavern.NewSSEBroker(tavern.WithBackend(mem))
+defer broker1.Close()
+
+broker2 := tavern.NewSSEBroker(tavern.WithBackend(fork))
+defer broker2.Close()
+
+// Subscribe on broker2
+ch, unsub := broker2.Subscribe("events")
+defer unsub()
+
+// Publish on broker1 -- broker2 subscribers receive it
+broker1.Publish("events", tavern.NewSSEMessage("update", "hello from instance 1").String())
+
+msg := <-ch // "hello from instance 1"
+```
+
+### Production pattern
+
+```go
+// Implement backend.Backend for your message transport
+type redisBackend struct { /* ... */ }
+
+func (r *redisBackend) Publish(ctx context.Context, env backend.MessageEnvelope) error { /* ... */ }
+func (r *redisBackend) Subscribe(ctx context.Context, topic string) (<-chan backend.MessageEnvelope, error) { /* ... */ }
+func (r *redisBackend) Unsubscribe(topic string) error { /* ... */ }
+func (r *redisBackend) Close() error { /* ... */ }
+
+// Wire it up
+broker := tavern.NewSSEBroker(tavern.WithBackend(myRedisBackend))
+```
+
+The backend interface is minimal: `Publish`, `Subscribe`, `Unsubscribe`, and
+`Close`. Messages published on any instance are delivered to subscribers on all
+other instances. Scoped publishes work transparently -- the `Scope` field in
+`MessageEnvelope` ensures delivery only to matching scoped subscribers.

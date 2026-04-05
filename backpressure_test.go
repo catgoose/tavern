@@ -44,7 +44,9 @@ func TestAdaptiveBackpressure_ThrottleSkipsEveryOther(t *testing.T) {
 		states: make(map[chan string]*adaptiveState),
 	}
 	ch := make(chan string, 10)
-	ab.states[ch] = &adaptiveState{tier: TierThrottle}
+	st := &adaptiveState{}
+	st.tier.Store(int32(TierThrottle))
+	ab.states[ch] = st
 
 	// seq 1 → skip, seq 2 → deliver, seq 3 → skip, seq 4 → deliver
 	assert.True(t, ab.shouldThrottle(ch))
