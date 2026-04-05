@@ -77,6 +77,10 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		close(ch)
 		return ch, func() {}
 	}
+	if !b.admitSubscriber(topic) {
+		b.mu.Unlock()
+		return nil, nil
+	}
 	ch := make(chan string, b.bufferSize)
 	if b.topics[topic] == nil {
 		b.topics[topic] = make(map[chan string]struct{})

@@ -80,6 +80,10 @@ func (h *sseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Subscribe with Last-Event-ID resumption.
 	lastID := r.Header.Get("Last-Event-ID")
 	ch, unsub := h.broker.SubscribeFromID(h.topic, lastID)
+	if ch == nil {
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	defer unsub()
 
 	// Stream loop.

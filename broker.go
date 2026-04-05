@@ -78,6 +78,9 @@ type SSEBroker struct {
 	backend           backend.Backend                  // nil = no cross-process fan-out
 	afterHookSem      chan struct{}                     // semaphore limiting concurrent After hook goroutines
 	coalescingChans   map[chan string]*coalescingState  // channel → coalescing state (nil = normal delivery)
+	maxSubs           int                              // 0 = unlimited global subscribers
+	maxSubsPerTopic   int                              // 0 = unlimited per-topic subscribers
+	admissionFn       func(topic string, currentCount int) bool // nil = no custom admission
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -245,6 +248,10 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		close(ch)
 		return ch, func() {}
 	}
+	if !b.admitSubscriber(topic) {
+		b.mu.Unlock()
+		return nil, nil
+	}
 	ch := make(chan string, b.bufferSize)
 	if b.topics[topic] == nil {
 		b.topics[topic] = make(map[chan string]struct{})
@@ -336,6 +343,10 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		ch := make(chan string)
 		close(ch)
 		return ch, func() {}
+	}
+	if !b.admitSubscriber(topic) {
+		b.mu.Unlock()
+		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
 	if b.scopedTopics[topic] == nil {

@@ -23,6 +23,10 @@ func (b *SSEBroker) SubscribeWithFilter(topic string, predicate FilterPredicate)
 		close(ch)
 		return ch, func() {}
 	}
+	if !b.admitSubscriber(topic) {
+		b.mu.Unlock()
+		return nil, nil
+	}
 	ch := make(chan string, b.bufferSize)
 	if b.topics[topic] == nil {
 		b.topics[topic] = make(map[chan string]struct{})
@@ -78,6 +82,10 @@ func (b *SSEBroker) SubscribeScopedWithFilter(topic, scope string, predicate Fil
 		ch := make(chan string)
 		close(ch)
 		return ch, func() {}
+	}
+	if !b.admitSubscriber(topic) {
+		b.mu.Unlock()
+		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
 	if b.scopedTopics[topic] == nil {
