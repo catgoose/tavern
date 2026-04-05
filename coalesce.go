@@ -43,6 +43,10 @@ func (b *SSEBroker) subscribeCoalescing(topic, scope string) (msgs <-chan string
 		close(ch)
 		return ch, func() {}
 	}
+	if !b.admitSubscriber(topic) {
+		b.mu.Unlock()
+		return nil, nil
+	}
 
 	// The internal channel participates in the normal fan-out path but is
 	// intercepted by publishToChannels when coalescing is enabled.
