@@ -56,6 +56,8 @@ type SSEBroker struct {
 	groupsMu          sync.RWMutex                   // protects groups
 	dynGroups         map[string]*dynamicGroupDef    // dynamic topic groups
 	dynGroupsMu       sync.RWMutex                   // protects dynGroups
+	middlewares       []Middleware                    // global publish middleware
+	topicMiddlewares  []topicMiddleware               // topic-scoped publish middleware
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -575,6 +577,14 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 // silently dropped for that subscriber rather than blocking the publisher.
 // Publishing to a topic with no subscribers is a no-op.
 func (b *SSEBroker) Publish(topic, msg string) {
+	dispatch := b.applyMiddleware(topic, b.publishDirect)
+	dispatch(topic, msg)
+}
+
+// publishDirect fans out msg to unscoped subscribers without applying
+// middleware.  It is the terminal function in the middleware chain for
+// [SSEBroker.Publish].
+func (b *SSEBroker) publishDirect(topic, msg string) {
 	b.mu.RLock()
 	subscribers, exists := b.topics[topic]
 	if !exists || len(subscribers) == 0 {
@@ -600,6 +610,13 @@ func (b *SSEBroker) Publish(topic, msg string) {
 // the most recent message per topic is retained. Use [SSEBroker.ClearReplay]
 // to remove the cached message for a topic.
 func (b *SSEBroker) PublishWithReplay(topic, msg string) {
+	dispatch := b.applyMiddleware(topic, b.publishWithReplayDirect)
+	dispatch(topic, msg)
+}
+
+// publishWithReplayDirect caches msg for replay and fans it out to
+// unscoped subscribers without applying middleware.
+func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -670,6 +687,15 @@ func (b *SSEBroker) ClearReplay(topic string) {
 // the message is silently dropped. Publishing to a topic or scope with no
 // matching subscribers is a no-op.
 func (b *SSEBroker) PublishTo(topic, scope, msg string) {
+	dispatch := b.applyMiddleware(topic, func(t, m string) {
+		b.publishToDirect(t, scope, m)
+	})
+	dispatch(topic, msg)
+}
+
+// publishToDirect fans out msg to scoped subscribers without applying
+// middleware.
+func (b *SSEBroker) publishToDirect(topic, scope, msg string) {
 	b.mu.RLock()
 	scopedSubs, exists := b.scopedTopics[topic]
 	if !exists || len(scopedSubs) == 0 {
@@ -720,21 +746,10 @@ func (b *SSEBroker) PublishIfChanged(topic, msg string) bool {
 		return false
 	}
 	b.lastHash[topic] = h
-
-	// Snapshot subscribers while we hold the lock.
-	subscribers := b.topics[topic]
-	channels := make([]chan string, 0, len(subscribers))
-	for ch := range subscribers {
-		channels = append(channels, ch)
-	}
 	b.mu.Unlock()
 
-	sent, dropped := b.publishToChannels(topic, channels, msg)
-	if b.metrics != nil {
-		tc := b.metrics.counter(topic)
-		tc.published.Add(int64(sent))
-		tc.dropped.Add(int64(dropped))
-	}
+	dispatch := b.applyMiddleware(topic, b.publishDirect)
+	dispatch(topic, msg)
 	return true
 }
 
@@ -756,25 +771,12 @@ func (b *SSEBroker) PublishIfChangedTo(topic, scope, msg string) bool {
 		return false
 	}
 	b.lastHash[key] = h
-
-	scopedSubs, exists := b.scopedTopics[topic]
-	var channels []chan string
-	if exists {
-		channels = make([]chan string, 0, len(scopedSubs))
-		for ch, sub := range scopedSubs {
-			if sub.scope == scope {
-				channels = append(channels, ch)
-			}
-		}
-	}
 	b.mu.Unlock()
 
-	sent, dropped := b.publishToChannels(topic, channels, msg)
-	if b.metrics != nil {
-		tc := b.metrics.counter(topic)
-		tc.published.Add(int64(sent))
-		tc.dropped.Add(int64(dropped))
-	}
+	dispatch := b.applyMiddleware(topic, func(t, m string) {
+		b.publishToDirect(t, scope, m)
+	})
+	dispatch(topic, msg)
 	return true
 }
 
