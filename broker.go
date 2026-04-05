@@ -52,6 +52,10 @@ type SSEBroker struct {
 	onReplayGap       map[string][]ReplayGapCallback  // topic → gap callbacks
 	replayGapStrategy map[string]GapStrategy          // topic → gap strategy
 	replayGapSnapshot map[string]func() string        // topic → snapshot func for gap fallback
+	groups            map[string]*groupDef           // static topic groups
+	groupsMu          sync.RWMutex                   // protects groups
+	dynGroups         map[string]*dynamicGroupDef    // dynamic topic groups
+	dynGroupsMu       sync.RWMutex                   // protects dynGroups
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -170,6 +174,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	for _, opt := range opts {
 		opt(b)
 	}
+	initGroupFields(b)
 	b.debounce.timers = make(map[string]*debounceEntry)
 	b.throttle.state = make(map[string]*throttleEntry)
 	if b.evictThreshold > 0 {
