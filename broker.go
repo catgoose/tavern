@@ -49,6 +49,9 @@ type SSEBroker struct {
 	dropCountsMu      sync.RWMutex                 // separate lock for drop counts (avoid nesting with main mu)
 	subscriberMeta    map[chan string]*SubscriberInfo // channel → subscriber info
 	connEventsTopic   string                         // empty = connection events disabled
+	onReplayGap       map[string][]ReplayGapCallback  // topic → gap callbacks
+	replayGapStrategy map[string]GapStrategy          // topic → gap strategy
+	replayGapSnapshot map[string]func() string        // topic → snapshot func for gap fallback
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -157,9 +160,12 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 		lastHash:       make(map[string]uint64),
 		onFirst:        make(map[string][]func(string)),
 		onLast:         make(map[string][]func(string)),
-		subscriberMeta: make(map[chan string]*SubscriberInfo),
-		bufferSize:     10,
-		done:           make(chan struct{}),
+		subscriberMeta:    make(map[chan string]*SubscriberInfo),
+		onReplayGap:       make(map[string][]ReplayGapCallback),
+		replayGapStrategy: make(map[string]GapStrategy),
+		replayGapSnapshot: make(map[string]func() string),
+		bufferSize:        10,
+		done:              make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -629,6 +635,8 @@ func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 		delete(b.replaySize, topic)
 		delete(b.replayCache, topic)
 		delete(b.replayLog, topic)
+		delete(b.replayGapStrategy, topic)
+		delete(b.replayGapSnapshot, topic)
 		return
 	}
 	b.replaySize[topic] = n
@@ -647,6 +655,8 @@ func (b *SSEBroker) ClearReplay(topic string) {
 	delete(b.replayCache, topic)
 	delete(b.replaySize, topic)
 	delete(b.replayLog, topic)
+	delete(b.replayGapStrategy, topic)
+	delete(b.replayGapSnapshot, topic)
 	b.mu.Unlock()
 }
 
@@ -905,6 +915,9 @@ func (b *SSEBroker) Close() {
 	b.replayLog = nil
 	b.lastHash = nil
 	b.subscriberMeta = nil
+	b.onReplayGap = nil
+	b.replayGapStrategy = nil
+	b.replayGapSnapshot = nil
 	if b.dropCounts != nil {
 		b.dropCountsMu.Lock()
 		b.dropCounts = nil
