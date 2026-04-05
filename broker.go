@@ -81,6 +81,7 @@ type SSEBroker struct {
 	maxSubs           int                              // 0 = unlimited global subscribers
 	maxSubsPerTopic   int                              // 0 = unlimited per-topic subscribers
 	admissionFn       func(topic string, currentCount int) bool // nil = no custom admission
+	orderedTopics     map[string]*sync.Mutex             // topic → per-topic ordering mutex
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -792,6 +793,8 @@ func (b *SSEBroker) Publish(topic, msg string) {
 // middleware.  It is the terminal function in the middleware chain for
 // [SSEBroker.Publish].
 func (b *SSEBroker) publishDirect(topic, msg string) {
+	unlock := b.orderLock(topic)
+	defer unlock()
 	var start time.Time
 	if b.obs != nil {
 		start = time.Now()
@@ -834,6 +837,8 @@ func (b *SSEBroker) PublishWithReplay(topic, msg string) {
 // publishWithReplayDirect caches msg for replay and fans it out to
 // unscoped subscribers without applying middleware.
 func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
+	unlock := b.orderLock(topic)
+	defer unlock()
 	var start time.Time
 	if b.obs != nil {
 		start = time.Now()
@@ -929,6 +934,8 @@ func (b *SSEBroker) PublishTo(topic, scope, msg string) {
 // publishToDirect fans out msg to scoped subscribers without applying
 // middleware.
 func (b *SSEBroker) publishToDirect(topic, scope, msg string) {
+	unlock := b.orderLock(topic)
+	defer unlock()
 	var start time.Time
 	if b.obs != nil {
 		start = time.Now()
