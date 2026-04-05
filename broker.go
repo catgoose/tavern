@@ -64,6 +64,7 @@ type SSEBroker struct {
 	activeChains      sync.Map                         // goroutine ID → *afterChain for cycle detection
 	ttlSweeperOnce    sync.Once                      // ensures TTL sweeper starts at most once
 	msgTTLSweep       time.Duration                  // override for TTL sweep interval (0 = default 1s)
+	rateLimit         *rateLimiter                     // per-subscriber rate limiting
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -197,6 +198,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	initGroupFields(b)
 	b.debounce.timers = make(map[string]*debounceEntry)
 	b.throttle.state = make(map[string]*throttleEntry)
+	b.rateLimit = newRateLimiter()
 	if b.evictThreshold > 0 {
 		b.dropCounts = make(map[chan string]*atomic.Int64)
 	}
@@ -531,6 +533,11 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 	for _, ch := range channels {
 		func() {
 			defer func() { _ = recover() }()
+			// Per-subscriber rate limiting: hold the message if within interval.
+			if b.rateLimit.hold(ch, msg) {
+				sent++ // held messages count as sent, not dropped
+				return
+			}
 			if b.send(ch, msg) {
 				sent++
 				if b.evictThreshold > 0 {
@@ -1004,6 +1011,7 @@ func (b *SSEBroker) Close() {
 		delete(b.throttle.state, topic)
 	}
 	b.throttle.mu.Unlock()
+	b.rateLimit.stop()
 }
 
 // startTopicSweep periodically removes topics that have had zero subscribers
