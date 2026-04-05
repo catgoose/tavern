@@ -21,12 +21,48 @@ func WithBackend(b backend.Backend) BrokerOption {
 	}
 }
 
-// initBackend is a no-op placeholder called from NewSSEBroker. The actual
-// integration happens inline: Subscribe/Unsubscribe call
-// backendSubscribe/backendUnsubscribe when the first/last subscriber
-// joins/leaves, and the Publish methods call backendPublish after local
-// fan-out.
-func (b *SSEBroker) initBackend() {}
+// initBackend sets up health-aware reconnection if the backend implements
+// [backend.HealthAwareBackend]. On reconnect, the broker re-subscribes to
+// all topics that currently have local subscribers.
+func (b *SSEBroker) initBackend() {
+	if b.backend == nil {
+		return
+	}
+	if hab, ok := b.backend.(backend.HealthAwareBackend); ok {
+		hab.OnReconnect(func() {
+			b.resubscribeAll()
+		})
+	}
+}
+
+// resubscribeAll re-subscribes to the backend for every topic that currently
+// has at least one local subscriber. This is called after a backend reconnect.
+func (b *SSEBroker) resubscribeAll() {
+	b.mu.RLock()
+	var topics []string
+	seen := make(map[string]struct{})
+	for topic, subs := range b.topics {
+		if len(subs) > 0 {
+			if _, ok := seen[topic]; !ok {
+				topics = append(topics, topic)
+				seen[topic] = struct{}{}
+			}
+		}
+	}
+	for topic, subs := range b.scopedTopics {
+		if len(subs) > 0 {
+			if _, ok := seen[topic]; !ok {
+				topics = append(topics, topic)
+				seen[topic] = struct{}{}
+			}
+		}
+	}
+	b.mu.RUnlock()
+
+	for _, topic := range topics {
+		b.backendSubscribe(topic)
+	}
+}
 
 // backendSubscribe registers the broker with the backend for the given topic
 // and starts a goroutine that forwards incoming envelopes to local
@@ -61,15 +97,42 @@ func (b *SSEBroker) backendUnsubscribe(topic string) {
 }
 
 // backendPublish forwards a message to the backend for cross-instance
-// delivery. Scoped messages include the scope in the envelope.
+// delivery. Scoped messages include the scope in the envelope. If the
+// backend implements [backend.HealthAwareBackend] and is unhealthy, the
+// publish is silently skipped.
 func (b *SSEBroker) backendPublish(topic, msg, scope string) {
 	if b.backend == nil {
+		return
+	}
+	if hab, ok := b.backend.(backend.HealthAwareBackend); ok && !hab.Healthy() {
 		return
 	}
 	env := backend.MessageEnvelope{
 		Topic: topic,
 		Data:  msg,
 		Scope: scope,
+	}
+	if err := b.backend.Publish(context.Background(), env); err != nil {
+		if b.logger != nil {
+			b.logger.Error("backend publish failed", "topic", topic, "err", err)
+		}
+	}
+}
+
+// backendPublishWithMeta forwards a message with TTL and ID metadata.
+func (b *SSEBroker) backendPublishWithMeta(topic, msg, scope string, ttlMs int64, id string) {
+	if b.backend == nil {
+		return
+	}
+	if hab, ok := b.backend.(backend.HealthAwareBackend); ok && !hab.Healthy() {
+		return
+	}
+	env := backend.MessageEnvelope{
+		Topic: topic,
+		Data:  msg,
+		Scope: scope,
+		TTL:   ttlMs,
+		ID:    id,
 	}
 	if err := b.backend.Publish(context.Background(), env); err != nil {
 		if b.logger != nil {
