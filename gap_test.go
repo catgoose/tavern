@@ -25,7 +25,15 @@ func TestSubscribeFromID_GapSilentDefault(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// No replay or gap event should arrive.
+	// Reconnected control event is always sent.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
+	// No replay or gap event should arrive with GapSilent.
 	select {
 	case msg := <-ch:
 		t.Fatalf("expected no message with GapSilent default, got: %s", msg)
@@ -58,6 +66,15 @@ func TestSubscribeFromID_GapControlEvent(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
+	// First: reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
+	// Then: gap control event.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-replay-gap")
@@ -84,7 +101,15 @@ func TestSubscribeFromID_GapFallbackToSnapshot(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// First message: control event.
+	// First: reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
+	// Second: gap control event.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-replay-gap")
@@ -92,7 +117,7 @@ func TestSubscribeFromID_GapFallbackToSnapshot(t *testing.T) {
 		t.Fatal("timed out waiting for gap control event")
 	}
 
-	// Second message: snapshot.
+	// Third: snapshot.
 	select {
 	case msg := <-ch:
 		assert.Equal(t, snapshotData, msg)
@@ -124,7 +149,15 @@ func TestSubscribeFromID_GapSnapshotEmpty(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// Should get control event but no snapshot.
+	// First: reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
+	// Then: gap control event.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-replay-gap")
@@ -287,7 +320,8 @@ func TestSubscribeFromID_GapWithLiveMessages(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// Drain control event and snapshot.
+	// Drain reconnected control event, gap control event, and snapshot.
+	<-ch
 	<-ch
 	<-ch
 
@@ -355,7 +389,15 @@ func TestSetReplayGapPolicy_NilSnapshotFn(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// Should get control event but no snapshot (snapshotFn is nil).
+	// First: reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
+	// Then: gap control event.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-replay-gap")
@@ -385,10 +427,18 @@ func TestSubscribeFromID_GapSilentNoControlEvent(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// GapSilent should not send a control event.
+	// Reconnected control event is always sent.
 	select {
 	case msg := <-ch:
-		t.Fatalf("expected no message with GapSilent, got: %s", msg)
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
+	// GapSilent should not send a gap control event.
+	select {
+	case msg := <-ch:
+		t.Fatalf("expected no gap control event with GapSilent, got: %s", msg)
 	case <-time.After(50 * time.Millisecond):
 	}
 }

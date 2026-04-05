@@ -39,6 +39,14 @@ func TestSubscribeFromID_ReplaysAfterID(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "3")
 	defer unsub()
 
+	// First message is the reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
 	var got []string
 	for range 2 {
 		select {
@@ -94,6 +102,14 @@ func TestSubscribeFromID_UnknownID(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "unknown-id")
 	defer unsub()
 
+	// First message is the reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
 	// No replay should occur for an unknown ID.
 	select {
 	case msg := <-ch:
@@ -120,10 +136,19 @@ func TestSubscribeFromID_AllCaughtUp(t *testing.T) {
 		b.PublishWithID("events", fmt.Sprintf("%d", i), fmt.Sprintf("msg-%d", i))
 	}
 
-	// Subscribe from the latest ID: nothing to replay.
+	// Subscribe from the latest ID: nothing to replay (but reconnect event fires).
 	ch, unsub := b.SubscribeFromID("events", "3")
 	defer unsub()
 
+	// First message is the reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
+	// No replay messages.
 	select {
 	case msg := <-ch:
 		t.Fatalf("expected no replay, got: %s", msg)
