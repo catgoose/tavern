@@ -122,6 +122,18 @@ func (b *SSEBroker) PublishIfChangedOOBTo(topic, scope string, fragments ...Frag
 	return b.PublishIfChangedTo(topic, scope, msg)
 }
 
+// RenderComponentErr renders a Component to a string, returning the error
+// separately instead of embedding it in an HTML comment. This is useful when
+// you want to handle render errors explicitly rather than silently embedding
+// them in the output.
+func RenderComponentErr(cmp Component) (string, error) {
+	var buf bytes.Buffer
+	if err := cmp.Render(context.Background(), &buf); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
 // PublishLazyOOB calls renderFn only if the topic has subscribers, then
 // publishes the rendered fragments. This avoids expensive rendering (DB
 // queries, template execution) when nobody is listening. If renderFn returns
