@@ -1,6 +1,7 @@
 package tavern
 
 import (
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -13,6 +14,7 @@ type ReplayEntry struct {
 	Msg          string
 	ExpiresAt    time.Time // zero means no expiry
 	AutoRemoveID string    // element ID for OOB delete on expiry (empty = none)
+	PublishedAt  time.Time
 }
 
 // PublishWithID publishes msg to the topic with an associated event ID.
@@ -29,7 +31,7 @@ func (b *SSEBroker) PublishWithID(topic, id, msg string) {
 		maxSize = n
 	}
 	log := b.replayLog[topic]
-	log = append(log, ReplayEntry{ID: id, Msg: msg})
+	log = append(log, ReplayEntry{ID: id, Msg: msg, PublishedAt: time.Now()})
 	if len(log) > maxSize {
 		log = log[len(log)-maxSize:]
 	}
@@ -141,6 +143,17 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 	}
 	subInfo := b.subscriberMeta[ch]
 
+	// Collect reconnect state while holding the lock.
+	isReconnect := lastEventID != ""
+	var reconnectCallbacks []ReconnectCallback
+	var reconnectInfo ReconnectInfo
+	var bundle bool
+	if isReconnect {
+		reconnectCallbacks = b.onReconnect[topic]
+		reconnectInfo = b.buildReconnectInfo(topic, lastEventID, ch)
+		bundle = b.bundleOnReconnect[topic]
+	}
+
 	if b.evictThreshold > 0 {
 		b.dropCountsMu.Lock()
 		b.dropCounts[ch] = &atomic.Int64{}
@@ -153,6 +166,19 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		go fn(topic)
 	}
 	b.publishConnectionEvent("subscribe", topic, total)
+
+	// Send reconnected control event when Last-Event-ID is present.
+	if isReconnect {
+		controlMsg := reconnectedControlEvent()
+		select {
+		case ch <- controlMsg:
+		default:
+		}
+		// Fire reconnect callbacks in their own goroutines.
+		for _, fn := range reconnectCallbacks {
+			go fn(reconnectInfo)
+		}
+	}
 
 	// Handle replay gap: fire callbacks, optionally send control event and snapshot.
 	if gapDetected {
@@ -178,10 +204,22 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		}
 	}
 
-	for _, msg := range replayMsgs {
+	// Deliver replay messages, optionally bundled into a single write.
+	if bundle && len(replayMsgs) > 0 {
+		var bundled strings.Builder
+		for _, msg := range replayMsgs {
+			bundled.WriteString(msg)
+		}
 		select {
-		case ch <- msg:
+		case ch <- bundled.String():
 		default:
+		}
+	} else {
+		for _, msg := range replayMsgs {
+			select {
+			case ch <- msg:
+			default:
+			}
 		}
 	}
 	return ch, func() {

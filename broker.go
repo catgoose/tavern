@@ -50,9 +50,11 @@ type SSEBroker struct {
 	subscriberMeta    map[chan string]*SubscriberInfo  // channel → subscriber info
 	filterPredicates  map[chan string]FilterPredicate // channel → optional message filter
 	connEventsTopic   string                         // empty = connection events disabled
-	onReplayGap       map[string][]ReplayGapCallback  // topic → gap callbacks
-	replayGapStrategy map[string]GapStrategy          // topic → gap strategy
-	replayGapSnapshot map[string]func() string        // topic → snapshot func for gap fallback
+	onReplayGap          map[string][]ReplayGapCallback  // topic → gap callbacks
+	replayGapStrategy    map[string]GapStrategy          // topic → gap strategy
+	replayGapSnapshot    map[string]func() string        // topic → snapshot func for gap fallback
+	onReconnect          map[string][]ReconnectCallback  // topic → reconnect callbacks
+	bundleOnReconnect    map[string]bool                 // topic → bundle replay on reconnect
 	groups            map[string]*groupDef           // static topic groups
 	groupsMu          sync.RWMutex                   // protects groups
 	dynGroups         map[string]*dynamicGroupDef    // dynamic topic groups
@@ -189,6 +191,8 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 		onReplayGap:       make(map[string][]ReplayGapCallback),
 		replayGapStrategy: make(map[string]GapStrategy),
 		replayGapSnapshot: make(map[string]func() string),
+		onReconnect:       make(map[string][]ReconnectCallback),
+		bundleOnReconnect: make(map[string]bool),
 		afterHooks:        make(map[string][]func()),
 		mutateHooks:       make(map[string][]func(MutationEvent)),
 		bufferSize:        10,
@@ -806,6 +810,7 @@ func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 		delete(b.replayLog, topic)
 		delete(b.replayGapStrategy, topic)
 		delete(b.replayGapSnapshot, topic)
+		delete(b.bundleOnReconnect, topic)
 		return
 	}
 	b.replaySize[topic] = n
@@ -826,6 +831,7 @@ func (b *SSEBroker) ClearReplay(topic string) {
 	delete(b.replayLog, topic)
 	delete(b.replayGapStrategy, topic)
 	delete(b.replayGapSnapshot, topic)
+	delete(b.bundleOnReconnect, topic)
 	b.mu.Unlock()
 }
 
