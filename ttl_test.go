@@ -292,6 +292,13 @@ func TestPublishWithTTL_SubscribeFromID_FiltersExpired(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
+	// Drain the reconnected control event injected by the reconnection feature.
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnect event")
+	}
+
 	var got []string
 	for range 1 {
 		select {

@@ -51,7 +51,7 @@ func TestOnReconnect_FiresOnReconnection(t *testing.T) {
 	assert.Greater(t, captured.Gap, time.Duration(0))
 
 	// Drain channel.
-	drainChannel(ch)
+	drainCh(ch)
 }
 
 func TestOnReconnect_DoesNotFireWithoutLastEventID(t *testing.T) {
@@ -77,7 +77,7 @@ func TestOnReconnect_DoesNotFireWithoutLastEventID(t *testing.T) {
 		// expected
 	}
 
-	drainChannel(ch)
+	drainCh(ch)
 }
 
 func TestOnReconnect_FiresEvenOnGap(t *testing.T) {
@@ -115,7 +115,7 @@ func TestOnReconnect_FiresEvenOnGap(t *testing.T) {
 		t.Fatal("OnReplayGap was not fired")
 	}
 
-	drainChannel(ch)
+	drainCh(ch)
 }
 
 func TestOnReconnect_GapDurationAndMissedCount(t *testing.T) {
@@ -149,7 +149,7 @@ func TestOnReconnect_GapDurationAndMissedCount(t *testing.T) {
 	assert.Equal(t, 3, captured.MissedCount)
 	assert.Greater(t, captured.Gap, 10*time.Millisecond)
 
-	drainChannel(ch)
+	drainCh(ch)
 }
 
 func TestOnReconnect_SendToSubscriber(t *testing.T) {
@@ -227,7 +227,7 @@ func TestOnReconnect_MultipleCallbacks(t *testing.T) {
 	assert.Equal(t, 3, count)
 	mu.Unlock()
 
-	drainChannel(ch)
+	drainCh(ch)
 }
 
 func TestOnReconnect_ClosedBrokerNoop(t *testing.T) {
@@ -418,7 +418,7 @@ func TestOnReconnect_GapWithZeroMissedAndGap(t *testing.T) {
 	assert.Equal(t, time.Duration(0), captured.Gap)
 	assert.Equal(t, 0, captured.MissedCount)
 
-	drainChannel(ch)
+	drainCh(ch)
 }
 
 func TestSSEHandler_ReconnectedControlEvent(t *testing.T) {
@@ -557,7 +557,7 @@ func TestOnReconnect_SubscriberIDFromMeta(t *testing.T) {
 	// SubscriberID comes from SubscriberInfo.ID which is empty by default.
 	assert.Equal(t, "", captured.SubscriberID)
 
-	drainChannel(ch)
+	drainCh(ch)
 }
 
 func TestBundleOnReconnect_ClearedBySetReplayPolicy(t *testing.T) {
@@ -624,7 +624,7 @@ func TestOnReconnect_MissedCountAtEndOfLog(t *testing.T) {
 	}
 
 	assert.Equal(t, 0, captured.MissedCount)
-	drainChannel(ch)
+	drainCh(ch)
 }
 
 func TestBundleOnReconnect_SingleMessage(t *testing.T) {
@@ -652,18 +652,9 @@ func TestBundleOnReconnect_SingleMessage(t *testing.T) {
 	}
 }
 
-// drainChannel reads all available messages from a channel without blocking.
-func drainChannel(ch <-chan string) {
-	for {
-		select {
-		case _, ok := <-ch:
-			if !ok {
-				return
-			}
-		case <-time.After(50 * time.Millisecond):
-			return
-		}
-	}
+// drainCh reads all available messages from a channel without blocking.
+func drainCh(ch <-chan string) {
+	drainChannel(ch, 50*time.Millisecond)
 }
 
 func TestOnReconnect_TopicIsolation(t *testing.T) {
@@ -698,7 +689,7 @@ func TestOnReconnect_TopicIsolation(t *testing.T) {
 		// expected
 	}
 
-	drainChannel(ch)
+	drainCh(ch)
 }
 
 func TestOnReconnect_ConcurrentSafety(t *testing.T) {
@@ -724,7 +715,7 @@ func TestOnReconnect_ConcurrentSafety(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ch, unsub := b.SubscribeFromID("events", "25")
-			drainChannel(ch)
+			drainCh(ch)
 			unsub()
 		}()
 	}
