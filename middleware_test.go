@@ -483,6 +483,66 @@ func TestMiddlewareTopicSwallow(t *testing.T) {
 	}
 }
 
+func TestMiddlewarePanicRecovery(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.Use(func(next PublishFunc) PublishFunc {
+		return func(topic, msg string) {
+			if msg == "boom" {
+				panic("middleware panic")
+			}
+			next(topic, msg)
+		}
+	})
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	// This should not crash.
+	b.Publish("t", "boom")
+
+	// Subsequent publishes should still work.
+	b.Publish("t", "ok")
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "ok", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for message after panic recovery")
+	}
+}
+
+func TestTopicMiddlewarePanicRecovery(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.UseTopics("t", func(next PublishFunc) PublishFunc {
+		return func(topic, msg string) {
+			if msg == "boom" {
+				panic("topic middleware panic")
+			}
+			next(topic, msg)
+		}
+	})
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	// Should not crash.
+	b.Publish("t", "boom")
+
+	// Subsequent publishes should still work.
+	b.Publish("t", "ok")
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "ok", msg)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for message after topic middleware panic recovery")
+	}
+}
+
 func TestMiddlewareMultipleTopicPatterns(t *testing.T) {
 	b := NewSSEBroker()
 	defer b.Close()

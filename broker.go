@@ -76,6 +76,7 @@ type SSEBroker struct {
 	globSubs          []*globSub                       // glob/wildcard subscriptions
 	globMu            sync.RWMutex                     // protects globSubs
 	backend           backend.Backend                  // nil = no cross-process fan-out
+	afterHookSem      chan struct{}                     // semaphore limiting concurrent After hook goroutines
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -208,6 +209,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	for _, opt := range opts {
 		opt(b)
 	}
+	b.afterHookSem = make(chan struct{}, defaultAfterHookConcurrency)
 	initGroupFields(b)
 	b.debounce.timers = make(map[string]*debounceEntry)
 	b.throttle.state = make(map[string]*throttleEntry)

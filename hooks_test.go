@@ -550,6 +550,104 @@ func TestAfterHookConcurrentPublish(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "each publish should trigger its After hook")
 }
 
+func TestAfterHooksConcurrencyLimit(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(200))
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	var concurrent atomic.Int32
+	var peak atomic.Int32
+	var total atomic.Int32
+	allDone := make(chan struct{})
+
+	const numPublishes = 200
+	b.After("topic", func() {
+		cur := concurrent.Add(1)
+		for {
+			old := peak.Load()
+			if cur <= old || peak.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond) // slow hook
+		concurrent.Add(-1)
+		if total.Add(1) == numPublishes {
+			close(allDone)
+		}
+	})
+
+	for range numPublishes {
+		b.Publish("topic", "msg")
+	}
+
+	// Drain messages.
+	for range numPublishes {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out draining messages")
+		}
+	}
+
+	select {
+	case <-allDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for all hooks to complete")
+	}
+
+	assert.Equal(t, int32(numPublishes), total.Load(), "all hooks should have executed")
+	// The semaphore allows defaultAfterHookConcurrency goroutines, plus
+	// the synchronous fallback can run one hook in the caller's goroutine,
+	// so the peak may be up to semaphore+1.
+	assert.LessOrEqual(t, peak.Load(), int32(defaultAfterHookConcurrency+1),
+		"peak concurrent hooks should not significantly exceed semaphore limit")
+}
+
+func TestAfterHooksSynchronousFallback(t *testing.T) {
+	// Create a broker with a tiny semaphore to force synchronous fallback.
+	b := NewSSEBroker(WithBufferSize(100))
+	b.afterHookSem = make(chan struct{}, 1) // override to tiny semaphore
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("topic")
+	defer unsub()
+
+	var total atomic.Int32
+	const numPublishes = 20
+
+	allDone := make(chan struct{})
+	b.After("topic", func() {
+		time.Sleep(5 * time.Millisecond)
+		if total.Add(1) == numPublishes {
+			close(allDone)
+		}
+	})
+
+	for range numPublishes {
+		b.Publish("topic", "msg")
+	}
+
+	// Drain messages.
+	for range numPublishes {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out draining messages")
+		}
+	}
+
+	select {
+	case <-allDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for hooks — synchronous fallback may not be executing")
+	}
+
+	assert.Equal(t, int32(numPublishes), total.Load(),
+		"all hooks should execute even when semaphore is full (synchronous fallback)")
+}
+
 func TestGoroutineID(t *testing.T) {
 	id := goroutineID()
 	assert.NotZero(t, id)

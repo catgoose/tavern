@@ -496,6 +496,83 @@ func TestGroupHandler_MultilineData(t *testing.T) {
 	assert.Contains(t, body, "data: line2\n")
 }
 
+func TestGroupHandlerLastEventID(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("metrics", 10)
+	b.SetReplayPolicy("alerts", 10)
+	b.PublishWithID("metrics", "1", "m1")
+	b.PublishWithID("metrics", "2", "m2")
+	b.PublishWithID("alerts", "1", "a1")
+	b.PublishWithID("alerts", "2", "a2")
+
+	b.DefineGroup("dash", []string{"metrics", "alerts"})
+	handler := b.GroupHandler("dash")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/dash", http.NoBody)
+	req.Header.Set("Last-Event-ID", "1") // replay after ID "1"
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	// Should replay m2 and a2 (after ID "1"), but not m1 or a1.
+	assert.Contains(t, body, "m2")
+	assert.Contains(t, body, "a2")
+	assert.NotContains(t, body, "data: m1\n")
+	assert.NotContains(t, body, "data: a1\n")
+}
+
+func TestDynamicGroupHandlerLastEventID(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("x", 10)
+	b.SetReplayPolicy("y", 10)
+	b.PublishWithID("x", "a", "x1")
+	b.PublishWithID("x", "b", "x2")
+	b.PublishWithID("y", "a", "y1")
+	b.PublishWithID("y", "b", "y2")
+
+	b.DynamicGroup("dyn", func(_ *http.Request) []string {
+		return []string{"x", "y"}
+	})
+	handler := b.DynamicGroupHandler("dyn")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/dyn", http.NoBody)
+	req.Header.Set("Last-Event-ID", "a") // replay after ID "a"
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "x2")
+	assert.Contains(t, body, "y2")
+	assert.NotContains(t, body, "data: x1\n")
+	assert.NotContains(t, body, "data: y1\n")
+}
+
 // collectTopics drains n topic names from ch within the given timeout.
 func collectTopics(t *testing.T, ch <-chan string, n int, timeout time.Duration) []string {
 	t.Helper()

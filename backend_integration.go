@@ -99,6 +99,7 @@ func (b *SSEBroker) dispatchDirect(topic, msg string) {
 	subscribers, exists := b.topics[topic]
 	if !exists || len(subscribers) == 0 {
 		b.mu.RUnlock()
+		b.dispatchToGlobSubscribers(topic, "", msg)
 		return
 	}
 	channels := make([]chan string, 0, len(subscribers))
@@ -107,6 +108,7 @@ func (b *SSEBroker) dispatchDirect(topic, msg string) {
 	}
 	b.mu.RUnlock()
 	b.publishToChannels(topic, channels, msg)
+	b.dispatchToGlobSubscribers(topic, "", msg)
 }
 
 // dispatchScoped sends msg to scoped subscribers matching the given scope
@@ -116,6 +118,7 @@ func (b *SSEBroker) dispatchScoped(topic, scope, msg string) {
 	scopedSubs, exists := b.scopedTopics[topic]
 	if !exists || len(scopedSubs) == 0 {
 		b.mu.RUnlock()
+		b.dispatchToGlobSubscribers(topic, scope, msg)
 		return
 	}
 	channels := make([]chan string, 0, len(scopedSubs))
@@ -128,4 +131,5 @@ func (b *SSEBroker) dispatchScoped(topic, scope, msg string) {
 	if len(channels) > 0 {
 		b.publishToChannels(topic, channels, msg)
 	}
+	b.dispatchToGlobSubscribers(topic, scope, msg)
 }
