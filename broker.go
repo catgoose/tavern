@@ -70,6 +70,7 @@ type SSEBroker struct {
 	rateLimit         *rateLimiter                     // per-subscriber rate limiting
 	adaptive          *adaptiveBackpressure          // nil = adaptive backpressure disabled
 	obs               *observabilityState              // nil when observability disabled
+	multiSubs         map[string]*multiSub             // subscriberID → managed multi-subscription
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -1116,6 +1117,7 @@ func (b *SSEBroker) Close() {
 	b.lastHash = nil
 	b.subscriberMeta = nil
 	b.filterPredicates = nil
+	b.multiSubs = nil
 	b.onReplayGap = nil
 	b.replayGapStrategy = nil
 	b.replayGapSnapshot = nil
