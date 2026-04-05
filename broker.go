@@ -47,7 +47,8 @@ type SSEBroker struct {
 	evictCallback     func(topic string)           // optional callback on eviction
 	dropCounts        map[chan string]*atomic.Int64 // per-channel consecutive drop counter
 	dropCountsMu      sync.RWMutex                 // separate lock for drop counts (avoid nesting with main mu)
-	subscriberMeta    map[chan string]*SubscriberInfo // channel → subscriber info
+	subscriberMeta    map[chan string]*SubscriberInfo  // channel → subscriber info
+	filterPredicates  map[chan string]FilterPredicate // channel → optional message filter
 	connEventsTopic   string                         // empty = connection events disabled
 	onReplayGap       map[string][]ReplayGapCallback  // topic → gap callbacks
 	replayGapStrategy map[string]GapStrategy          // topic → gap strategy
@@ -268,6 +269,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		if _, ok := b.topics[topic][ch]; ok {
 			delete(b.topics[topic], ch)
 			delete(b.subscriberMeta, ch)
+			delete(b.filterPredicates, ch)
 			close(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
@@ -340,6 +342,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		if _, ok := b.scopedTopics[topic][ch]; ok {
 			delete(b.scopedTopics[topic], ch)
 			delete(b.subscriberMeta, ch)
+			delete(b.filterPredicates, ch)
 			close(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
@@ -498,6 +501,15 @@ func (b *SSEBroker) Stats() BrokerStats {
 // send attempts to send msg on ch. If the channel is full and dropOldest is
 // enabled, it drains the oldest message first and counts the drop. Returns
 // true if the new message was sent, false if it was dropped entirely.
+// filterPredicate returns the filter predicate for the given channel, or nil
+// if no filter is set. The caller must not hold b.mu.
+func (b *SSEBroker) filterPredicate(ch chan string) FilterPredicate {
+	b.mu.RLock()
+	pred := b.filterPredicates[ch]
+	b.mu.RUnlock()
+	return pred
+}
+
 func (b *SSEBroker) send(ch chan string, msg string) bool {
 	if b.dropOldest {
 		select {
@@ -536,6 +548,11 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 			// Per-subscriber rate limiting: hold the message if within interval.
 			if b.rateLimit.hold(ch, msg) {
 				sent++ // held messages count as sent, not dropped
+				return
+			}
+			// Check filter predicate — non-matching messages are silently
+			// skipped without counting toward drops or backpressure.
+			if pred := b.filterPredicate(ch); pred != nil && !pred(msg) {
 				return
 			}
 			if b.send(ch, msg) {
@@ -581,6 +598,7 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 	if _, ok := b.topics[topic][ch]; ok {
 		delete(b.topics[topic], ch)
 		delete(b.subscriberMeta, ch)
+		delete(b.filterPredicates, ch)
 		close(ch)
 		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 		var lastHooks []func(string)
@@ -595,6 +613,7 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 	} else if _, ok := b.scopedTopics[topic][ch]; ok {
 		delete(b.scopedTopics[topic], ch)
 		delete(b.subscriberMeta, ch)
+		delete(b.filterPredicates, ch)
 		close(ch)
 		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 		var lastHooks []func(string)
@@ -972,6 +991,7 @@ func (b *SSEBroker) Close() {
 	b.replayLog = nil
 	b.lastHash = nil
 	b.subscriberMeta = nil
+	b.filterPredicates = nil
 	b.onReplayGap = nil
 	b.replayGapStrategy = nil
 	b.replayGapSnapshot = nil
