@@ -59,6 +59,9 @@ type SSEBroker struct {
 	middlewares       []Middleware                    // global publish middleware
 	topicMiddlewares  []topicMiddleware               // topic-scoped publish middleware
 	onRenderError     func(*RenderError)             // nil = no callback
+	afterHooks        map[string][]func()              // topic → After hook callbacks
+	mutateHooks       map[string][]func(MutationEvent) // resource → OnMutate handlers
+	activeChains      sync.Map                         // goroutine ID → *afterChain for cycle detection
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -171,6 +174,8 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 		onReplayGap:       make(map[string][]ReplayGapCallback),
 		replayGapStrategy: make(map[string]GapStrategy),
 		replayGapSnapshot: make(map[string]func() string),
+		afterHooks:        make(map[string][]func()),
+		mutateHooks:       make(map[string][]func(MutationEvent)),
 		bufferSize:        10,
 		done:              make(chan struct{}),
 	}
@@ -626,6 +631,7 @@ func (b *SSEBroker) publishDirect(topic, msg string) {
 		tc.published.Add(int64(sent))
 		tc.dropped.Add(int64(dropped))
 	}
+	b.fireAfterHooks(topic)
 }
 
 // PublishWithReplay behaves like [SSEBroker.Publish] but also caches msg so
@@ -668,6 +674,7 @@ func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
 		tc.published.Add(int64(sent))
 		tc.dropped.Add(int64(dropped))
 	}
+	b.fireAfterHooks(topic)
 }
 
 // SetReplayPolicy sets how many recent messages to cache for replay on the
@@ -739,6 +746,7 @@ func (b *SSEBroker) publishToDirect(topic, scope, msg string) {
 		tc.published.Add(int64(sent))
 		tc.dropped.Add(int64(dropped))
 	}
+	b.fireAfterHooks(topic)
 }
 
 // hashMsg returns the FNV-64a hash of msg.
@@ -948,6 +956,8 @@ func (b *SSEBroker) Close() {
 	b.onReplayGap = nil
 	b.replayGapStrategy = nil
 	b.replayGapSnapshot = nil
+	b.afterHooks = nil
+	b.mutateHooks = nil
 	if b.dropCounts != nil {
 		b.dropCountsMu.Lock()
 		b.dropCounts = nil
