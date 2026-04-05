@@ -69,6 +69,7 @@ type SSEBroker struct {
 	msgTTLSweep       time.Duration                  // override for TTL sweep interval (0 = default 1s)
 	rateLimit         *rateLimiter                     // per-subscriber rate limiting
 	adaptive          *adaptiveBackpressure          // nil = adaptive backpressure disabled
+	obs               *observabilityState              // nil when observability disabled
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -271,6 +272,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		default:
 		}
 	}
+	connectedAt := time.Now()
 	return ch, func() {
 		b.mu.Lock()
 		var lastHooks []func(string)
@@ -293,6 +295,9 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		}
 		if b.adaptive != nil {
 			b.adaptive.removeState(ch)
+		}
+		if b.obs != nil {
+			b.obs.recordConnectionDuration(topic, time.Since(connectedAt))
 		}
 		for _, fn := range lastHooks {
 			go fn(topic)
@@ -350,6 +355,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		default:
 		}
 	}
+	scopedConnectedAt := time.Now()
 	return ch, func() {
 		b.mu.Lock()
 		var lastHooks []func(string)
@@ -372,6 +378,9 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		}
 		if b.adaptive != nil {
 			b.adaptive.removeState(ch)
+		}
+		if b.obs != nil {
+			b.obs.recordConnectionDuration(topic, time.Since(scopedConnectedAt))
 		}
 		for _, fn := range lastHooks {
 			go fn(topic)
@@ -715,6 +724,9 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 	if b.adaptive != nil {
 		b.adaptive.removeState(ch)
 	}
+	if b.obs != nil {
+		b.obs.recordEviction(topic)
+	}
 	// Fire callback.
 	if b.evictCallback != nil {
 		go b.evictCallback(topic)
@@ -734,6 +746,10 @@ func (b *SSEBroker) Publish(topic, msg string) {
 // middleware.  It is the terminal function in the middleware chain for
 // [SSEBroker.Publish].
 func (b *SSEBroker) publishDirect(topic, msg string) {
+	var start time.Time
+	if b.obs != nil {
+		start = time.Now()
+	}
 	b.mu.RLock()
 	subscribers, exists := b.topics[topic]
 	if !exists || len(subscribers) == 0 {
@@ -752,6 +768,11 @@ func (b *SSEBroker) publishDirect(topic, msg string) {
 		tc.published.Add(int64(sent))
 		tc.dropped.Add(int64(dropped))
 	}
+	if b.obs != nil {
+		now := time.Now()
+		b.obs.recordPublishLatency(topic, now.Sub(start))
+		b.obs.recordThroughput(topic, now)
+	}
 	b.fireAfterHooks(topic)
 }
 
@@ -767,6 +788,10 @@ func (b *SSEBroker) PublishWithReplay(topic, msg string) {
 // publishWithReplayDirect caches msg for replay and fans it out to
 // unscoped subscribers without applying middleware.
 func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
+	var start time.Time
+	if b.obs != nil {
+		start = time.Now()
+	}
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -794,6 +819,11 @@ func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
 		tc := b.metrics.counter(topic)
 		tc.published.Add(int64(sent))
 		tc.dropped.Add(int64(dropped))
+	}
+	if b.obs != nil {
+		now := time.Now()
+		b.obs.recordPublishLatency(topic, now.Sub(start))
+		b.obs.recordThroughput(topic, now)
 	}
 	b.fireAfterHooks(topic)
 }
@@ -849,6 +879,10 @@ func (b *SSEBroker) PublishTo(topic, scope, msg string) {
 // publishToDirect fans out msg to scoped subscribers without applying
 // middleware.
 func (b *SSEBroker) publishToDirect(topic, scope, msg string) {
+	var start time.Time
+	if b.obs != nil {
+		start = time.Now()
+	}
 	b.mu.RLock()
 	scopedSubs, exists := b.scopedTopics[topic]
 	if !exists || len(scopedSubs) == 0 {
@@ -868,6 +902,11 @@ func (b *SSEBroker) publishToDirect(topic, scope, msg string) {
 		tc := b.metrics.counter(topic)
 		tc.published.Add(int64(sent))
 		tc.dropped.Add(int64(dropped))
+	}
+	if b.obs != nil {
+		now := time.Now()
+		b.obs.recordPublishLatency(topic, now.Sub(start))
+		b.obs.recordThroughput(topic, now)
 	}
 	b.fireAfterHooks(topic)
 }
