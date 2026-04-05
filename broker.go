@@ -62,6 +62,8 @@ type SSEBroker struct {
 	afterHooks        map[string][]func()              // topic → After hook callbacks
 	mutateHooks       map[string][]func(MutationEvent) // resource → OnMutate handlers
 	activeChains      sync.Map                         // goroutine ID → *afterChain for cycle detection
+	ttlSweeperOnce    sync.Once                      // ensures TTL sweeper starts at most once
+	msgTTLSweep       time.Duration                  // override for TTL sweep interval (0 = default 1s)
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -144,6 +146,16 @@ func WithSlowSubscriberEviction(threshold int) BrokerOption {
 func WithSlowSubscriberCallback(fn func(topic string)) BrokerOption {
 	return func(b *SSEBroker) {
 		b.evictCallback = fn
+	}
+}
+
+// WithMessageTTLSweep sets the interval at which the background goroutine
+// checks for expired TTL entries in the replay cache. Default is 1 second.
+// A shorter interval provides faster expiry at the cost of more frequent
+// lock acquisitions. This option only takes effect when TTL publishes are used.
+func WithMessageTTLSweep(interval time.Duration) BrokerOption {
+	return func(b *SSEBroker) {
+		b.msgTTLSweep = interval
 	}
 }
 
