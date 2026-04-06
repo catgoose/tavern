@@ -81,7 +81,7 @@ and translates them into declarative UI behaviors — reconnection overlays,
 gap recovery, and topic change notifications — with zero custom JavaScript:
 
 ```html
-<script src="https://unpkg.com/tavern-sse/dist/tavern.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/catgoose/tavern-js@latest/dist/tavern.min.js"></script>
 <div sse-connect="/sse/notifications"
      sse-swap="message"
      data-tavern-reconnecting-class="opacity-50"
