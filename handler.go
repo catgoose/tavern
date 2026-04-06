@@ -2,7 +2,9 @@ package tavern
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"net/http"
+	"time"
 )
 
 // SSEWriterFunc writes a message to the HTTP response. It is called for each
@@ -24,10 +26,24 @@ func WithSSEWriter(fn SSEWriterFunc) SSEHandlerOption {
 	}
 }
 
+// WithMaxConnectionDuration sets a maximum lifetime for SSE connections. After
+// the configured duration (plus 0-10% random jitter to prevent thundering herd),
+// the handler sends a retry: directive and an SSE comment, then closes the
+// connection. The browser's EventSource will automatically reconnect with
+// Last-Event-ID, providing seamless resumption.
+//
+// A zero or negative duration disables the limit.
+func WithMaxConnectionDuration(d time.Duration) SSEHandlerOption {
+	return func(h *sseHandler) {
+		h.maxConnDuration = d
+	}
+}
+
 type sseHandler struct {
-	broker *SSEBroker
-	topic  string
-	writer SSEWriterFunc
+	broker          *SSEBroker
+	topic           string
+	writer          SSEWriterFunc
+	maxConnDuration time.Duration
 }
 
 // SSEHandler returns an [http.Handler] that streams SSE messages for the
@@ -91,6 +107,12 @@ func (h *sseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer unsub()
 
 	// Stream loop.
+	var maxDurC <-chan time.Time
+	if h.maxConnDuration > 0 {
+		actual := h.maxConnDuration + time.Duration(rand.Int64N(int64(h.maxConnDuration/10)))
+		maxDurC = time.After(actual)
+	}
+
 	for {
 		select {
 		case msg, ok := <-ch:
@@ -102,6 +124,19 @@ func (h *sseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		case <-r.Context().Done():
 			return // client disconnected
+		case <-maxDurC:
+			writeMaxDurationClose(w)
+			return
 		}
+	}
+}
+
+// writeMaxDurationClose writes the retry hint and comment before closing a
+// connection that has reached its maximum duration.
+func writeMaxDurationClose(w http.ResponseWriter) {
+	fmt.Fprint(w, "retry: 1000\n\n")
+	fmt.Fprint(w, ": max connection duration reached\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
 }
