@@ -278,6 +278,10 @@ batch.PublishOOB("dashboard", tavern.Replace("activity", feedHTML))
 batch.Flush() // one atomic write per subscriber
 ```
 
+Batches also support `PublishWithTTL` and `PublishWithID` for ephemeral and
+resumable messages (these execute immediately rather than buffering, since the
+TTL sweeper and ID tracker require instant processing).
+
 ---
 
 ## OOB (out-of-band) fragments
@@ -447,6 +451,21 @@ broker.AddTopicForScope("admin", "audit-log", true)
 A `tavern-topics-changed` control event notifies the client so it can set up
 new SSE-swap targets.
 
+### Message coalescing (SubscribeWithCoalescing)
+
+Latest-value-wins subscription for high-frequency data. When multiple messages
+arrive before the subscriber reads, only the most recent value is delivered --
+stale values are replaced, not queued. Coalesced messages do not count as drops.
+Ideal for stock tickers, sensor readings, or any feed where intermediate values
+are irrelevant:
+
+```go
+ch, unsub := broker.SubscribeWithCoalescing("prices:AAPL")
+defer unsub()
+```
+
+Also available: `SubscribeScopedWithCoalescing` for scoped variants.
+
 ### Connection events (WithConnectionEvents)
 
 Publish subscribe/unsubscribe as SSE events on a meta topic:
@@ -460,6 +479,36 @@ ch, unsub := broker.Subscribe("_meta")
 ```
 
 The meta topic does not generate recursive events for its own subscribers.
+
+### Composable subscribe options (SubscribeWith)
+
+Instead of picking the right `SubscribeWith*` variant, compose capabilities
+with option functions:
+
+```go
+ch, unsub := broker.SubscribeWith("topic",
+    tavern.SubWithScope("user:123"),
+    tavern.SubWithFilter(predicate),
+    tavern.SubWithRate(tavern.Rate{MaxPerSecond: 1}),
+    tavern.SubWithMeta(tavern.SubscribeMeta{ID: sessionID}),
+    tavern.SubWithSnapshot(renderFull),
+)
+defer unsub()
+```
+
+The same pattern works for multi-topic and glob subscriptions:
+
+```go
+ch, unsub := broker.SubscribeMultiWith(
+    []string{"orders", "inventory"},
+    tavern.SubWithFilter(predicate),
+    tavern.SubWithRate(tavern.Rate{MaxPerSecond: 10}),
+)
+
+ch, unsub := broker.SubscribeGlobWith("monitoring/**",
+    tavern.SubWithScope("region:us-east"),
+)
+```
 
 ---
 
@@ -521,6 +570,29 @@ broker.UseTopics("admin:*", func(next tavern.PublishFunc) tavern.PublishFunc {
     }
 })
 ```
+
+---
+
+## Publish ordering
+
+By default, concurrent publishes to the same topic may interleave freely --
+no lock, no overhead. When message ordering matters (chat rooms, audit logs),
+opt in per topic:
+
+```go
+broker.SetOrdered("chat:session:123", true)
+```
+
+Ordered topics serialize concurrent publishes through a per-topic mutex so all
+subscribers observe the same sequence. Disable it when you no longer need the
+guarantee:
+
+```go
+broker.SetOrdered("chat:session:123", false)
+```
+
+Zero overhead for non-ordered topics. The ordering lock is only acquired when
+the topic is explicitly marked.
 
 ---
 
@@ -591,6 +663,30 @@ broker := tavern.NewSSEBroker(
     }),
 )
 ```
+
+### Backpressure signaling (OnPublishDrop / PublishBlocking)
+
+Get notified when messages are dropped, or block instead of dropping:
+
+```go
+broker.OnPublishDrop(func(topic string, count int) {
+    slog.Warn("messages dropped", "topic", topic, "count", count)
+    metrics.IncrCounter("sse.drops", count)
+})
+```
+
+For topics where loss is unacceptable, block until the subscriber catches up
+or a timeout elapses:
+
+```go
+err := broker.PublishBlocking("audit-log", entry, 5*time.Second)
+if errors.Is(err, tavern.ErrPublishTimeout) {
+    // at least one subscriber couldn't keep up
+}
+```
+
+Also available: `PublishBlockingTo` for scoped subscribers. A zero timeout
+falls back to non-blocking behavior.
 
 ---
 
@@ -790,7 +886,12 @@ users := tracker.List("doc-123")
 ### backend/ -- Distributed fan-out interface
 
 The `backend.Backend` interface enables cross-process fan-out. Publishes on one
-broker instance reach subscribers on another.
+broker instance reach subscribers on another. Message envelopes carry optional
+TTL and ID fields so replay semantics survive the trip across instances.
+
+Backends can optionally implement `HealthAwareBackend` for health checking and
+automatic re-subscription on reconnect, or `ObservableBackend` to expose
+operational metrics (connected state, messages sent/received).
 
 ### backend/memory/ -- In-process backend for testing
 
@@ -822,11 +923,37 @@ broker2 := tavern.NewSSEBroker(tavern.WithBackend(fork))
 | `WithTopicTTL(d)` | disabled | Auto-remove topics with no subscribers after TTL |
 | `WithSlowSubscriberEviction(n)` | disabled | Evict after n consecutive drops |
 | `WithAdaptiveBackpressure(cfg)` | disabled | Tiered backpressure (throttle/simplify/disconnect) |
+| `WithMaxSubscribers(n)` | unlimited | Global cap on total concurrent subscribers |
+| `WithMaxSubscribersPerTopic(n)` | unlimited | Per-topic cap on concurrent subscribers |
+| `WithAdmissionControl(fn)` | nil | Custom predicate called on every subscribe attempt |
 | `WithMetrics()` | disabled | Per-topic publish/drop counters |
 | `WithObservability(cfg)` | disabled | Latency, lag, throughput, connection duration |
 | `WithConnectionEvents(topic)` | disabled | Publish subscribe/unsubscribe events |
 | `WithLogger(l)` | nil | Log panics and errors via slog |
 | `WithBackend(b)` | nil | Cross-process fan-out backend |
+
+### Connection admission control
+
+Protect your broker from unbounded subscriber growth:
+
+```go
+broker := tavern.NewSSEBroker(
+    tavern.WithMaxSubscribers(10000),
+    tavern.WithMaxSubscribersPerTopic(1000),
+)
+```
+
+When a limit is reached, `Subscribe` returns nil and `SSEHandler` returns
+HTTP 503 Service Unavailable. For custom logic (per-tenant quotas, feature
+flags), use `WithAdmissionControl`:
+
+```go
+broker := tavern.NewSSEBroker(
+    tavern.WithAdmissionControl(func(topic string, currentCount int) bool {
+        return currentCount < tenantLimit(topic)
+    }),
+)
+```
 
 Additional runtime configuration:
 
@@ -891,6 +1018,21 @@ Server publish event. Browser receive event. What is difficult?
                       +---> subscriber B (chan) ---> SSE endpoint ---> browser B
                       +---> subscriber C (chan) ---> SSE endpoint ---> browser C
 ```
+
+---
+
+## Benchmarks
+
+Run the benchmark suite:
+
+```bash
+go test -bench=. -benchmem ./...
+```
+
+Covers fan-out throughput (1, 10, 100, 1000 subscribers), publish-to-receive
+latency, memory per subscriber, feature overhead (middleware, observability,
+backpressure, filter, ordering, coalescing), concurrent publish (ordered and
+unordered), batch flush, scoped publish, and content-based dedup.
 
 ---
 
