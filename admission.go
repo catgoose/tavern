@@ -1,9 +1,9 @@
 package tavern
 
 // WithMaxSubscribers sets a global limit on the total number of concurrent
-// subscribers across all topics. When the limit is reached, new Subscribe
-// calls return a nil channel and nil unsubscribe function, and SSEHandler
-// returns HTTP 503 Service Unavailable.
+// subscribers across all topics. Default is 0 (unlimited). When the limit is
+// reached, new Subscribe calls return a nil channel and nil unsubscribe
+// function, and SSEHandler returns HTTP 503 Service Unavailable.
 func WithMaxSubscribers(n int) BrokerOption {
 	return func(b *SSEBroker) {
 		b.maxSubs = n
@@ -11,9 +11,9 @@ func WithMaxSubscribers(n int) BrokerOption {
 }
 
 // WithMaxSubscribersPerTopic sets a per-topic limit on the number of
-// concurrent subscribers. When the limit for a topic is reached, new
-// Subscribe calls for that topic return a nil channel and nil unsubscribe
-// function, and SSEHandler returns HTTP 503.
+// concurrent subscribers. Default is 0 (unlimited). When the limit for a
+// topic is reached, new Subscribe calls for that topic return a nil channel
+// and nil unsubscribe function, and SSEHandler returns HTTP 503.
 func WithMaxSubscribersPerTopic(n int) BrokerOption {
 	return func(b *SSEBroker) {
 		b.maxSubsPerTopic = n

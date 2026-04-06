@@ -2,8 +2,9 @@ package tavern
 
 import "time"
 
-// ReconnectInfo provides context about a subscriber reconnection. It is passed
-// to callbacks registered with [SSEBroker.OnReconnect].
+// ReconnectInfo provides context about a subscriber reconnection, including
+// the gap duration and number of missed messages. It is passed to callbacks
+// registered with [SSEBroker.OnReconnect].
 type ReconnectInfo struct {
 	// Topic is the topic the subscriber reconnected to.
 	Topic string

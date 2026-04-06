@@ -17,7 +17,8 @@ type SlowSubscriberConfig struct {
 
 // SlowSubscriber simulates a subscriber that reads messages slowly, useful
 // for testing backpressure, drop-oldest behavior, and slow subscriber
-// eviction scenarios.
+// eviction scenarios. SlowSubscriber is safe for concurrent use by multiple
+// goroutines.
 type SlowSubscriber struct {
 	msgs   []string
 	mu     sync.Mutex

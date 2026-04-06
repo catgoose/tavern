@@ -2,7 +2,8 @@ package tavern
 
 // GapStrategy determines how the broker responds when a subscriber reconnects
 // with a Last-Event-ID that is no longer in the replay log (i.e., the log has
-// rolled over and the requested ID is gone).
+// rolled over and the requested ID is gone). Configure per-topic via
+// [SSEBroker.SetReplayGapPolicy].
 type GapStrategy int
 
 const (

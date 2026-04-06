@@ -5,8 +5,11 @@ import (
 	"time"
 )
 
-// Rate configures per-subscriber rate limiting. If both MaxPerSecond and
-// MinInterval are set, MinInterval takes precedence.
+// Rate configures per-subscriber rate limiting. When a subscriber is
+// rate-limited, messages published faster than the configured rate are held
+// and only the most recent held message is delivered when the interval
+// elapses (latest-wins). If both MaxPerSecond and MinInterval are set,
+// MinInterval takes precedence.
 type Rate struct {
 	// MaxPerSecond is a convenience field: converted to MinInterval internally.
 	MaxPerSecond float64

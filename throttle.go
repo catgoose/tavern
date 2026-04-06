@@ -20,8 +20,9 @@ type throttleEntry struct {
 // PublishThrottled publishes msg to the topic at most once per interval.
 // The first call publishes immediately. Subsequent calls within the interval
 // are held; when the interval elapses, the most recent held message is
-// published. This guarantees bounded latency for the first message while
-// rate-limiting subsequent ones.
+// published (latest-wins). This guarantees bounded latency for the first
+// message while rate-limiting subsequent ones. This method is safe for
+// concurrent use.
 func (b *SSEBroker) PublishThrottled(topic, msg string, interval time.Duration) {
 	now := time.Now()
 	b.throttle.mu.Lock()

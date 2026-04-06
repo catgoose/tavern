@@ -2,7 +2,8 @@ package tavern
 
 import "time"
 
-// TTLOption configures optional behavior for TTL-based publish methods.
+// TTLOption configures optional behavior for TTL-based publish methods such
+// as [SSEBroker.PublishWithTTL] and [SSEBroker.PublishToWithTTL].
 type TTLOption func(*ttlConfig)
 
 type ttlConfig struct {

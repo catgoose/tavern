@@ -20,7 +20,7 @@ type debounceEntry struct {
 // If called again for the same topic before the duration elapses, the timer
 // resets and only the latest message is published. This is useful for rapid
 // state changes (typing indicators, slider drags) where intermediate states
-// are noise.
+// are noise. This method is safe for concurrent use.
 func (b *SSEBroker) PublishDebounced(topic, msg string, after time.Duration) {
 	b.debounce.mu.Lock()
 	defer b.debounce.mu.Unlock()

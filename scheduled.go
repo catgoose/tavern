@@ -9,13 +9,18 @@ import (
 	"time"
 )
 
-// RenderFunc renders content into the provided buffer.
-// It receives the context and a buffer to write into.
+// RenderFunc renders content into the provided buffer. It receives the
+// context (which is cancelled when the scheduled publisher stops) and a
+// shared buffer to write HTML into. Multiple sections write to the same
+// buffer in a single tick, so output should be self-contained fragments.
 type RenderFunc func(ctx context.Context, buf *bytes.Buffer) error
 
 // ScheduledPublisher manages multiple named sections with independent
-// update intervals. It ticks on a fast base interval, renders due sections
-// into a shared buffer, and publishes one batched message per tick.
+// update intervals. It ticks on a fast base interval (default 100ms),
+// renders due sections into a shared buffer, and publishes one batched
+// message per tick. It automatically skips rendering when no subscribers
+// are connected to the topic. ScheduledPublisher is safe for concurrent
+// use; sections can be registered while the publisher is running.
 type ScheduledPublisher struct {
 	broker   *SSEBroker
 	event    string
@@ -26,6 +31,7 @@ type ScheduledPublisher struct {
 }
 
 // SectionOptions configures optional behavior for a registered section.
+// Pass as the last argument to [ScheduledPublisher.Register].
 type SectionOptions struct {
 	// CircuitBreaker enables circuit breaker protection for the section.
 	// When nil, the section renders normally without circuit breaker logic.

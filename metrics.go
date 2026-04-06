@@ -5,10 +5,17 @@ import (
 	"sync/atomic"
 )
 
-// TopicMetrics holds per-topic counters.
+// TopicMetrics holds per-topic counters. All fields are cumulative since the
+// broker was created (except PeakSubscribers which is a high-water mark).
 type TopicMetrics struct {
-	Published       int64
-	Dropped         int64
+	// Published is the total number of messages successfully delivered to at
+	// least one subscriber on this topic.
+	Published int64
+	// Dropped is the total number of delivery failures (subscriber buffer full)
+	// on this topic.
+	Dropped int64
+	// PeakSubscribers is the highest number of concurrent subscribers observed
+	// on this topic since the broker was created.
 	PeakSubscribers int
 }
 

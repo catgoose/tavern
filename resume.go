@@ -6,15 +6,23 @@ import (
 	"time"
 )
 
-// ReplayEntry pairs a message with its event ID for resumption support.
-// When ExpiresAt is non-zero, the entry will be removed from the replay
-// cache after that time (see [SSEBroker.PublishWithTTL]).
+// ReplayEntry pairs a message with its event ID for Last-Event-ID resumption
+// support. When ExpiresAt is non-zero, the entry will be removed from the
+// replay cache after that time (see [SSEBroker.PublishWithTTL]).
 type ReplayEntry struct {
-	ID           string
-	Msg          string
-	ExpiresAt    time.Time // zero means no expiry
-	AutoRemoveID string    // element ID for OOB delete on expiry (empty = none)
-	PublishedAt  time.Time
+	// ID is the SSE event identifier used for Last-Event-ID resumption.
+	ID string
+	// Msg is the raw message payload stored in the replay log.
+	Msg string
+	// ExpiresAt is when this entry should be purged from the replay cache.
+	// A zero value means the entry does not expire.
+	ExpiresAt time.Time
+	// AutoRemoveID is the DOM element ID to send an OOB delete fragment for
+	// when this entry expires. Empty means no auto-removal.
+	AutoRemoveID string
+	// PublishedAt records when the entry was originally published, used to
+	// compute reconnection gap durations.
+	PublishedAt time.Time
 }
 
 // PublishWithID publishes msg to the topic with an associated event ID.

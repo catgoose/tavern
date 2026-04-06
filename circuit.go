@@ -15,6 +15,7 @@ const (
 )
 
 // CircuitBreakerConfig configures a circuit breaker for a scheduled section.
+// The circuit breaker follows the standard closed/open/half-open state machine.
 type CircuitBreakerConfig struct {
 	// FailureThreshold is the number of consecutive failures before the
 	// circuit opens. Must be at least 1.
@@ -29,7 +30,9 @@ type CircuitBreakerConfig struct {
 	FallbackRender func() string
 }
 
-// RenderError contains structured information about a render failure.
+// RenderError contains structured information about a render failure. It
+// implements the error interface and supports errors.Unwrap for the underlying
+// error.
 type RenderError struct {
 	// Topic is the broker topic or scheduled publisher event associated with the error.
 	Topic string

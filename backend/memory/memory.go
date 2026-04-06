@@ -203,6 +203,7 @@ func (b *Backend) SetHealthy(healthy bool) {
 }
 
 // ErrClosed is returned when an operation is attempted on a closed backend.
+// It is a sentinel error safe for comparison with errors.Is.
 var ErrClosed = errClosed{}
 
 type errClosed struct{}

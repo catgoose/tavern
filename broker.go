@@ -88,6 +88,7 @@ type SSEBroker struct {
 // Topic name constants are conventions for common real-time use cases.
 // Any string works as a topic name; these are provided for consistent naming.
 const (
+	// TopicActivityFeed is a conventional topic name for site-wide activity feeds.
 	TopicActivityFeed = "activity-feed"
 )
 

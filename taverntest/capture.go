@@ -10,7 +10,8 @@ import (
 
 // Capture subscribes to a real broker and collects messages for assertion.
 // Unlike [Recorder], Capture provides assertion methods that accept expected
-// messages directly, making tests more declarative.
+// messages directly, making tests more declarative. Capture is safe for
+// concurrent use by multiple goroutines.
 type Capture struct {
 	msgs  []string
 	mu    sync.Mutex

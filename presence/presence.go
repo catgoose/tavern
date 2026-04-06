@@ -57,7 +57,9 @@ type Config struct {
 	TargetID string
 }
 
-// Info represents a user's presence on a topic.
+// Info represents a user's presence on a topic. All fields except UserID are
+// optional. Metadata can hold arbitrary application-specific data such as
+// cursor positions, status text, or editing state.
 type Info struct {
 	UserID   string
 	Name     string
@@ -67,7 +69,9 @@ type Info struct {
 	LastSeen time.Time
 }
 
-// Tracker manages presence state for topics. It is safe for concurrent use.
+// Tracker manages presence state for topics. It is safe for concurrent use
+// by multiple goroutines. A background goroutine sweeps stale entries at half
+// the configured StaleTimeout interval.
 type Tracker struct {
 	broker *tavern.SSEBroker
 	cfg    Config

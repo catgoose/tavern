@@ -21,9 +21,12 @@ type coalescingState struct {
 // irrelevant.
 //
 // Replaced (coalesced) messages do not count as drops in [SSEBroker.PublishDrops].
+// The coalescing channel uses an internal atomic pointer so updates are
+// lock-free in the publish path.
 //
 // The returned channel receives the latest message whenever a new value is
 // available. Call the returned function to unsubscribe and close the channel.
+// The unsubscribe function is safe to call more than once.
 func (b *SSEBroker) SubscribeWithCoalescing(topic string) (msgs <-chan string, unsubscribe func()) {
 	return b.subscribeCoalescing(topic, "")
 }

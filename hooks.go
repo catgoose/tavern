@@ -22,7 +22,8 @@ type afterChain struct {
 
 // MutationEvent carries context about a resource mutation. It is passed to
 // handlers registered via [SSEBroker.OnMutate] when [SSEBroker.NotifyMutate]
-// is called.
+// is called. Resources are logical entities (e.g., "orders") decoupled from
+// topic names.
 type MutationEvent struct {
 	// ID identifies the specific entity that was mutated (e.g., an order ID).
 	ID string

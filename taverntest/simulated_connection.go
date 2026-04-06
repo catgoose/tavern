@@ -11,7 +11,8 @@ import (
 // SimulatedConnection models a client that can disconnect and reconnect to a
 // broker, collecting messages across connection cycles. This is useful for
 // testing Last-Event-ID resumption, reconnect behavior, and message
-// continuity across disconnects.
+// continuity across disconnects. SimulatedConnection is safe for concurrent
+// use by multiple goroutines.
 type SimulatedConnection struct {
 	broker *tavern.SSEBroker
 	topic  string
