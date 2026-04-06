@@ -2,10 +2,14 @@ package tavern
 
 import "sync"
 
-// TopicMessage pairs a message with the topic it was published on.
+// TopicMessage pairs a message with the topic it was published on. It is
+// returned by multiplexed subscription methods such as [SSEBroker.SubscribeMulti]
+// and [SSEBroker.SubscribeGlob].
 type TopicMessage struct {
+	// Topic is the name of the topic the message was published to.
 	Topic string
-	Data  string
+	// Data is the published message payload.
+	Data string
 }
 
 // SubscribeMulti subscribes to multiple topics and returns a single channel

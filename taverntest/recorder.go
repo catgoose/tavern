@@ -10,7 +10,8 @@ import (
 
 // Recorder captures messages published to a topic for test assertions.
 // It subscribes to the topic on creation and collects messages in a
-// goroutine. Use [NewRecorder] or [NewScopedRecorder] to create one.
+// background goroutine. Use [NewRecorder] or [NewScopedRecorder] to create
+// one. Recorder is safe for concurrent use by multiple goroutines.
 type Recorder struct {
 	msgs   []string
 	mu     sync.Mutex

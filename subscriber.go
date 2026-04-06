@@ -5,7 +5,8 @@ import (
 	"time"
 )
 
-// SubscriberInfo describes an active subscriber.
+// SubscriberInfo describes an active subscriber. Retrieve a snapshot of all
+// subscribers for a topic via [SSEBroker.Subscribers].
 type SubscriberInfo struct {
 	// ID is the caller-provided identifier (empty if not set).
 	ID string
@@ -20,6 +21,8 @@ type SubscriberInfo struct {
 }
 
 // SubscribeMeta holds optional metadata for [SSEBroker.SubscribeWithMeta].
+// The ID is used for targeted operations like [SSEBroker.Disconnect] and
+// [SSEBroker.AddTopic].
 type SubscribeMeta struct {
 	// ID is an identifier for this subscriber (e.g., session ID, user ID).
 	ID string

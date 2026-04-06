@@ -18,6 +18,7 @@ const (
 
 // ObservabilityConfig controls which observability features are enabled.
 // By default all fields are false and observability has zero overhead.
+// Enable individual features selectively to minimize runtime cost.
 type ObservabilityConfig struct {
 	// PublishLatency enables per-topic publish latency histograms.
 	PublishLatency bool
@@ -29,13 +30,16 @@ type ObservabilityConfig struct {
 	TopicThroughput bool
 }
 
-// LatencyHistogram holds percentile latency data.
+// LatencyHistogram holds percentile latency data computed from a circular
+// buffer of the most recent 1024 samples.
 type LatencyHistogram struct {
 	P50, P95, P99 time.Duration
 	Count         int64
 }
 
-// TopicObservability holds observability data for a single topic.
+// TopicObservability holds observability data for a single topic. All fields
+// are populated based on the features enabled in [ObservabilityConfig]; disabled
+// features produce zero values.
 type TopicObservability struct {
 	PublishLatency      LatencyHistogram
 	SubscriberLag       map[string]int // subscriberID -> buffer depth
@@ -44,7 +48,9 @@ type TopicObservability struct {
 	EvictionCount       int64
 }
 
-// ObservabilitySnapshot is an export-friendly snapshot of all observability data.
+// ObservabilitySnapshot is a point-in-time, export-friendly snapshot of all
+// observability data across all topics. Obtain one via
+// [observabilityState.Snapshot].
 type ObservabilitySnapshot struct {
 	Topics map[string]TopicObservability
 }

@@ -71,6 +71,10 @@ func defaultSSEWriter(w http.ResponseWriter, msg string) error {
 	return nil
 }
 
+// ServeHTTP handles an incoming SSE connection by setting the appropriate
+// headers, subscribing to the handler's topic (with Last-Event-ID resumption
+// if the header is present), and streaming messages until the client
+// disconnects or the broker closes.
 func (h *sseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Set SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream")

@@ -54,10 +54,16 @@ func escapeAttr(s string) string {
 }
 
 // Fragment describes a targeted DOM mutation for HTMX OOB swaps via SSE.
+// Use the convenience constructors [Replace], [Append], [Prepend], and
+// [Delete] instead of building Fragment values directly.
 type Fragment struct {
-	ID   string // target element ID
-	Swap string // hx-swap-oob value: outerHTML, innerHTML, delete, beforeend, afterbegin
-	HTML string // inner HTML content (empty for delete)
+	// ID is the target DOM element ID.
+	ID string
+	// Swap is the hx-swap-oob value: "outerHTML", "innerHTML", "delete",
+	// "beforeend", or "afterbegin".
+	Swap string
+	// HTML is the inner HTML content. Empty for delete operations.
+	HTML string
 }
 
 // Delete creates a fragment that removes an element from the DOM.

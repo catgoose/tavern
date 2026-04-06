@@ -299,14 +299,18 @@ func (s *globRateState) allow() bool {
 	return true
 }
 
-// PublishWithTTLBatch buffers a TTL publish in the batch.
+// PublishWithTTL publishes a message with a TTL on the replay cache entry.
+// Unlike other PublishBatch methods, this executes immediately rather than
+// buffering because the TTL sweeper requires immediate processing.
 func (pb *PublishBatch) PublishWithTTL(topic, msg string, ttl time.Duration, opts ...TTLOption) {
 	// TTL publishes need immediate processing for the TTL sweeper, so we
 	// execute them directly rather than buffering.
 	pb.broker.PublishWithTTL(topic, msg, ttl, opts...)
 }
 
-// PublishWithID buffers a publish with a replay ID in the batch.
+// PublishWithID publishes a message with an associated event ID for
+// Last-Event-ID resumption. Like [PublishBatch.PublishWithTTL], this executes
+// immediately rather than buffering.
 func (pb *PublishBatch) PublishWithID(topic, id, msg string) {
 	pb.broker.PublishWithID(topic, id, msg)
 }

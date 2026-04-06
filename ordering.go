@@ -5,7 +5,8 @@ import "sync"
 // SetOrdered marks or unmarks a topic as ordered. When a topic is ordered,
 // concurrent publishes are serialized through a per-topic mutex so that all
 // subscribers observe messages in the same order. Non-ordered topics (the
-// default) have zero additional synchronization overhead.
+// default) have zero additional synchronization overhead. This method is
+// safe for concurrent use.
 //
 // Call with enabled=true before publishing to guarantee ordering. Call with
 // enabled=false to remove the constraint. Toggling while publishes are

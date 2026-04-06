@@ -112,10 +112,13 @@ func (b *SSEBroker) DynamicGroupHandler(name string, opts ...SSEHandlerOption) h
 	return h
 }
 
+// ServeHTTP handles an incoming SSE connection for the static topic group.
 func (h *groupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	serveGroupSSE(w, r, h.broker, h.topics, h.writer)
 }
 
+// ServeHTTP handles an incoming SSE connection for the dynamic topic group,
+// resolving topics from the per-request function.
 func (h *dynamicGroupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	topics := h.fn(r)
 	serveGroupSSE(w, r, h.broker, topics, h.writer)

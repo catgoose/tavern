@@ -61,6 +61,7 @@ type HealthAwareBackend interface {
 }
 
 // BackendStats is a point-in-time snapshot of backend operational metrics.
+// Obtain one via [ObservableBackend.Stats].
 type BackendStats struct {
 	// Connected indicates whether the backend is currently connected.
 	Connected bool

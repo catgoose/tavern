@@ -10,10 +10,11 @@ type publishOp struct {
 	scoped    bool // true for PublishTo/PublishOOBTo
 }
 
-// PublishBatch buffers publish operations and flushes them as a single write
-// per subscriber. Create one via [SSEBroker.Batch]. Multiple goroutines may
-// call Publish/PublishTo concurrently, but Flush and Discard must be called
-// at most once and not concurrently with publishes.
+// PublishBatch buffers publish operations and flushes them as a single
+// concatenated write per subscriber channel, reducing the number of SSE
+// writes on the wire. Create one via [SSEBroker.Batch]. Multiple goroutines
+// may call Publish/PublishTo concurrently, but Flush and Discard must be
+// called at most once and not concurrently with publishes.
 type PublishBatch struct {
 	broker *SSEBroker
 	mu     sync.Mutex

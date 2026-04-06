@@ -6,6 +6,7 @@ import (
 )
 
 // BackpressureTier represents the current backpressure tier of a subscriber.
+// Tiers escalate based on consecutive message drop counts.
 type BackpressureTier int
 
 const (

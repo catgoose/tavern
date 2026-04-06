@@ -6,7 +6,10 @@ import (
 )
 
 // FilterPredicate is a function that returns true if the message should be
-// delivered to the subscriber. It runs in the publish path and must be fast.
+// delivered to the subscriber. It runs synchronously in the publish goroutine
+// for every message on the topic, so implementations must be fast and
+// non-blocking. Messages rejected by the predicate are silently skipped and
+// do not count toward drop counts or backpressure tiers.
 type FilterPredicate func(msg string) bool
 
 // SubscribeWithFilter registers a subscriber with a predicate filter for the

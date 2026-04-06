@@ -25,7 +25,8 @@ type SSEEvent struct {
 // into structured [SSEEvent] values for easy assertion.
 //
 // Use it like [net/http/httptest.ResponseRecorder] but with SSE-aware
-// assertion methods.
+// assertion methods. SSERecorder is safe for concurrent use by multiple
+// goroutines.
 type SSERecorder struct {
 	mu      sync.Mutex
 	header  http.Header

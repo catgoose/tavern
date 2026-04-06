@@ -1,3 +1,9 @@
+// Package taverntest provides test helpers for tavern-based applications.
+// It includes a mock broker for verifying publish calls without running a
+// real broker, recorders and captures for collecting live messages during
+// integration tests, a slow subscriber simulator for backpressure testing,
+// a simulated connection for reconnect/resumption testing, and an SSE
+// recorder for HTTP handler testing.
 package taverntest
 
 import (
@@ -19,6 +25,7 @@ type publishedCall struct {
 // MockBroker records publish calls for test assertions. It does not deliver
 // messages to any subscribers; use it when you want to verify that application
 // code publishes the right messages without running a real broker.
+// MockBroker is safe for concurrent use by multiple goroutines.
 type MockBroker struct {
 	mu   sync.Mutex
 	calls []publishedCall
