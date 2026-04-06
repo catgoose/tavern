@@ -72,6 +72,30 @@ instance B get it.
 go get github.com/catgoose/tavern
 ```
 
+## Client-Side Helpers
+
+Tavern emits control events (`tavern-reconnected`, `tavern-replay-gap`,
+`tavern-topics-changed`) over the SSE stream. The companion library
+[tavern-js](https://github.com/catgoose/tavern-js) listens for these events
+and translates them into declarative UI behaviors — reconnection overlays,
+gap recovery, and topic change notifications — with zero custom JavaScript:
+
+```html
+<script src="https://unpkg.com/tavern-sse/dist/tavern.min.js"></script>
+<div sse-connect="/sse/notifications"
+     sse-swap="message"
+     data-tavern-reconnecting-class="opacity-50"
+     data-tavern-gap-action="banner">
+
+  <div data-tavern-status class="hidden">Reconnecting...</div>
+</div>
+```
+
+See the [tavern-js README](https://github.com/catgoose/tavern-js) for full
+API documentation, data attributes, and examples.
+
+---
+
 ## Quick start
 
 ```go

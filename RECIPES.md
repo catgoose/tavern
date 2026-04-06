@@ -1475,3 +1475,74 @@ The backend interface is minimal: `Publish`, `Subscribe`, `Unsubscribe`, and
 `Close`. Messages published on any instance are delivered to subscribers on all
 other instances. Scoped publishes work transparently -- the `Scope` field in
 `MessageEnvelope` ensures delivery only to matching scoped subscribers.
+
+---
+
+## Recipe 26: Client-Side Connection Awareness with tavern-js
+
+Tavern emits control events over the SSE stream that signal connection state
+changes. The [tavern-js](https://github.com/catgoose/tavern-js) companion
+library listens for these events and provides declarative UI behaviors.
+
+### Server (Go) -- no changes needed
+
+The broker already emits `tavern-reconnected`, `tavern-replay-gap`, and
+`tavern-topics-changed` control events. Just serve your SSE handler as usual:
+
+```go
+mux.Handle("/sse/dashboard", broker.SSEHandler("dashboard",
+    tavern.WithMaxConnectionDuration(30*time.Minute),
+))
+```
+
+### Client (HTML + tavern.js)
+
+```html
+<script src="https://unpkg.com/tavern-sse/dist/tavern.min.js"></script>
+
+<div id="dashboard"
+     sse-connect="/sse/dashboard"
+     sse-swap="update"
+     data-tavern-reconnecting-class="opacity-50 pointer-events-none"
+     data-tavern-gap-action="banner"
+     data-tavern-gap-banner-text="Dashboard was disconnected. Click to refresh.">
+
+  <div data-tavern-status class="hidden">
+    <div class="animate-pulse text-gray-500">Reconnecting...</div>
+  </div>
+
+  <!-- Normal SSE content renders here -->
+</div>
+```
+
+### What happens
+
+1. **Connection drops** -- `htmx:sseError` fires. tavern-js adds `opacity-50`
+   and `pointer-events-none` classes, shows the "Reconnecting..." status element.
+2. **Browser reconnects** -- `EventSource` auto-reconnects with `Last-Event-ID`.
+   tavern sends replay + `tavern-reconnected` event. tavern-js removes the
+   classes, hides status.
+3. **Replay gap** -- If `Last-Event-ID` has rolled out of the replay log, tavern
+   sends `tavern-replay-gap`. tavern-js shows a clickable banner so the user can
+   refresh.
+
+### Custom gap handling
+
+For cases where you want programmatic control instead of a banner:
+
+```html
+<div id="prices"
+     sse-connect="/sse/prices"
+     sse-swap="ticker"
+     data-tavern-gap-action="prices-stale">
+</div>
+
+<script>
+  document.getElementById("prices").addEventListener("prices-stale", () => {
+    htmx.trigger("#prices", "htmx:load");
+  });
+</script>
+```
+
+Setting `data-tavern-gap-action` to a custom name dispatches that as a DOM
+event, giving you full control over recovery.
