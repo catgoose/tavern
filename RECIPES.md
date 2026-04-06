@@ -1498,7 +1498,7 @@ mux.Handle("/sse/dashboard", broker.SSEHandler("dashboard",
 ### Client (HTML + tavern.js)
 
 ```html
-<script src="https://unpkg.com/tavern-sse/dist/tavern.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/catgoose/tavern-js@latest/dist/tavern.min.js"></script>
 
 <div id="dashboard"
      sse-connect="/sse/dashboard"
