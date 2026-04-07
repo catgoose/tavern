@@ -54,6 +54,7 @@ func (b *SSEBroker) subscribeCoalescing(topic, scope string) (msgs <-chan string
 	// The internal channel participates in the normal fan-out path but is
 	// intercepted by publishToChannels when coalescing is enabled.
 	internalCh := make(chan string, b.bufferSize)
+	b.chanGuards.Store(internalCh, &chanGuard{})
 	cs := &coalescingState{
 		signal: make(chan struct{}, 1),
 	}
@@ -159,7 +160,7 @@ func (b *SSEBroker) subscribeCoalescing(topic, scope string) (msgs <-chan string
 			delete(b.subscriberMeta, internalCh)
 			delete(b.filterPredicates, internalCh)
 			delete(b.coalescingChans, internalCh)
-			close(internalCh)
+			b.closeChan(internalCh)
 			b.mu.Unlock()
 
 			if b.evictThreshold > 0 || b.adaptive != nil {

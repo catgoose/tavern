@@ -31,6 +31,7 @@ func (b *SSEBroker) SubscribeWithFilter(topic string, predicate FilterPredicate)
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
+	b.chanGuards.Store(ch, &chanGuard{})
 	if b.topics[topic] == nil {
 		b.topics[topic] = make(map[chan string]struct{})
 	}
@@ -91,6 +92,7 @@ func (b *SSEBroker) SubscribeScopedWithFilter(topic, scope string, predicate Fil
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
+	b.chanGuards.Store(ch, &chanGuard{})
 	if b.scopedTopics[topic] == nil {
 		b.scopedTopics[topic] = make(map[chan string]scopedSub)
 	}
@@ -143,7 +145,7 @@ func (b *SSEBroker) makeUnsubscribe(topic string, ch chan string) func() {
 			delete(b.topics[topic], ch)
 			delete(b.subscriberMeta, ch)
 			delete(b.filterPredicates, ch)
-			close(ch)
+			b.closeChan(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
 				lastHooks = b.onLast[topic]
@@ -172,7 +174,7 @@ func (b *SSEBroker) makeScopedUnsubscribe(topic string, ch chan string) func() {
 			delete(b.scopedTopics[topic], ch)
 			delete(b.subscriberMeta, ch)
 			delete(b.filterPredicates, ch)
-			close(ch)
+			b.closeChan(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
 				lastHooks = b.onLast[topic]

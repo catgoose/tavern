@@ -84,6 +84,7 @@ type SSEBroker struct {
 	orderedTopics     map[string]*sync.Mutex             // topic → per-topic ordering mutex
 	onPublishDropFn   func(topic string, droppedForCount int) // nil = no drop callback
 	replayStore       ReplayStore                        // nil = use internal maps
+	chanGuards        sync.Map                                // chan string → *chanGuard
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -96,6 +97,28 @@ const (
 // scopedSub tracks the scope key alongside the channel.
 type scopedSub struct {
 	scope string
+}
+
+// chanGuard serializes send and close operations on a subscriber channel,
+// preventing the data race between concurrent close(ch) and ch<-msg.
+type chanGuard struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+// closeChan safely closes a subscriber channel via its guard, preventing
+// double-close and racing with concurrent sends.
+func (b *SSEBroker) closeChan(ch chan string) {
+	if v, ok := b.chanGuards.Load(ch); ok {
+		g := v.(*chanGuard)
+		g.mu.Lock()
+		if !g.closed {
+			g.closed = true
+			close(ch)
+		}
+		g.mu.Unlock()
+		b.chanGuards.Delete(ch)
+	}
 }
 
 // PublisherFunc is a long-running function that publishes messages to the broker.
@@ -270,6 +293,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
+	b.chanGuards.Store(ch, &chanGuard{})
 	if b.topics[topic] == nil {
 		b.topics[topic] = make(map[chan string]struct{})
 	}
@@ -329,7 +353,7 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 			delete(b.topics[topic], ch)
 			delete(b.subscriberMeta, ch)
 			delete(b.filterPredicates, ch)
-			close(ch)
+			b.closeChan(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
 				isLast = true
@@ -376,6 +400,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
+	b.chanGuards.Store(ch, &chanGuard{})
 	if b.scopedTopics[topic] == nil {
 		b.scopedTopics[topic] = make(map[chan string]scopedSub)
 	}
@@ -435,7 +460,7 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 			delete(b.scopedTopics[topic], ch)
 			delete(b.subscriberMeta, ch)
 			delete(b.filterPredicates, ch)
-			close(ch)
+			b.closeChan(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
 				isLastScoped = true
@@ -613,6 +638,16 @@ func (b *SSEBroker) filterPredicate(ch chan string) FilterPredicate {
 }
 
 func (b *SSEBroker) send(ch chan string, msg string) bool {
+	v, ok := b.chanGuards.Load(ch)
+	if !ok {
+		return false
+	}
+	g := v.(*chanGuard)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
 	if b.dropOldest {
 		select {
 		case ch <- msg:
@@ -773,7 +808,7 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 		delete(b.topics[topic], ch)
 		delete(b.subscriberMeta, ch)
 		delete(b.filterPredicates, ch)
-		close(ch)
+		b.closeChan(ch)
 		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 		var lastHooks []func(string)
 		if total == 0 {
@@ -788,7 +823,7 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 		delete(b.scopedTopics[topic], ch)
 		delete(b.subscriberMeta, ch)
 		delete(b.filterPredicates, ch)
-		close(ch)
+		b.closeChan(ch)
 		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 		var lastHooks []func(string)
 		if total == 0 {
@@ -1264,14 +1299,14 @@ func (b *SSEBroker) Close() {
 	for topic, subs := range b.topics {
 		for ch := range subs {
 			delete(subs, ch)
-			close(ch)
+			b.closeChan(ch)
 		}
 		delete(b.topics, topic)
 	}
 	for topic, subs := range b.scopedTopics {
 		for ch := range subs {
 			delete(subs, ch)
-			close(ch)
+			b.closeChan(ch)
 		}
 		delete(b.scopedTopics, topic)
 	}

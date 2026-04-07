@@ -1,6 +1,7 @@
 package tavern
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -256,5 +257,25 @@ func TestBackendFilteredScopedSubscribers(t *testing.T) {
 		t.Fatalf("unexpected message: %s", msg)
 	case <-time.After(50 * time.Millisecond):
 		// expected
+	}
+}
+
+func TestBackendFanIn_NoRaceOnUnsubscribe(t *testing.T) {
+	mem := memory.New()
+	defer mem.Close()
+
+	b1 := NewSSEBroker(WithBackend(mem))
+	b2 := NewSSEBroker(WithBackend(mem.Fork()))
+	defer b1.Close()
+	defer b2.Close()
+
+	for i := 0; i < 100; i++ {
+		ch, unsub := b2.Subscribe("race-test")
+		// Give backend fan-in a moment to start.
+		time.Sleep(time.Millisecond)
+		// Publish while unsubscribing concurrently.
+		go b1.Publish("race-test", fmt.Sprintf("msg-%d", i))
+		unsub()
+		_ = ch
 	}
 }
