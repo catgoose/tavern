@@ -573,6 +573,160 @@ func TestDynamicGroupHandlerLastEventID(t *testing.T) {
 	assert.NotContains(t, body, "data: y1\n")
 }
 
+func TestGroupHandler_ReplayPreservesControlEvents(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("metrics", 10)
+	b.PublishWithID("metrics", "1", "m1")
+	b.PublishWithID("metrics", "2", "m2")
+
+	b.DefineGroup("dash", []string{"metrics"})
+	handler := b.GroupHandler("dash")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/dash", http.NoBody)
+	req.Header.Set("Last-Event-ID", "1")
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+
+	// The tavern-reconnected control event should appear as its own event type,
+	// NOT wrapped inside another event type (no double-wrapping).
+	assert.Contains(t, body, "event: tavern-reconnected\n",
+		"control event should appear with its own event type")
+	assert.NotContains(t, body, "data: event: tavern-reconnected",
+		"control event must not be nested inside a data field")
+}
+
+func TestGroupHandler_ReplayPreservesEventIDs(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("metrics", 10)
+	b.PublishWithID("metrics", "1", "m1")
+	b.PublishWithID("metrics", "2", "m2")
+	b.PublishWithID("metrics", "3", "m3")
+
+	b.DefineGroup("dash", []string{"metrics"})
+	handler := b.GroupHandler("dash")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/dash", http.NoBody)
+	req.Header.Set("Last-Event-ID", "1")
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+
+	// Replayed messages should preserve their event IDs.
+	assert.Contains(t, body, "id: 2\n", "event ID 2 should be preserved in replay")
+	assert.Contains(t, body, "id: 3\n", "event ID 3 should be preserved in replay")
+	// And the topic should be used as the event type.
+	assert.Contains(t, body, "event: metrics\n", "topic should be used as event type")
+}
+
+func TestGroupHandler_LiveMessagesPreserveIDs(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("alerts", 10)
+	b.DefineGroup("dash", []string{"alerts"})
+	handler := b.GroupHandler("dash")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/dash", http.NoBody)
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	b.PublishWithID("alerts", "evt-42", "disk-full")
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: alerts\n", "topic should be event type")
+	assert.Contains(t, body, "data: disk-full\n", "payload should be in data field")
+	assert.Contains(t, body, "id: evt-42\n", "event ID should be preserved for live messages")
+}
+
+func TestGroupHandler_NoNestedControlEventsInReplay(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	// Set up two topics to exercise the multi-topic replay path.
+	b.SetReplayPolicy("t1", 10)
+	b.SetReplayPolicy("t2", 10)
+	b.PublishWithID("t1", "1", "msg-t1")
+	b.PublishWithID("t2", "1", "msg-t2")
+	b.PublishWithID("t1", "2", "msg-t1-2")
+	b.PublishWithID("t2", "2", "msg-t2-2")
+
+	b.DefineGroup("g", []string{"t1", "t2"})
+	handler := b.GroupHandler("g")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/g", http.NoBody)
+	req.Header.Set("Last-Event-ID", "1")
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+
+	// Verify no control event content appears nested inside data fields.
+	assert.NotContains(t, body, "data: event: tavern-",
+		"control events must not appear as data payloads")
+	assert.NotContains(t, body, "data: event: tavern-reconnected",
+		"tavern-reconnected must not be nested")
+
+	// Verify control events appear correctly.
+	assert.Contains(t, body, "event: tavern-reconnected\n",
+		"reconnected control event should be present")
+
+	// Verify replay payloads appear with correct topic event types and IDs.
+	assert.Contains(t, body, "event: t1\n")
+	assert.Contains(t, body, "event: t2\n")
+	assert.Contains(t, body, "id: 2\n")
+}
+
 // collectTopics drains n topic names from ch within the given timeout.
 func collectTopics(t *testing.T, ch <-chan string, n int, timeout time.Duration) []string {
 	t.Helper()

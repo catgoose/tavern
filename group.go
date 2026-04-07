@@ -173,7 +173,7 @@ func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, to
 			if !ok {
 				return // broker closed
 			}
-			sseMsg := NewSSEMessage(msg.Topic, msg.Data).String()
+			sseMsg := wrapForGroup(msg.Topic, msg.Data)
 			if err := writer(w, sseMsg); err != nil {
 				return // client disconnected
 			}
@@ -217,7 +217,7 @@ func (b *SSEBroker) subscribeMultiFromID(topics []string, lastEventID string, wr
 				if !ok {
 					break drainTopic
 				}
-				sseMsg := NewSSEMessage(topic, msg).String()
+				sseMsg := wrapForGroup(topic, msg)
 				if err := writer(w, sseMsg); err != nil {
 					// Clean up on write error.
 					for _, unsub := range unsubs {
