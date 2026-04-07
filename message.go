@@ -60,3 +60,49 @@ func (m SSEMessage) WithRetry(ms int) SSEMessage {
 	m.Retry = ms
 	return m
 }
+
+// injectSSEID injects an "id: <id>" field into an SSE message string. If the
+// message already contains an id: field, it is replaced. If the message is a
+// properly terminated SSE frame (ending with \n\n), the id field is inserted
+// before the final blank line. Otherwise it is prepended.
+func injectSSEID(msg, id string) string {
+	if id == "" {
+		return msg
+	}
+
+	idLine := fmt.Sprintf("id: %s", id)
+
+	// Remove any existing id: field to avoid duplicates.
+	lines := strings.Split(msg, "\n")
+	var filtered []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "id:") {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+
+	// Rebuild the message. If it ended with \n\n (SSE frame terminator),
+	// the split produces trailing empty strings. Insert id before those.
+	// Find the last non-empty line index.
+	lastNonEmpty := -1
+	for i := len(filtered) - 1; i >= 0; i-- {
+		if filtered[i] != "" {
+			lastNonEmpty = i
+			break
+		}
+	}
+
+	if lastNonEmpty < 0 {
+		// Message was empty or all blank lines; just return id field as SSE frame.
+		return idLine + "\n\n"
+	}
+
+	// Insert id line after the last non-empty line, before trailing empty lines.
+	var result []string
+	result = append(result, filtered[:lastNonEmpty+1]...)
+	result = append(result, idLine)
+	result = append(result, filtered[lastNonEmpty+1:]...)
+	return strings.Join(result, "\n")
+}

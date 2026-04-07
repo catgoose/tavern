@@ -1,6 +1,7 @@
 package taverntest
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -172,13 +173,13 @@ func (sc *SimulatedConnection) AssertReceivedAfterReconnect(t testing.TB, expect
 	for _, exp := range expected {
 		found := false
 		for _, msg := range sc.reconnectMsgs {
-			if msg == exp {
+			if msg == exp || strings.Contains(msg, exp) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("expected message %q not found in reconnect messages", exp)
+			t.Errorf("expected message %q not found in reconnect messages: %v", exp, sc.reconnectMsgs)
 		}
 	}
 }

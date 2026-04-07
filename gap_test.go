@@ -44,7 +44,8 @@ func TestSubscribeFromID_GapSilentDefault(t *testing.T) {
 	b.PublishWithID("events", "6", "live")
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "live", msg)
+		assert.Contains(t, msg, "live")
+		assert.Contains(t, msg, "id: 6")
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for live message")
 	}
@@ -329,7 +330,8 @@ func TestSubscribeFromID_GapWithLiveMessages(t *testing.T) {
 	b.PublishWithID("events", "4", "live")
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "live", msg)
+		assert.Contains(t, msg, "live")
+		assert.Contains(t, msg, "id: 4")
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for live message")
 	}

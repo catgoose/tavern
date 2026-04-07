@@ -212,6 +212,106 @@ func TestSSEHandler_GapDetection(t *testing.T) {
 	assert.NotContains(t, body, "msg-1")
 }
 
+func TestSSEHandler_PublishWithID_EmitsIDField(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("events", 10)
+
+	handler := b.SSEHandler("events")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse", http.NoBody)
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	// Wait for subscription to establish, then publish.
+	time.Sleep(20 * time.Millisecond)
+	b.PublishWithID("events", "evt-42", NewSSEMessage("update", "hello").String())
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: update")
+	assert.Contains(t, body, "data: hello")
+	assert.Contains(t, body, "id: evt-42")
+}
+
+func TestSSEHandler_PublishWithID_ReplayContainsIDField(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("events", 10)
+	b.PublishWithID("events", "1", NewSSEMessage("update", "first").String())
+	b.PublishWithID("events", "2", NewSSEMessage("update", "second").String())
+	b.PublishWithID("events", "3", NewSSEMessage("update", "third").String())
+
+	handler := b.SSEHandler("events")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse", http.NoBody)
+	req.Header.Set("Last-Event-ID", "1")
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	// Replayed messages should contain id fields.
+	assert.Contains(t, body, "id: 2")
+	assert.Contains(t, body, "id: 3")
+	assert.Contains(t, body, "data: second")
+	assert.Contains(t, body, "data: third")
+	// ID 1 should not be replayed.
+	assert.NotContains(t, body, "data: first")
+}
+
+func TestSSEHandler_RegularPublish_NoIDField(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	handler := b.SSEHandler("events")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse", http.NoBody)
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	b.Publish("events", NewSSEMessage("update", "no-id").String())
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: update")
+	assert.Contains(t, body, "data: no-id")
+	assert.NotContains(t, body, "id:")
+}
+
 // contextWithCancel creates a cancellable context from a request.
 func contextWithCancel(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithCancel(r.Context())

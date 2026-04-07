@@ -119,3 +119,42 @@ func TestSSEMessage_SingleLineData(t *testing.T) {
 	assert.Equal(t, 1, count)
 	assert.Contains(t, got, "data: hello\n")
 }
+
+func TestInjectSSEID_RawString(t *testing.T) {
+	got := injectSSEID("hello", "42")
+	assert.Contains(t, got, "hello")
+	assert.Contains(t, got, "id: 42")
+}
+
+func TestInjectSSEID_EmptyID(t *testing.T) {
+	msg := "hello"
+	got := injectSSEID(msg, "")
+	assert.Equal(t, msg, got)
+}
+
+func TestInjectSSEID_FormattedSSE(t *testing.T) {
+	msg := "event: update\ndata: payload\n\n"
+	got := injectSSEID(msg, "evt-1")
+	assert.Contains(t, got, "event: update")
+	assert.Contains(t, got, "data: payload")
+	assert.Contains(t, got, "id: evt-1")
+	assert.True(t, strings.HasSuffix(got, "\n\n"), "must preserve SSE frame terminator")
+}
+
+func TestInjectSSEID_ReplacesExistingID(t *testing.T) {
+	msg := "event: update\ndata: payload\nid: old-id\n\n"
+	got := injectSSEID(msg, "new-id")
+	assert.Contains(t, got, "id: new-id")
+	assert.NotContains(t, got, "old-id")
+	// Only one id: field.
+	assert.Equal(t, 1, strings.Count(got, "id:"))
+}
+
+func TestInjectSSEID_MultilineData(t *testing.T) {
+	msg := "event: update\ndata: line1\ndata: line2\n\n"
+	got := injectSSEID(msg, "ml-1")
+	assert.Contains(t, got, "data: line1")
+	assert.Contains(t, got, "data: line2")
+	assert.Contains(t, got, "id: ml-1")
+	assert.True(t, strings.HasSuffix(got, "\n\n"))
+}
