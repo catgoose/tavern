@@ -1,7 +1,9 @@
 package tavern
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -443,4 +445,32 @@ func TestSubscribeFromID_GapSilentNoControlEvent(t *testing.T) {
 		t.Fatalf("expected no gap control event with GapSilent, got: %s", msg)
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+func TestSetReplayGapPolicy_WarnsWithoutReplayState(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	b := NewSSEBroker(WithLogger(logger))
+	defer b.Close()
+
+	b.SetReplayGapPolicy("feed", GapFallbackToSnapshot, func() string {
+		return "<div>snapshot</div>"
+	})
+
+	assert.Contains(t, buf.String(), "no ID-backed replay state")
+}
+
+func TestSetReplayGapPolicy_NoWarnWithReplayState(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	b := NewSSEBroker(WithLogger(logger))
+	defer b.Close()
+
+	b.SetReplayPolicy("feed", 10)
+	b.PublishWithID("feed", "evt-1", "data: hello\n\n")
+	b.SetReplayGapPolicy("feed", GapFallbackToSnapshot, func() string {
+		return "<div>snapshot</div>"
+	})
+
+	assert.NotContains(t, buf.String(), "no ID-backed replay state")
 }
