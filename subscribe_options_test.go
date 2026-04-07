@@ -260,6 +260,138 @@ func TestPublishBatch_PublishWithID(t *testing.T) {
 	}
 }
 
+func TestSubscribeMultiWith_Scope(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(10))
+	defer b.Close()
+
+	ch, unsub := b.SubscribeMultiWith(
+		[]string{"orders", "inventory"},
+		SubWithScope("tenant-a"),
+	)
+	defer unsub()
+
+	b.PublishTo("orders", "tenant-a", "order-1")
+	b.PublishTo("inventory", "tenant-a", "inv-1")
+	b.PublishTo("orders", "tenant-b", "order-2") // should NOT arrive
+
+	var received []TopicMessage
+	timeout := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case msg := <-ch:
+			received = append(received, msg)
+			if len(received) >= 2 {
+				goto done
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	assert.Len(t, received, 2)
+	var datas []string
+	for _, tm := range received {
+		datas = append(datas, tm.Data)
+	}
+	assert.Contains(t, datas, "order-1")
+	assert.Contains(t, datas, "inv-1")
+	assert.NotContains(t, datas, "order-2")
+}
+
+func TestSubscribeMultiWith_Snapshot(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(10))
+	defer b.Close()
+
+	ch, unsub := b.SubscribeMultiWith(
+		[]string{"a", "b"},
+		SubWithSnapshot(func() string { return "snap" }),
+	)
+	defer unsub()
+
+	var received []TopicMessage
+	timeout := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case msg := <-ch:
+			received = append(received, msg)
+			if len(received) >= 2 {
+				goto done
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	assert.Len(t, received, 2)
+	for _, msg := range received {
+		assert.Equal(t, "snap", msg.Data)
+	}
+}
+
+func TestSubscribeWith_ScopeAndSnapshot_OrderingGuarantee(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(10))
+	defer b.Close()
+
+	ch, unsub := b.SubscribeWith("topic",
+		SubWithScope("user:1"),
+		SubWithSnapshot(func() string { return "snapshot-data" }),
+	)
+	defer unsub()
+
+	// Publish a live message immediately.
+	b.PublishTo("topic", "user:1", "live-1")
+
+	var received []string
+	timeout := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case msg := <-ch:
+			received = append(received, msg)
+			if len(received) >= 2 {
+				goto done
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	require.Len(t, received, 2)
+	assert.Equal(t, "snapshot-data", received[0], "snapshot should be first")
+	assert.Equal(t, "live-1", received[1], "live message should be second")
+}
+
+func TestSubscribeWith_FilterAndSnapshot_OrderingGuarantee(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(10))
+	defer b.Close()
+
+	ch, unsub := b.SubscribeWith("topic",
+		SubWithFilter(func(msg string) bool { return true }),
+		SubWithSnapshot(func() string { return "snapshot-data" }),
+	)
+	defer unsub()
+
+	// Publish a live message immediately.
+	b.Publish("topic", "live-1")
+
+	var received []string
+	timeout := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case msg := <-ch:
+			received = append(received, msg)
+			if len(received) >= 2 {
+				goto done
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	require.Len(t, received, 2)
+	assert.Equal(t, "snapshot-data", received[0], "snapshot should be first")
+	assert.Equal(t, "live-1", received[1], "live message should be second")
+}
+
 func TestSubscribeWith_AdmissionDenied(t *testing.T) {
 	b := NewSSEBroker(WithMaxSubscribers(0), WithMaxSubscribersPerTopic(1))
 	defer b.Close()

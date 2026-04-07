@@ -73,17 +73,26 @@ func buildSubscribeConfig(opts []SubscribeOption) subscribeConfig {
 func (b *SSEBroker) SubscribeWith(topic string, opts ...SubscribeOption) (msgs <-chan string, unsubscribe func()) {
 	cfg := buildSubscribeConfig(opts)
 
+	// Pre-compute snapshot outside lock when needed for atomic ordering.
+	var preSnap string
+	if cfg.snapshotFn != nil {
+		preSnap = cfg.snapshotFn()
+	}
+
 	var ch <-chan string
 	var unsub func()
 
 	switch {
+	case cfg.scope != "" && cfg.filter != nil && cfg.snapshotFn != nil:
+		ch, unsub = b.subscribeScopedWithFilterAndSnapshot(topic, cfg.scope, cfg.filter, preSnap)
 	case cfg.scope != "" && cfg.filter != nil:
 		ch, unsub = b.SubscribeScopedWithFilter(topic, cfg.scope, cfg.filter)
+	case cfg.scope != "" && cfg.snapshotFn != nil:
+		ch, unsub = b.subscribeScopedWithSnapshot(topic, cfg.scope, preSnap)
 	case cfg.scope != "":
 		ch, unsub = b.SubscribeScoped(topic, cfg.scope)
 	case cfg.filter != nil && cfg.snapshotFn != nil:
-		// Filter + snapshot: use filter subscribe, then inject snapshot.
-		ch, unsub = b.SubscribeWithFilter(topic, cfg.filter)
+		ch, unsub = b.subscribeWithFilterAndSnapshot(topic, cfg.filter, preSnap)
 	case cfg.filter != nil:
 		ch, unsub = b.SubscribeWithFilter(topic, cfg.filter)
 	case cfg.snapshotFn != nil:
@@ -94,19 +103,6 @@ func (b *SSEBroker) SubscribeWith(topic string, opts ...SubscribeOption) (msgs <
 
 	if ch == nil {
 		return nil, nil
-	}
-
-	// Inject snapshot for combos that didn't use SubscribeWithSnapshot.
-	if cfg.snapshotFn != nil && (cfg.filter != nil || cfg.scope != "") {
-		if snap := cfg.snapshotFn(); snap != "" {
-			biCh := b.findBiChanAny(topic, ch)
-			if biCh != nil {
-				select {
-				case biCh <- snap:
-				default:
-				}
-			}
-		}
 	}
 
 	// Apply meta.
@@ -162,6 +158,9 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 
 	for _, topic := range topics {
 		var innerOpts []SubscribeOption
+		if cfg.scope != "" {
+			innerOpts = append(innerOpts, SubWithScope(cfg.scope))
+		}
 		if cfg.filter != nil {
 			innerOpts = append(innerOpts, SubWithFilter(cfg.filter))
 		}
@@ -170,6 +169,9 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 		}
 		if cfg.meta != nil {
 			innerOpts = append(innerOpts, SubWithMeta(*cfg.meta))
+		}
+		if cfg.snapshotFn != nil {
+			innerOpts = append(innerOpts, SubWithSnapshot(cfg.snapshotFn))
 		}
 
 		ch, unsub := b.SubscribeWith(topic, innerOpts...)
