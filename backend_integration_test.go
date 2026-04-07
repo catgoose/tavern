@@ -258,3 +258,23 @@ func TestBackendFilteredScopedSubscribers(t *testing.T) {
 		// expected
 	}
 }
+
+func TestBackendFanIn_NoRaceOnUnsubscribe(t *testing.T) {
+	mem := memory.New()
+	defer mem.Close()
+
+	b1 := NewSSEBroker(WithBackend(mem))
+	b2 := NewSSEBroker(WithBackend(mem.Fork()))
+	defer b1.Close()
+	defer b2.Close()
+
+	for range 100 {
+		ch, unsub := b2.Subscribe("race-test")
+		// Give backend fan-in a moment to start.
+		time.Sleep(time.Millisecond)
+		// Publish while unsubscribing concurrently.
+		go b1.Publish("race-test", "msg")
+		unsub()
+		_ = ch
+	}
+}

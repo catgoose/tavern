@@ -29,6 +29,7 @@ func (b *SSEBroker) SubscribeWithSnapshot(topic string, snapshotFn func() string
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
+	b.chanGuards.Store(ch, &chanGuard{})
 
 	// Inject snapshot BEFORE registering — no live message can arrive first.
 	if snap != "" {
@@ -69,7 +70,7 @@ func (b *SSEBroker) SubscribeWithSnapshot(topic string, snapshotFn func() string
 		var lastHooks []func(string)
 		if _, ok := b.topics[topic][ch]; ok {
 			delete(b.topics[topic], ch)
-			close(ch)
+			b.closeChan(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
 				lastHooks = b.onLast[topic]
@@ -103,6 +104,7 @@ func (b *SSEBroker) subscribeScopedWithSnapshot(topic, scope, snap string) (<-ch
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
+	b.chanGuards.Store(ch, &chanGuard{})
 	if snap != "" {
 		select {
 		case ch <- snap:
@@ -160,6 +162,7 @@ func (b *SSEBroker) subscribeWithFilterAndSnapshot(topic string, predicate Filte
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
+	b.chanGuards.Store(ch, &chanGuard{})
 	if snap != "" {
 		select {
 		case ch <- snap:
@@ -224,6 +227,7 @@ func (b *SSEBroker) subscribeScopedWithFilterAndSnapshot(topic, scope string, pr
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
+	b.chanGuards.Store(ch, &chanGuard{})
 	if snap != "" {
 		select {
 		case ch <- snap:

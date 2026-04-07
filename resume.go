@@ -99,6 +99,7 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
+	b.chanGuards.Store(ch, &chanGuard{})
 	if b.topics[topic] == nil {
 		b.topics[topic] = make(map[chan string]struct{})
 	}
@@ -280,7 +281,7 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		if _, ok := b.topics[topic][ch]; ok {
 			delete(b.topics[topic], ch)
 			delete(b.subscriberMeta, ch)
-			close(ch)
+			b.closeChan(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
 				lastHooks = b.onLast[topic]
