@@ -60,7 +60,8 @@ func (b *SSEBroker) PublishWithID(topic, id, msg string) {
 	}
 	b.mu.Unlock()
 
-	sent, dropped := b.publishToChannels(topic, channels, msg)
+	wireMsg := injectSSEID(msg, id)
+	sent, dropped := b.publishToChannels(topic, channels, wireMsg)
 	if b.metrics != nil {
 		tc := b.metrics.counter(topic)
 		tc.published.Add(int64(sent))
@@ -118,7 +119,7 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 				if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
 					continue
 				}
-				replayMsgs = append(replayMsgs, e.Msg)
+				replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
 			}
 		} else {
 			replayMsgs = append([]string(nil), b.replayCache[topic]...)
@@ -134,7 +135,7 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 					if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
 						continue
 					}
-					replayMsgs = append(replayMsgs, e.Msg)
+					replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
 				}
 				break
 			}

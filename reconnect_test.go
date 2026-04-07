@@ -257,10 +257,11 @@ func TestReconnectedControlEvent(t *testing.T) {
 		t.Fatal("no control event received")
 	}
 
-	// Then the replayed message.
+	// Then the replayed message (with id field injected).
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "msg-2", msg)
+		assert.Contains(t, msg, "msg-2")
+		assert.Contains(t, msg, "id: 2")
 	case <-time.After(time.Second):
 		t.Fatal("no replay message received")
 	}
@@ -323,16 +324,18 @@ func TestBundleOnReconnect_Disabled(t *testing.T) {
 	// Skip control event.
 	<-ch
 
-	// Should receive individual messages.
+	// Should receive individual messages (with id fields injected).
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "msg-2", msg)
+		assert.Contains(t, msg, "msg-2")
+		assert.Contains(t, msg, "id: 2")
 	case <-time.After(time.Second):
 		t.Fatal("no first replay")
 	}
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "msg-3", msg)
+		assert.Contains(t, msg, "msg-3")
+		assert.Contains(t, msg, "id: 3")
 	case <-time.After(time.Second):
 		t.Fatal("no second replay")
 	}
@@ -370,18 +373,21 @@ func TestBundleOnReconnect_NoLastEventID(t *testing.T) {
 	b.PublishWithID("events", "2", "msg-2")
 
 	// Subscribe without Last-Event-ID: should get individual replays, no bundling.
+	// Messages include id fields since they come from the replayLog.
 	ch, unsub := b.SubscribeFromID("events", "")
 	defer unsub()
 
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "msg-1", msg)
+		assert.Contains(t, msg, "msg-1")
+		assert.Contains(t, msg, "id: 1")
 	case <-time.After(time.Second):
 		t.Fatal("no first replay")
 	}
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "msg-2", msg)
+		assert.Contains(t, msg, "msg-2")
+		assert.Contains(t, msg, "id: 2")
 	case <-time.After(time.Second):
 		t.Fatal("no second replay")
 	}
@@ -643,10 +649,11 @@ func TestBundleOnReconnect_SingleMessage(t *testing.T) {
 	// Skip control event.
 	<-ch
 
-	// Single bundled message containing only msg-2.
+	// Single bundled message containing only msg-2 (with id field).
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "msg-2", msg)
+		assert.Contains(t, msg, "msg-2")
+		assert.Contains(t, msg, "id: 2")
 	case <-time.After(time.Second):
 		t.Fatal("no bundled replay received")
 	}

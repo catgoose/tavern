@@ -21,7 +21,8 @@ func TestPublishWithID_BasicDelivery(t *testing.T) {
 
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "hello", msg)
+		assert.Contains(t, msg, "hello")
+		assert.Contains(t, msg, "id: id-1")
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for message")
 	}
@@ -56,7 +57,11 @@ func TestSubscribeFromID_ReplaysAfterID(t *testing.T) {
 			t.Fatal("timed out waiting for replay message")
 		}
 	}
-	assert.Equal(t, []string{"msg-4", "msg-5"}, got)
+	require.Len(t, got, 2)
+	assert.Contains(t, got[0], "msg-4")
+	assert.Contains(t, got[0], "id: 4")
+	assert.Contains(t, got[1], "msg-5")
+	assert.Contains(t, got[1], "id: 5")
 
 	// Verify no more replay messages are buffered.
 	select {
@@ -87,7 +92,11 @@ func TestSubscribeFromID_EmptyID(t *testing.T) {
 			t.Fatal("timed out waiting for replay message")
 		}
 	}
-	assert.Equal(t, []string{"msg-1", "msg-2", "msg-3"}, got)
+	require.Len(t, got, 3)
+	for i, msg := range got {
+		assert.Contains(t, msg, fmt.Sprintf("msg-%d", i+1))
+		assert.Contains(t, msg, fmt.Sprintf("id: %d", i+1))
+	}
 }
 
 func TestSubscribeFromID_UnknownID(t *testing.T) {
@@ -121,7 +130,8 @@ func TestSubscribeFromID_UnknownID(t *testing.T) {
 	b.PublishWithID("events", "4", "live-msg")
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "live-msg", msg)
+		assert.Contains(t, msg, "live-msg")
+		assert.Contains(t, msg, "id: 4")
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for live message")
 	}
@@ -178,7 +188,13 @@ func TestPublishWithID_RespectsReplayPolicy(t *testing.T) {
 			t.Fatal("timed out waiting for replay message")
 		}
 	}
-	assert.Equal(t, []string{"msg-3", "msg-4", "msg-5"}, got)
+	require.Len(t, got, 3)
+	assert.Contains(t, got[0], "msg-3")
+	assert.Contains(t, got[0], "id: 3")
+	assert.Contains(t, got[1], "msg-4")
+	assert.Contains(t, got[1], "id: 4")
+	assert.Contains(t, got[2], "msg-5")
+	assert.Contains(t, got[2], "id: 5")
 }
 
 func TestPublishWithID_AfterClose(t *testing.T) {
@@ -223,6 +239,9 @@ func TestPublishWithID_UpdatesRegularReplayCache(t *testing.T) {
 	}
 
 	// Regular Subscribe should also get the replay from PublishWithID.
+	// Note: replayCache stores raw messages without IDs, so regular Subscribe
+	// gets raw messages on replay (IDs are only injected for live delivery
+	// and SubscribeFromID replay).
 	ch, unsub := b.Subscribe("events")
 	defer unsub()
 
@@ -236,4 +255,108 @@ func TestPublishWithID_UpdatesRegularReplayCache(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []string{"msg-1", "msg-2", "msg-3"}, got)
+}
+
+func TestPublishWithID_SSEFormattedMessage(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("events")
+	defer unsub()
+
+	// Publish a pre-formatted SSE message with PublishWithID.
+	sseMsg := NewSSEMessage("update", "payload").String()
+	b.PublishWithID("events", "evt-42", sseMsg)
+
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: update")
+		assert.Contains(t, msg, "data: payload")
+		assert.Contains(t, msg, "id: evt-42")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for message")
+	}
+}
+
+func TestPublishWithID_SSEMessageWithExistingID(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("events")
+	defer unsub()
+
+	// Publish a pre-formatted SSE message that already has an id field.
+	// PublishWithID should replace it with the new id.
+	sseMsg := NewSSEMessage("update", "payload").WithID("old-id").String()
+	b.PublishWithID("events", "new-id", sseMsg)
+
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: update")
+		assert.Contains(t, msg, "data: payload")
+		assert.Contains(t, msg, "id: new-id")
+		assert.NotContains(t, msg, "old-id")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for message")
+	}
+}
+
+func TestPublishWithID_RegularPublishNoID(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("events")
+	defer unsub()
+
+	// Regular Publish should not add any id field.
+	b.Publish("events", "plain-message")
+
+	select {
+	case msg := <-ch:
+		assert.Equal(t, "plain-message", msg)
+		assert.NotContains(t, msg, "id:")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for message")
+	}
+}
+
+func TestPublishWithID_RoundTrip(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("events", 10)
+
+	// Publish with IDs.
+	b.PublishWithID("events", "evt-1", NewSSEMessage("update", "first").String())
+	b.PublishWithID("events", "evt-2", NewSSEMessage("update", "second").String())
+	b.PublishWithID("events", "evt-3", NewSSEMessage("update", "third").String())
+
+	// Simulate reconnect from evt-1: should replay evt-2 and evt-3 with id fields.
+	ch, unsub := b.SubscribeFromID("events", "evt-1")
+	defer unsub()
+
+	// Drain reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
+
+	// Replayed messages should contain id fields.
+	for _, expected := range []struct {
+		data string
+		id   string
+	}{
+		{"second", "evt-2"},
+		{"third", "evt-3"},
+	} {
+		select {
+		case msg := <-ch:
+			assert.Contains(t, msg, "data: "+expected.data)
+			assert.Contains(t, msg, "id: "+expected.id)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for replay of %s", expected.id)
+		}
+	}
 }

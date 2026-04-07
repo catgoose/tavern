@@ -308,7 +308,9 @@ func TestPublishWithTTL_SubscribeFromID_FiltersExpired(t *testing.T) {
 			t.Fatal("timed out")
 		}
 	}
-	assert.Equal(t, []string{"msg-2"}, got)
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0], "msg-2")
+	assert.Contains(t, got[0], "id: 2")
 
 	// No more messages.
 	select {
@@ -346,7 +348,11 @@ func TestPublishWithTTL_SubscribeFromID_EmptyID_FiltersExpired(t *testing.T) {
 			t.Fatal("timed out")
 		}
 	}
-	assert.Equal(t, []string{"alive", "also-alive"}, got)
+	require.Len(t, got, 2)
+	assert.Contains(t, got[0], "alive")
+	assert.Contains(t, got[0], "id: 1")
+	assert.Contains(t, got[1], "also-alive")
+	assert.Contains(t, got[1], "id: 3")
 }
 
 func TestPublishWithTTL_MultipleAutoRemove(t *testing.T) {

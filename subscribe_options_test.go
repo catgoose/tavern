@@ -253,7 +253,8 @@ func TestPublishBatch_PublishWithID(t *testing.T) {
 
 	select {
 	case msg := <-ch:
-		assert.Equal(t, "id-msg", msg)
+		assert.Contains(t, msg, "id-msg")
+		assert.Contains(t, msg, "id: id-1")
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("timeout")
 	}
