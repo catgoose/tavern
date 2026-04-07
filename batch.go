@@ -59,9 +59,16 @@ func (pb *PublishBatch) Discard() {
 	pb.mu.Unlock()
 }
 
-// Flush sends all buffered messages. For each subscriber, messages are
-// concatenated into a single channel send to minimise SSE writes. Flush
-// should be called at most once; the batch is empty afterwards.
+// Flush sends all buffered messages. For each unique (topic, scope)
+// combination the individual messages are concatenated, then routed through
+// the same publish pipeline as [SSEBroker.Publish] / [SSEBroker.PublishTo]
+// — middleware, rate limiting, filters, adaptive backpressure, glob
+// subscribers, backend publish, observability, and after-hooks all execute
+// exactly as they would for a regular publish. The concatenation preserves
+// the batch's value proposition: each subscriber receives a single channel
+// write containing all messages for that topic.
+//
+// Flush should be called at most once; the batch is empty afterwards.
 func (pb *PublishBatch) Flush() {
 	pb.mu.Lock()
 	ops := pb.ops
@@ -72,87 +79,39 @@ func (pb *PublishBatch) Flush() {
 		return
 	}
 
+	// Group messages by (topic, scope, scoped) and concatenate in order.
+	type groupKey struct {
+		topic  string
+		scope  string
+		scoped bool
+	}
+	type group struct {
+		key groupKey
+		msg string
+	}
+	seen := make(map[groupKey]int) // key → index in groups slice
+	var groups []group
+
+	for _, op := range ops {
+		k := groupKey{topic: op.topic, scope: op.scope, scoped: op.scoped}
+		if idx, ok := seen[k]; ok {
+			groups[idx].msg += op.msg
+		} else {
+			seen[k] = len(groups)
+			groups = append(groups, group{key: k, msg: op.msg})
+		}
+	}
+
 	b := pb.broker
 
-	// Build a map of channel → concatenated message.
-	// We need to resolve each op to its target channels.
-	chanMsgs := make(map[chan string]string)
-
-	// Track topics touched for metrics.
-	type metricsAcc struct {
-		sent    int
-		dropped int
-	}
-	topicMetrics := make(map[string]*metricsAcc)
-
-	b.mu.RLock()
-	for _, op := range ops {
-		if op.scoped {
-			scopedSubs := b.scopedTopics[op.topic]
-			for ch, sub := range scopedSubs {
-				if sub.scope == op.scope {
-					chanMsgs[ch] += op.msg
-				}
-			}
+	// Dispatch each group through the normal publish path. The middleware,
+	// publishToChannels, glob dispatch, backend publish, observability, and
+	// after-hooks all fire exactly as they do for Publish/PublishTo.
+	for _, g := range groups {
+		if g.key.scoped {
+			b.PublishTo(g.key.topic, g.key.scope, g.msg)
 		} else {
-			for ch := range b.topics[op.topic] {
-				chanMsgs[ch] += op.msg
-			}
-		}
-	}
-	b.mu.RUnlock()
-
-	// Now send one concatenated message per channel.
-	for ch, msg := range chanMsgs {
-		// Determine topic for metrics/eviction by looking up subscriber info.
-		topic := ""
-		if b.metrics != nil || b.evictThreshold > 0 {
-			b.mu.RLock()
-			if info, ok := b.subscriberMeta[ch]; ok {
-				topic = info.Topic
-			}
-			b.mu.RUnlock()
-		}
-
-		func() {
-			defer func() { _ = recover() }()
-			if b.send(ch, msg) {
-				if b.evictThreshold > 0 {
-					b.resetDropCount(ch)
-				}
-				if b.metrics != nil && topic != "" {
-					acc := topicMetrics[topic]
-					if acc == nil {
-						acc = &metricsAcc{}
-						topicMetrics[topic] = acc
-					}
-					acc.sent++
-				}
-			} else {
-				b.drops.Add(1)
-				if b.evictThreshold > 0 && topic != "" {
-					if b.incrementDropCount(ch) >= int64(b.evictThreshold) {
-						b.evictSubscriber(topic, ch)
-					}
-				}
-				if b.metrics != nil && topic != "" {
-					acc := topicMetrics[topic]
-					if acc == nil {
-						acc = &metricsAcc{}
-						topicMetrics[topic] = acc
-					}
-					acc.dropped++
-				}
-			}
-		}()
-	}
-
-	// Update metrics.
-	if b.metrics != nil {
-		for topic, acc := range topicMetrics {
-			tc := b.metrics.counter(topic)
-			tc.published.Add(int64(acc.sent))
-			tc.dropped.Add(int64(acc.dropped))
+			b.Publish(g.key.topic, g.msg)
 		}
 	}
 }
