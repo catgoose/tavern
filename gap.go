@@ -28,6 +28,8 @@ type ReplayGapCallback func(sub *SubscriberInfo, lastEventID string)
 // with a Last-Event-ID that is no longer present in the replay log for the
 // given topic. The callback runs in its own goroutine and does not block the
 // subscription. Multiple callbacks per topic are allowed and all will fire.
+// Like [SSEBroker.SetReplayGapPolicy], gap callbacks are only meaningful
+// when the topic uses ID-backed replay (see SetReplayGapPolicy for details).
 // Calling this on a closed broker is a no-op.
 func (b *SSEBroker) OnReplayGap(topic string, fn ReplayGapCallback) {
 	b.mu.Lock()
@@ -49,11 +51,29 @@ func (b *SSEBroker) OnReplayGap(topic string, fn ReplayGapCallback) {
 //
 // The snapshotFn parameter is only used with [GapFallbackToSnapshot] and
 // may be nil for other strategies.
+//
+// Gap detection requires ID-backed replay state: the topic must receive
+// messages via [SSEBroker.PublishWithID] (or variants like PublishWithTTL)
+// so that a replay log with event IDs exists. Without ID-backed publishes,
+// subscribers never receive event IDs and Last-Event-ID reconnection is
+// not meaningful. Calling SetReplayGapPolicy on a topic that only uses
+// plain [SSEBroker.Publish] has no effect at runtime.
+//
+// If a [*slog.Logger] is configured via [WithLogger], a warning is logged
+// when this method is called for a topic that has no replay log entries
+// and no external [ReplayStore].
 func (b *SSEBroker) SetReplayGapPolicy(topic string, strategy GapStrategy, snapshotFn func() string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
 		return
+	}
+	if b.logger != nil && b.replayStore == nil && len(b.replayLog[topic]) == 0 {
+		if _, hasSize := b.replaySize[topic]; !hasSize {
+			b.logger.Warn("SetReplayGapPolicy called on topic with no ID-backed replay state; gap detection requires PublishWithID",
+				"topic", topic,
+			)
+		}
 	}
 	b.replayGapStrategy[topic] = strategy
 	if snapshotFn != nil {

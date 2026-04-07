@@ -701,9 +701,15 @@ has been evicted; the broker treats this as a gap.
 ### Replay gap detection (OnReplayGap / SetReplayGapPolicy)
 
 Handle reconnections where the client's Last-Event-ID has rolled out of the
-replay log:
+replay log. Gap detection requires ID-backed replay — the topic must receive
+messages via `PublishWithID` (or `PublishWithTTL`) so that event IDs exist in
+the replay log. Without ID-backed publishes, `SetReplayGapPolicy` has no
+effect.
 
 ```go
+// Enable ID-backed replay so gap detection is meaningful.
+broker.SetReplayPolicy("dashboard", 100)
+
 broker.OnReplayGap("dashboard", func(sub *tavern.SubscriberInfo, lastID string) {
     slog.Warn("replay gap", "subscriber", sub.ID, "lastID", lastID)
 })

@@ -779,6 +779,12 @@ func sseHandler(broker *tavern.SSEBroker) echo.HandlerFunc {
 > than the buffer covers, it gets only live messages -- which is usually the
 > right trade-off.
 
+> **Note:** `SetReplayGapPolicy` and `OnReplayGap` only take effect when the
+> topic uses ID-backed replay (`PublishWithID` or `PublishWithTTL`). Calling
+> `SetReplayGapPolicy` on a topic that only uses plain `Publish` has no
+> effect — the stream never emits event IDs, so `Last-Event-ID` reconnection
+> is not meaningful.
+
 ---
 
 ## 12. Live dashboard with linkwell navigation
