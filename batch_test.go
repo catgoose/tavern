@@ -397,3 +397,91 @@ func TestBatchMultipleScopedSubscribersSameScope(t *testing.T) {
 	sort.Strings(msgs)
 	assert.Equal(t, []string{"msg", "msg"}, msgs)
 }
+
+func TestBatchFlushFiresAfterHooks(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	var hookCalled int32
+	done := make(chan struct{}, 2)
+	b.After("t", func() {
+		hookCalled++
+		done <- struct{}{}
+	})
+
+	batch := b.Batch()
+	batch.Publish("t", "one")
+	batch.Publish("t", "two")
+	batch.Flush()
+
+	// Drain the message.
+	_, ok := recv(ch, time.Second)
+	require.True(t, ok)
+
+	// Wait for the after hook to fire.
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("after hook was not called")
+	}
+	assert.Equal(t, int32(1), hookCalled)
+}
+
+func TestBatchFlushDispatchesToGlobSubscribers(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	// Regular subscriber.
+	ch, unsub := b.Subscribe("events/click")
+	defer unsub()
+
+	// Glob subscriber matching the topic.
+	globCh, globUnsub := b.SubscribeGlob("events/*")
+	defer globUnsub()
+
+	batch := b.Batch()
+	batch.Publish("events/click", "a")
+	batch.Publish("events/click", "b")
+	batch.Flush()
+
+	// Regular subscriber gets concatenated message.
+	msg, ok := recv(ch, time.Second)
+	require.True(t, ok)
+	assert.Equal(t, "ab", msg)
+
+	// Glob subscriber should also receive the message.
+	select {
+	case tm := <-globCh:
+		assert.Equal(t, "events/click", tm.Topic)
+		assert.Equal(t, "ab", tm.Data)
+	case <-time.After(time.Second):
+		t.Fatal("glob subscriber did not receive batch message")
+	}
+}
+
+func TestBatchFlushRunsMiddleware(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	var middlewareCalled int32
+	b.Use(func(next PublishFunc) PublishFunc {
+		return func(topic, msg string) {
+			middlewareCalled++
+			next(topic, msg)
+		}
+	})
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+
+	batch := b.Batch()
+	batch.Publish("t", "hello")
+	batch.Flush()
+
+	_, ok := recv(ch, time.Second)
+	require.True(t, ok)
+	assert.Equal(t, int32(1), middlewareCalled)
+}
