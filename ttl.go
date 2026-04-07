@@ -1,6 +1,9 @@
 package tavern
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // TTLOption configures optional behavior for TTL-based publish methods such
 // as [SSEBroker.PublishWithTTL] and [SSEBroker.PublishToWithTTL].
@@ -33,7 +36,8 @@ func (b *SSEBroker) PublishWithTTL(topic, msg string, ttl time.Duration, opts ..
 		b.mu.Unlock()
 		return
 	}
-	b.storeReplayWithTTL(topic, msg, now, ttl, cfg)
+	entry := b.storeReplayWithTTL(topic, msg, now, ttl, cfg)
+	store := b.replayStore
 
 	subscribers := b.topics[topic]
 	channels := make([]chan string, 0, len(subscribers))
@@ -41,6 +45,10 @@ func (b *SSEBroker) PublishWithTTL(topic, msg string, ttl time.Duration, opts ..
 		channels = append(channels, ch)
 	}
 	b.mu.Unlock()
+
+	if store != nil {
+		_ = store.Append(context.Background(), topic, entry)
+	}
 
 	b.ensureTTLSweeper()
 
@@ -69,7 +77,8 @@ func (b *SSEBroker) PublishToWithTTL(topic, scope, msg string, ttl time.Duration
 		b.mu.Unlock()
 		return
 	}
-	b.storeReplayWithTTL(topic, msg, now, ttl, cfg)
+	entry := b.storeReplayWithTTL(topic, msg, now, ttl, cfg)
+	store := b.replayStore
 
 	scopedSubs, exists := b.scopedTopics[topic]
 	var channels []chan string
@@ -82,6 +91,10 @@ func (b *SSEBroker) PublishToWithTTL(topic, scope, msg string, ttl time.Duration
 		}
 	}
 	b.mu.Unlock()
+
+	if store != nil {
+		_ = store.Append(context.Background(), topic, entry)
+	}
 
 	b.ensureTTLSweeper()
 
@@ -112,7 +125,8 @@ func (b *SSEBroker) PublishIfChangedWithTTL(topic, msg string, ttl time.Duration
 		return false
 	}
 	b.lastHash[topic] = h
-	b.storeReplayWithTTL(topic, msg, now, ttl, cfg)
+	entry := b.storeReplayWithTTL(topic, msg, now, ttl, cfg)
+	store := b.replayStore
 
 	subscribers := b.topics[topic]
 	channels := make([]chan string, 0, len(subscribers))
@@ -120,6 +134,10 @@ func (b *SSEBroker) PublishIfChangedWithTTL(topic, msg string, ttl time.Duration
 		channels = append(channels, ch)
 	}
 	b.mu.Unlock()
+
+	if store != nil {
+		_ = store.Append(context.Background(), topic, entry)
+	}
 
 	b.ensureTTLSweeper()
 
@@ -133,8 +151,23 @@ func (b *SSEBroker) PublishIfChangedWithTTL(topic, msg string, ttl time.Duration
 }
 
 // storeReplayWithTTL adds a message to both the replay cache and replay log
-// with TTL metadata. Must be called with b.mu held.
-func (b *SSEBroker) storeReplayWithTTL(topic, msg string, now time.Time, ttl time.Duration, cfg ttlConfig) {
+// with TTL metadata. Must be called with b.mu held. When an external
+// ReplayStore is configured, this only builds and returns the entry; the
+// caller is responsible for appending it to the store after releasing the lock.
+func (b *SSEBroker) storeReplayWithTTL(topic, msg string, now time.Time, ttl time.Duration, cfg ttlConfig) ReplayEntry {
+	entry := ReplayEntry{
+		Msg:         msg,
+		ExpiresAt:   now.Add(ttl),
+		PublishedAt: now,
+	}
+	if cfg.autoRemoveID != "" {
+		entry.AutoRemoveID = cfg.autoRemoveID
+	}
+
+	if b.replayStore != nil {
+		return entry
+	}
+
 	maxSize := 1
 	if n, ok := b.replaySize[topic]; ok {
 		maxSize = n
@@ -149,19 +182,13 @@ func (b *SSEBroker) storeReplayWithTTL(topic, msg string, now time.Time, ttl tim
 	b.replayCache[topic] = msgs
 
 	// Update replay log with TTL metadata.
-	entry := ReplayEntry{
-		Msg:       msg,
-		ExpiresAt: now.Add(ttl),
-	}
-	if cfg.autoRemoveID != "" {
-		entry.AutoRemoveID = cfg.autoRemoveID
-	}
 	log := b.replayLog[topic]
 	log = append(log, entry)
 	if len(log) > maxSize {
 		log = log[len(log)-maxSize:]
 	}
 	b.replayLog[topic] = log
+	return entry
 }
 
 // ensureTTLSweeper starts the background TTL sweeper goroutine if it has not

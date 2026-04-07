@@ -83,6 +83,7 @@ type SSEBroker struct {
 	admissionFn       func(topic string, currentCount int) bool // nil = no custom admission
 	orderedTopics     map[string]*sync.Mutex             // topic → per-topic ordering mutex
 	onPublishDropFn   func(topic string, droppedForCount int) // nil = no drop callback
+	replayStore       ReplayStore                        // nil = use internal maps
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -176,6 +177,19 @@ func WithSlowSubscriberCallback(fn func(topic string)) BrokerOption {
 func WithMessageTTLSweep(interval time.Duration) BrokerOption {
 	return func(b *SSEBroker) {
 		b.msgTTLSweep = interval
+	}
+}
+
+// WithReplayStore sets an external [ReplayStore] for persisting replay entries.
+// When configured, the broker delegates all replay read/write operations to the
+// store instead of using its internal in-memory maps. This enables durable replay
+// across process restarts or shared replay across multiple broker instances.
+//
+// When no store is configured (the default), the broker uses its built-in
+// in-memory replay, preserving existing behavior.
+func WithReplayStore(store ReplayStore) BrokerOption {
+	return func(b *SSEBroker) {
+		b.replayStore = store
 	}
 }
 
@@ -279,10 +293,20 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 	if b.adaptive != nil {
 		b.adaptive.getState(ch) // pre-create state
 	}
-	replayMsgs := append([]string(nil), b.replayCache[topic]...)
+	store := b.replayStore
+	var replayMsgs []string
+	if store == nil {
+		replayMsgs = append([]string(nil), b.replayCache[topic]...)
+	}
 	delete(b.topicEmpty, topic)
 	hasBackend := b.backend != nil
 	b.mu.Unlock()
+	if store != nil {
+		entries, _ := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
+		for _, e := range entries {
+			replayMsgs = append(replayMsgs, e.Msg)
+		}
+	}
 	for _, fn := range firstHooks {
 		go fn(topic)
 	}
@@ -375,10 +399,20 @@ func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, un
 	if b.adaptive != nil {
 		b.adaptive.getState(ch) // pre-create state
 	}
-	replayMsgs := append([]string(nil), b.replayCache[topic]...)
+	storeScoped := b.replayStore
+	var replayMsgs []string
+	if storeScoped == nil {
+		replayMsgs = append([]string(nil), b.replayCache[topic]...)
+	}
 	hasBackendScoped := b.backend != nil
 	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
+	if storeScoped != nil {
+		entries, _ := storeScoped.Latest(context.Background(), topic, b.replayStoreLimit(topic))
+		for _, e := range entries {
+			replayMsgs = append(replayMsgs, e.Msg)
+		}
+	}
 	for _, fn := range firstHooks {
 		go fn(topic)
 	}
@@ -853,22 +887,29 @@ func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
 		b.mu.Unlock()
 		return
 	}
-	maxSize := 1
-	if n, ok := b.replaySize[topic]; ok {
-		maxSize = n
+	store := b.replayStore
+	if store == nil {
+		maxSize := 1
+		if n, ok := b.replaySize[topic]; ok {
+			maxSize = n
+		}
+		msgs := b.replayCache[topic]
+		msgs = append(msgs, msg)
+		if len(msgs) > maxSize {
+			msgs = msgs[len(msgs)-maxSize:]
+		}
+		b.replayCache[topic] = msgs
 	}
-	msgs := b.replayCache[topic]
-	msgs = append(msgs, msg)
-	if len(msgs) > maxSize {
-		msgs = msgs[len(msgs)-maxSize:]
-	}
-	b.replayCache[topic] = msgs
 	subscribers := b.topics[topic]
 	channels := make([]chan string, 0, len(subscribers))
 	for ch := range subscribers {
 		channels = append(channels, ch)
 	}
 	b.mu.Unlock()
+
+	if store != nil {
+		_ = store.Append(context.Background(), topic, ReplayEntry{Msg: msg, PublishedAt: time.Now()})
+	}
 
 	if len(channels) > 0 {
 		sent, dropped := b.publishToChannels(topic, channels, msg)
@@ -893,7 +934,7 @@ func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
 // live messages. Use n=0 to disable replay for the topic.
 func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	store := b.replayStore
 	if n <= 0 {
 		delete(b.replaySize, topic)
 		delete(b.replayCache, topic)
@@ -901,14 +942,24 @@ func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 		delete(b.replayGapStrategy, topic)
 		delete(b.replayGapSnapshot, topic)
 		delete(b.bundleOnReconnect, topic)
+		b.mu.Unlock()
+		if store != nil {
+			_ = store.DeleteTopic(context.Background(), topic)
+		}
 		return
 	}
 	b.replaySize[topic] = n
-	if msgs := b.replayCache[topic]; len(msgs) > n {
-		b.replayCache[topic] = msgs[len(msgs)-n:]
+	if store == nil {
+		if msgs := b.replayCache[topic]; len(msgs) > n {
+			b.replayCache[topic] = msgs[len(msgs)-n:]
+		}
+		if logs := b.replayLog[topic]; len(logs) > n {
+			b.replayLog[topic] = logs[len(logs)-n:]
+		}
 	}
-	if logs := b.replayLog[topic]; len(logs) > n {
-		b.replayLog[topic] = logs[len(logs)-n:]
+	b.mu.Unlock()
+	if store != nil {
+		_ = store.SetMaxEntries(context.Background(), topic, n)
 	}
 }
 
@@ -916,6 +967,7 @@ func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 // subscribers will no longer receive a replayed message on connect.
 func (b *SSEBroker) ClearReplay(topic string) {
 	b.mu.Lock()
+	store := b.replayStore
 	delete(b.replayCache, topic)
 	delete(b.replaySize, topic)
 	delete(b.replayLog, topic)
@@ -923,6 +975,20 @@ func (b *SSEBroker) ClearReplay(topic string) {
 	delete(b.replayGapSnapshot, topic)
 	delete(b.bundleOnReconnect, topic)
 	b.mu.Unlock()
+	if store != nil {
+		_ = store.DeleteTopic(context.Background(), topic)
+	}
+}
+
+// replayStoreLimit returns the configured replay size for a topic, defaulting
+// to 1. It must be called without holding b.mu when used outside the lock.
+func (b *SSEBroker) replayStoreLimit(topic string) int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if n, ok := b.replaySize[topic]; ok {
+		return n
+	}
+	return 1
 }
 
 // PublishTo fans out msg only to scoped subscribers of the given topic whose
