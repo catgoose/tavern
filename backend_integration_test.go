@@ -1,7 +1,6 @@
 package tavern
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -269,12 +268,12 @@ func TestBackendFanIn_NoRaceOnUnsubscribe(t *testing.T) {
 	defer b1.Close()
 	defer b2.Close()
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		ch, unsub := b2.Subscribe("race-test")
 		// Give backend fan-in a moment to start.
 		time.Sleep(time.Millisecond)
 		// Publish while unsubscribing concurrently.
-		go b1.Publish("race-test", fmt.Sprintf("msg-%d", i))
+		go b1.Publish("race-test", "msg")
 		unsub()
 		_ = ch
 	}
