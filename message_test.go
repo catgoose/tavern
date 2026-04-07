@@ -120,6 +120,67 @@ func TestSSEMessage_SingleLineData(t *testing.T) {
 	assert.Contains(t, got, "data: hello\n")
 }
 
+func TestIsControlEvent(t *testing.T) {
+	assert.True(t, isControlEvent("event: tavern-reconnected\ndata: \n\n"))
+	assert.True(t, isControlEvent("event: tavern-replay-gap\ndata: old-id\n\n"))
+	assert.False(t, isControlEvent("event: metrics\ndata: cpu=42\n\n"))
+	assert.False(t, isControlEvent("just raw text"))
+	assert.False(t, isControlEvent(""))
+}
+
+func TestExtractSSEID(t *testing.T) {
+	t.Run("no id", func(t *testing.T) {
+		msg := "hello"
+		cleaned, id := extractSSEID(msg)
+		assert.Equal(t, msg, cleaned)
+		assert.Empty(t, id)
+	})
+
+	t.Run("with id", func(t *testing.T) {
+		msg := "id: 42\nhello"
+		cleaned, id := extractSSEID(msg)
+		assert.Equal(t, "42", id)
+		assert.NotContains(t, cleaned, "id:")
+		assert.Contains(t, cleaned, "hello")
+	})
+
+	t.Run("id in SSE frame", func(t *testing.T) {
+		msg := "event: update\ndata: payload\nid: evt-7\n\n"
+		cleaned, id := extractSSEID(msg)
+		assert.Equal(t, "evt-7", id)
+		assert.NotContains(t, cleaned, "id:")
+		assert.Contains(t, cleaned, "event: update")
+		assert.Contains(t, cleaned, "data: payload")
+	})
+}
+
+func TestWrapForGroup(t *testing.T) {
+	t.Run("control event passed through", func(t *testing.T) {
+		ctrl := "event: tavern-reconnected\ndata: \n\n"
+		got := wrapForGroup("metrics", ctrl)
+		assert.Equal(t, ctrl, got, "control events should pass through unchanged")
+	})
+
+	t.Run("payload wrapped with topic", func(t *testing.T) {
+		got := wrapForGroup("metrics", "cpu=42")
+		assert.Contains(t, got, "event: metrics\n")
+		assert.Contains(t, got, "data: cpu=42\n")
+	})
+
+	t.Run("payload with id preserved", func(t *testing.T) {
+		got := wrapForGroup("alerts", "id: 7\ndisk-full")
+		assert.Contains(t, got, "event: alerts\n")
+		assert.Contains(t, got, "data: disk-full\n")
+		assert.Contains(t, got, "id: 7\n")
+	})
+
+	t.Run("gap control event passed through", func(t *testing.T) {
+		ctrl := replayGapControlEvent("old-id")
+		got := wrapForGroup("t1", ctrl)
+		assert.Equal(t, ctrl, got)
+	})
+}
+
 func TestInjectSSEID_RawString(t *testing.T) {
 	got := injectSSEID("hello", "42")
 	assert.Contains(t, got, "hello")

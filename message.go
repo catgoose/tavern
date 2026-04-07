@@ -61,6 +61,48 @@ func (m SSEMessage) WithRetry(ms int) SSEMessage {
 	return m
 }
 
+// isControlEvent reports whether msg is a tavern control event (e.g.,
+// tavern-reconnected, tavern-replay-gap). Control events are already
+// fully-formatted SSE frames and must not be re-wrapped.
+func isControlEvent(msg string) bool {
+	return strings.HasPrefix(msg, "event: tavern-")
+}
+
+// extractSSEID extracts the id field value from an SSE message string and
+// returns the message with the id field removed. If no id field is present, the
+// original message is returned unchanged with an empty id.
+func extractSSEID(msg string) (cleaned, id string) {
+	lines := strings.Split(msg, "\n")
+	var filtered []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "id:") {
+			id = strings.TrimSpace(strings.TrimPrefix(trimmed, "id:"))
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	if id == "" {
+		return msg, ""
+	}
+	return strings.Join(filtered, "\n"), id
+}
+
+// wrapForGroup formats a raw subscriber message for grouped SSE output. Control
+// events are forwarded as-is. Payload messages are wrapped with the topic as the
+// SSE event type, preserving any id field injected by PublishWithID.
+func wrapForGroup(topic, msg string) string {
+	if isControlEvent(msg) {
+		return msg
+	}
+	cleaned, id := extractSSEID(msg)
+	m := NewSSEMessage(topic, cleaned)
+	if id != "" {
+		m = m.WithID(id)
+	}
+	return m.String()
+}
+
 // injectSSEID injects an "id: <id>" field into an SSE message string. If the
 // message already contains an id: field, it is replaced. If the message is a
 // properly terminated SSE frame (ending with \n\n), the id field is inserted
