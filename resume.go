@@ -1,6 +1,7 @@
 package tavern
 
 import (
+	"context"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -34,24 +35,27 @@ func (b *SSEBroker) PublishWithID(topic, id, msg string) {
 		b.mu.Unlock()
 		return
 	}
-	maxSize := 1
-	if n, ok := b.replaySize[topic]; ok {
-		maxSize = n
-	}
-	log := b.replayLog[topic]
-	log = append(log, ReplayEntry{ID: id, Msg: msg, PublishedAt: time.Now()})
-	if len(log) > maxSize {
-		log = log[len(log)-maxSize:]
-	}
-	b.replayLog[topic] = log
+	store := b.replayStore
+	if store == nil {
+		maxSize := 1
+		if n, ok := b.replaySize[topic]; ok {
+			maxSize = n
+		}
+		log := b.replayLog[topic]
+		log = append(log, ReplayEntry{ID: id, Msg: msg, PublishedAt: time.Now()})
+		if len(log) > maxSize {
+			log = log[len(log)-maxSize:]
+		}
+		b.replayLog[topic] = log
 
-	// Also update replayCache for regular Subscribe replay compatibility.
-	msgs := b.replayCache[topic]
-	msgs = append(msgs, msg)
-	if len(msgs) > maxSize {
-		msgs = msgs[len(msgs)-maxSize:]
+		// Also update replayCache for regular Subscribe replay compatibility.
+		msgs := b.replayCache[topic]
+		msgs = append(msgs, msg)
+		if len(msgs) > maxSize {
+			msgs = msgs[len(msgs)-maxSize:]
+		}
+		b.replayCache[topic] = msgs
 	}
-	b.replayCache[topic] = msgs
 
 	subscribers := b.topics[topic]
 	channels := make([]chan string, 0, len(subscribers))
@@ -59,6 +63,10 @@ func (b *SSEBroker) PublishWithID(topic, id, msg string) {
 		channels = append(channels, ch)
 	}
 	b.mu.Unlock()
+
+	if store != nil {
+		_ = store.Append(context.Background(), topic, ReplayEntry{ID: id, Msg: msg, PublishedAt: time.Now()})
+	}
 
 	wireMsg := injectSSEID(msg, id)
 	sent, dropped := b.publishToChannels(topic, channels, wireMsg)
@@ -108,40 +116,43 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 	}
 
 	// Find messages after lastEventID, skipping expired TTL entries.
-	now := time.Now()
+	store := b.replayStore
 	var replayMsgs []string
 	var gapDetected bool
-	if lastEventID == "" {
-		// No Last-Event-ID: replay all cached (same as regular Subscribe).
-		// Filter out expired entries from the replay log if present.
-		if log := b.replayLog[topic]; len(log) > 0 {
-			for _, e := range log {
-				if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
-					continue
-				}
-				replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
-			}
-		} else {
-			replayMsgs = append([]string(nil), b.replayCache[topic]...)
-		}
-	} else {
-		log := b.replayLog[topic]
-		found := false
-		for i, entry := range log {
-			if entry.ID == lastEventID {
-				found = true
-				// Replay everything after this entry, skipping expired.
-				for _, e := range log[i+1:] {
+	if store == nil {
+		now := time.Now()
+		if lastEventID == "" {
+			// No Last-Event-ID: replay all cached (same as regular Subscribe).
+			// Filter out expired entries from the replay log if present.
+			if log := b.replayLog[topic]; len(log) > 0 {
+				for _, e := range log {
 					if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
 						continue
 					}
 					replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
 				}
-				break
+			} else {
+				replayMsgs = append([]string(nil), b.replayCache[topic]...)
 			}
-		}
-		if !found {
-			gapDetected = true
+		} else {
+			log := b.replayLog[topic]
+			found := false
+			for i, entry := range log {
+				if entry.ID == lastEventID {
+					found = true
+					// Replay everything after this entry, skipping expired.
+					for _, e := range log[i+1:] {
+						if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
+							continue
+						}
+						replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
+					}
+					break
+				}
+			}
+			if !found {
+				gapDetected = true
+			}
 		}
 	}
 
@@ -179,6 +190,34 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		go fn(topic)
 	}
 	b.publishConnectionEvent("subscribe", topic, total)
+
+	// When an external ReplayStore is configured, query it outside the lock.
+	if store != nil {
+		if lastEventID == "" {
+			entries, _ := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
+			for _, e := range entries {
+				if e.ID != "" {
+					replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
+				} else {
+					replayMsgs = append(replayMsgs, e.Msg)
+				}
+			}
+		} else {
+			entries, found, _ := store.AfterID(context.Background(), topic, lastEventID, 0)
+			if !found {
+				gapDetected = true
+				// Re-read gap callbacks under the lock.
+				b.mu.RLock()
+				gapCallbacks = b.onReplayGap[topic]
+				gapStrategy = b.replayGapStrategy[topic]
+				gapSnapshotFn = b.replayGapSnapshot[topic]
+				b.mu.RUnlock()
+			}
+			for _, e := range entries {
+				replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
+			}
+		}
+	}
 
 	// Send reconnected control event when Last-Event-ID is present.
 	if isReconnect {
