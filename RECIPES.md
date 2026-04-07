@@ -130,13 +130,96 @@ func updatePerson(broker *tavern.SSEBroker, db *sql.DB) echo.HandlerFunc {
 ## 3. Multi-topic fan-in SSE stream
 
 A single EventSource can subscribe to multiple topics by merging them into one
-SSE connection with a fan-in select loop. Each message is tagged with the topic
-name as the SSE event type.
+SSE connection. Each message is tagged with the topic name as the SSE event
+type.
 
-### Go handler
+### Go handler (SubscribeMulti)
+
+`SubscribeMulti` is the preferred way to fan-in multiple topics onto a single
+channel. It returns `TopicMessage` values so you always know which topic each
+message came from.
 
 ```go
 func multiTopicSSE(broker *tavern.SSEBroker) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        c.Response().Header().Set("Content-Type", "text/event-stream")
+        c.Response().Header().Set("Cache-Control", "no-cache")
+        c.Response().Header().Set("Connection", "keep-alive")
+
+        ch, unsub := broker.SubscribeMulti("projects", "people", "activity")
+        defer unsub()
+
+        for {
+            select {
+            case msg, ok := <-ch:
+                if !ok {
+                    return nil
+                }
+                sse := tavern.NewSSEMessage(msg.Topic, msg.Data).String()
+                if _, err := fmt.Fprint(c.Response(), sse); err != nil {
+                    return nil
+                }
+                c.Response().Flush()
+            case <-c.Request().Context().Done():
+                return nil
+            }
+        }
+    }
+}
+```
+
+### Go handler (SubscribeMultiWith -- composable options)
+
+Use `SubscribeMultiWith` to layer filtering, rate limiting, or other options
+across all topics:
+
+```go
+func multiTopicFilteredSSE(broker *tavern.SSEBroker) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        c.Response().Header().Set("Content-Type", "text/event-stream")
+        c.Response().Header().Set("Cache-Control", "no-cache")
+        c.Response().Header().Set("Connection", "keep-alive")
+
+        // With filtering and rate limiting across all topics:
+        ch, unsub := broker.SubscribeMultiWith(
+            []string{"projects", "people", "activity"},
+            tavern.SubWithFilter(func(msg string) bool {
+                return strings.Contains(msg, "important")
+            }),
+            tavern.SubWithRate(tavern.Rate{MaxPerSecond: 10}),
+        )
+        defer unsub()
+
+        for {
+            select {
+            case msg, ok := <-ch:
+                if !ok {
+                    return nil
+                }
+                sse := tavern.NewSSEMessage(msg.Topic, msg.Data).String()
+                if _, err := fmt.Fprint(c.Response(), sse); err != nil {
+                    return nil
+                }
+                c.Response().Flush()
+            case <-c.Request().Context().Done():
+                return nil
+            }
+        }
+    }
+}
+```
+
+<details>
+<summary>Advanced: manual fan-in with individual Subscribe calls</summary>
+
+> **Preferred:** Use `SubscribeMulti` for multi-topic streams. The manual
+> patterns below are shown for reference when you need custom per-topic
+> handling.
+
+#### Busy-loop fan-in (simplified)
+
+```go
+func multiTopicSSEManual(broker *tavern.SSEBroker) echo.HandlerFunc {
     return func(c echo.Context) error {
         c.Response().Header().Set("Content-Type", "text/event-stream")
         c.Response().Header().Set("Cache-Control", "no-cache")
@@ -183,7 +266,7 @@ func multiTopicSSE(broker *tavern.SSEBroker) echo.HandlerFunc {
 > simplified for clarity; a `reflect.Select`-based implementation avoids
 > spinning.
 
-### Go handler (reflect.Select version)
+#### reflect.Select version
 
 ```go
 import "reflect"
@@ -224,6 +307,8 @@ func multiTopicSSEReflect(broker *tavern.SSEBroker) echo.HandlerFunc {
     }
 }
 ```
+
+</details>
 
 ### Client JS
 
