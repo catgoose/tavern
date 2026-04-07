@@ -68,6 +68,36 @@ func isControlEvent(msg string) bool {
 	return strings.HasPrefix(msg, "event: tavern-")
 }
 
+// isSSEFormatted reports whether msg is already a formatted SSE frame. A
+// message is considered SSE-formatted if its first line starts with "event:"
+// or "data:" — the primary SSE field prefixes produced by [SSEMessage.String].
+// Messages that only start with "id:" or "retry:" are not considered
+// pre-formatted because those prefixes can appear in raw payloads with
+// injected IDs (e.g., from PublishWithID).
+func isSSEFormatted(msg string) bool {
+	return strings.HasPrefix(msg, "event:") ||
+		strings.HasPrefix(msg, "data:")
+}
+
+// extractSSEData extracts the data payload from an already-formatted SSE
+// message by collecting all "data:" lines and joining them with newlines.
+func extractSSEData(msg string) string {
+	var dataLines []string
+	for _, line := range strings.Split(msg, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "data:") {
+			dataLines = append(dataLines, strings.TrimPrefix(trimmed, "data:"))
+		}
+	}
+	// Trim the leading space that SSE format adds after "data:"
+	for i, line := range dataLines {
+		if len(line) > 0 && line[0] == ' ' {
+			dataLines[i] = line[1:]
+		}
+	}
+	return strings.Join(dataLines, "\n")
+}
+
 // extractSSEID extracts the id field value from an SSE message string and
 // returns the message with the id field removed. If no id field is present, the
 // original message is returned unchanged with an empty id.
@@ -89,11 +119,23 @@ func extractSSEID(msg string) (cleaned, id string) {
 }
 
 // wrapForGroup formats a raw subscriber message for grouped SSE output. Control
-// events are forwarded as-is. Payload messages are wrapped with the topic as the
-// SSE event type, preserving any id field injected by PublishWithID.
+// events are forwarded as-is. Pre-formatted SSE messages have their data
+// extracted and re-wrapped with the topic as the event type to avoid
+// double-wrapping. Raw strings are wrapped with [NewSSEMessage] as before.
 func wrapForGroup(topic, msg string) string {
 	if isControlEvent(msg) {
 		return msg
+	}
+	if isSSEFormatted(msg) {
+		// Already an SSE frame — extract the data payload and id, then
+		// re-wrap with the topic as the event type.
+		data := extractSSEData(msg)
+		_, id := extractSSEID(msg)
+		m := NewSSEMessage(topic, data)
+		if id != "" {
+			m = m.WithID(id)
+		}
+		return m.String()
 	}
 	cleaned, id := extractSSEID(msg)
 	m := NewSSEMessage(topic, cleaned)
