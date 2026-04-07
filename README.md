@@ -439,6 +439,22 @@ defer unsub()
 // First message is the snapshot, then live publishes follow
 ```
 
+### Connection lifetime (WithMaxConnectionDuration)
+
+Cap how long an SSE connection stays open. After the configured duration (plus
+0–10% random jitter to prevent thundering herd), the handler sends a `retry`
+directive and closes. The browser's EventSource reconnects automatically with
+`Last-Event-ID`, so resumption is seamless:
+
+```go
+mux.Handle("/sse/events", broker.SSEHandler("events",
+    tavern.WithMaxConnectionDuration(5*time.Minute),
+))
+```
+
+Works with `SSEHandler`, `GroupHandler`, and `DynamicGroupHandler`. Zero or
+negative duration disables the limit.
+
 ---
 
 ## Subscriber management
@@ -649,6 +665,38 @@ the topic is explicitly marked.
 ---
 
 ## Reconnection and resilience
+
+### Pluggable replay storage (ReplayStore)
+
+By default the broker keeps replay entries in memory. Plug in a `ReplayStore`
+to persist them across restarts or share them across instances:
+
+```go
+store := tavern.NewMemoryReplayStore() // built-in in-memory implementation
+broker := tavern.NewSSEBroker(tavern.WithReplayStore(store))
+broker.SetReplayPolicy("events", 50)
+broker.PublishWithID("events", "evt-1", msg)
+
+// On reconnect, replayed from the store
+ch, unsub := broker.SubscribeFromID("events", lastEventID)
+```
+
+Implement the `ReplayStore` interface for durable backends (Redis, Postgres,
+etc.):
+
+```go
+type ReplayStore interface {
+    Append(ctx context.Context, topic string, entry ReplayEntry) error
+    AfterID(ctx context.Context, topic, lastID string, limit int) ([]ReplayEntry, bool, error)
+    Latest(ctx context.Context, topic string, limit int) ([]ReplayEntry, error)
+    DeleteTopic(ctx context.Context, topic string) error
+    SetMaxEntries(ctx context.Context, topic string, n int) error
+}
+```
+
+IDs are topic-scoped. TTL filtering happens at read time — stores must not
+return expired entries. `AfterID` returns `found=false` when the requested ID
+has been evicted; the broker treats this as a gap.
 
 ### Replay gap detection (OnReplayGap / SetReplayGapPolicy)
 
@@ -981,8 +1029,17 @@ broker2 := tavern.NewSSEBroker(tavern.WithBackend(fork))
 | `WithMetrics()` | disabled | Per-topic publish/drop counters |
 | `WithObservability(cfg)` | disabled | Latency, lag, throughput, connection duration |
 | `WithConnectionEvents(topic)` | disabled | Publish subscribe/unsubscribe events |
+| `WithMessageTTLSweep(d)` | 1s | Interval for expired TTL entry cleanup |
+| `WithReplayStore(store)` | nil | Pluggable replay persistence backend |
 | `WithLogger(l)` | nil | Log panics and errors via slog |
 | `WithBackend(b)` | nil | Cross-process fan-out backend |
+
+Handler options (passed to `SSEHandler` / `GroupHandler` / `DynamicGroupHandler`):
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithSSEWriter(fn)` | default writer | Custom write function for SSE messages |
+| `WithMaxConnectionDuration(d)` | disabled | Graceful connection recycling with jitter |
 
 ### Connection admission control
 
