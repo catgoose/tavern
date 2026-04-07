@@ -727,6 +727,107 @@ func TestGroupHandler_NoNestedControlEventsInReplay(t *testing.T) {
 	assert.Contains(t, body, "id: 2\n")
 }
 
+func TestGroupHandler_PreformattedSSENoDoubleWrap(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.DefineGroup("g", []string{"doc/content"})
+	handler := b.GroupHandler("g")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/g", http.NoBody)
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Publish a pre-formatted SSE message (simulating what SSEHandler callers do)
+	preformatted := NewSSEMessage("content", "<div>hello</div>").String()
+	b.Publish("doc/content", preformatted)
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	// Should use topic as event type, not the original event name
+	assert.Contains(t, body, "event: doc/content\n")
+	assert.Contains(t, body, "data: <div>hello</div>\n")
+	// Must NOT double-wrap
+	assert.NotContains(t, body, "data: event:")
+	assert.NotContains(t, body, "data: data:")
+}
+
+func TestGroupHandler_PreformattedSSEWithIDPreserved(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.DefineGroup("g", []string{"topic1"})
+	handler := b.GroupHandler("g")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/g", http.NoBody)
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Publish a pre-formatted SSE message with an id field
+	preformatted := NewSSEMessage("update", "payload").WithID("evt-99").String()
+	b.Publish("topic1", preformatted)
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: topic1\n")
+	assert.Contains(t, body, "data: payload\n")
+	assert.Contains(t, body, "id: evt-99\n")
+	assert.NotContains(t, body, "data: event:")
+}
+
+func TestGroupHandler_RawStringStillWorks(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.DefineGroup("g", []string{"metrics"})
+	handler := b.GroupHandler("g")
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/g", http.NoBody)
+	ctx, cancel := contextWithCancel(req)
+	req = req.WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	b.Publish("metrics", "cpu=42")
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: metrics\n")
+	assert.Contains(t, body, "data: cpu=42\n")
+}
+
 // collectTopics drains n topic names from ch within the given timeout.
 func collectTopics(t *testing.T, ch <-chan string, n int, timeout time.Duration) []string {
 	t.Helper()

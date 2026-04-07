@@ -181,6 +181,82 @@ func TestWrapForGroup(t *testing.T) {
 	})
 }
 
+func TestIsSSEFormatted(t *testing.T) {
+	assert.True(t, isSSEFormatted("event: update\ndata: hello\n\n"))
+	assert.True(t, isSSEFormatted("data: hello\n\n"))
+	assert.True(t, isSSEFormatted("event: tavern-reconnected\ndata: \n\n"))
+	// id: and retry: alone are NOT considered pre-formatted SSE
+	assert.False(t, isSSEFormatted("id: 42\ndata: hello\n\n"))
+	assert.False(t, isSSEFormatted("retry: 3000\n\n"))
+	assert.False(t, isSSEFormatted("just raw text"))
+	assert.False(t, isSSEFormatted("cpu=42"))
+	assert.False(t, isSSEFormatted(""))
+}
+
+func TestExtractSSEData(t *testing.T) {
+	t.Run("single data line", func(t *testing.T) {
+		msg := "event: update\ndata: hello\n\n"
+		assert.Equal(t, "hello", extractSSEData(msg))
+	})
+
+	t.Run("multiple data lines", func(t *testing.T) {
+		msg := "event: update\ndata: line1\ndata: line2\n\n"
+		assert.Equal(t, "line1\nline2", extractSSEData(msg))
+	})
+
+	t.Run("no data lines", func(t *testing.T) {
+		msg := "event: ping\n\n"
+		assert.Equal(t, "", extractSSEData(msg))
+	})
+
+	t.Run("data with id and retry", func(t *testing.T) {
+		msg := "event: update\ndata: payload\nid: 42\nretry: 3000\n\n"
+		assert.Equal(t, "payload", extractSSEData(msg))
+	})
+}
+
+func TestWrapForGroup_PreformattedSSE(t *testing.T) {
+	t.Run("pre-formatted SSE message unwrapped and re-wrapped", func(t *testing.T) {
+		preformatted := NewSSEMessage("content", "<div>hello</div>").String()
+		got := wrapForGroup("doc/content", preformatted)
+		assert.Contains(t, got, "event: doc/content\n")
+		assert.Contains(t, got, "data: <div>hello</div>\n")
+		// Must NOT contain double-wrapped data
+		assert.NotContains(t, got, "data: event:")
+		assert.NotContains(t, got, "data: data:")
+	})
+
+	t.Run("pre-formatted SSE with id preserved", func(t *testing.T) {
+		preformatted := NewSSEMessage("content", "payload").WithID("evt-5").String()
+		got := wrapForGroup("doc/content", preformatted)
+		assert.Contains(t, got, "event: doc/content\n")
+		assert.Contains(t, got, "data: payload\n")
+		assert.Contains(t, got, "id: evt-5\n")
+		assert.NotContains(t, got, "data: event:")
+	})
+
+	t.Run("pre-formatted SSE with multiline data", func(t *testing.T) {
+		preformatted := NewSSEMessage("update", "line1\nline2").String()
+		got := wrapForGroup("topic", preformatted)
+		assert.Contains(t, got, "event: topic\n")
+		assert.Contains(t, got, "data: line1\n")
+		assert.Contains(t, got, "data: line2\n")
+		assert.NotContains(t, got, "data: event:")
+	})
+
+	t.Run("raw string still works", func(t *testing.T) {
+		got := wrapForGroup("metrics", "cpu=42")
+		assert.Contains(t, got, "event: metrics\n")
+		assert.Contains(t, got, "data: cpu=42\n")
+	})
+
+	t.Run("control event still passes through", func(t *testing.T) {
+		ctrl := "event: tavern-reconnected\ndata: \n\n"
+		got := wrapForGroup("metrics", ctrl)
+		assert.Equal(t, ctrl, got)
+	})
+}
+
 func TestInjectSSEID_RawString(t *testing.T) {
 	got := injectSSEID("hello", "42")
 	assert.Contains(t, got, "hello")

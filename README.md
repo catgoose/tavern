@@ -398,6 +398,34 @@ broker.DynamicGroup("user-dashboard", func(r *http.Request) []string {
 mux.Handle("/sse/user", broker.DynamicGroupHandler("user-dashboard"))
 ```
 
+### SSEHandler vs GroupHandler message format
+
+`SSEHandler` and `GroupHandler` expect different message formats:
+
+- **SSEHandler** writes messages verbatim — callers pre-format with `NewSSEMessage(event, data).String()`.
+- **GroupHandler** wraps messages automatically, using the topic name as the SSE event type.
+
+GroupHandler detects pre-formatted SSE messages (those starting with `event:` or
+`data:`) and extracts the data payload before re-wrapping with the topic. This
+prevents double-wrapping when migrating from SSEHandler to GroupHandler, or when
+the same publish call serves both handler types.
+
+```go
+// Both of these produce correct output through a GroupHandler:
+broker.Publish("alerts", "disk-full")                              // raw string
+broker.Publish("alerts", NewSSEMessage("alert", "disk-full").String()) // pre-formatted
+
+// GroupHandler output in both cases:
+//   event: alerts
+//   data: disk-full
+```
+
+Control events (`tavern-reconnected`, `tavern-replay-gap`, etc.) always pass
+through unchanged regardless of format.
+
+When using HTMX with GroupHandler, set `sse-swap` attributes to match **topic
+names** (the SSE event type), not the original event names from `NewSSEMessage`.
+
 ### Snapshot + delta (SubscribeWithSnapshot)
 
 Send a computed snapshot as the first message, then live updates. Eliminates
