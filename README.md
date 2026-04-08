@@ -36,6 +36,19 @@ For practical patterns and integration examples, see the
 Tavern has an explicit design note covering what belongs in core, what belongs
 outside it, and what Tavern should refuse to become. See [DESIGN.md](DESIGN.md).
 
+The design guides in `docs/` define the vocabulary and patterns for building
+on top of Tavern:
+
+- [Topic Semantics](docs/topic-semantics.md) -- resource, collection, presence,
+  admin, and notification topic shapes. When to use path scoping vs broker
+  scoping. Which subscription type fits which page.
+- [Snapshot and Replay Patterns](docs/snapshot-replay.md) -- per-topic-category
+  replay strategies, gap handling, reconnection UX. Why `PublishWithID` is
+  required for `Last-Event-ID` recovery.
+- [Page-Level Multiplexing](docs/page-multiplexing.md) -- single-connection
+  multi-topic pages. StaticGroup vs DynamicGroup vs SubscribeMulti. OOB
+  fragment composition for multi-region updates.
+
 ---
 
 ## Where Tavern Shines
@@ -76,6 +89,13 @@ instance B get it.
 
 ```bash
 go get github.com/catgoose/tavern
+```
+
+Optional adapters (separate modules to avoid dependency pollution):
+
+```bash
+go get github.com/catgoose/tavern/tavernprom   # Prometheus export
+go get github.com/catgoose/tavern/tavernotel   # OpenTelemetry export
 ```
 
 ## Client-Side Helpers
@@ -1025,6 +1045,36 @@ snap := obs.Snapshot(broker) // all topics at once
 
 Zero overhead when not configured.
 
+### Observability export
+
+Ship Tavern's delivery metrics to Prometheus or OpenTelemetry without polluting
+core with heavy dependencies. The server knows what it sent; now your dashboards
+know too.
+
+```go
+import "github.com/catgoose/tavern/tavernprom"
+
+// Register with an existing Prometheus registerer.
+unreg, err := tavernprom.Register(broker, prometheus.DefaultRegisterer)
+defer unreg()
+
+// Or get a standalone /metrics handler.
+http.Handle("/metrics", tavernprom.Handler(broker))
+```
+
+```go
+import "github.com/catgoose/tavern/tavernotel"
+
+// Register with an OpenTelemetry MeterProvider.
+stop, err := tavernotel.Register(broker, otel.GetMeterProvider())
+defer stop()
+```
+
+Both adapters are poll-based (Prometheus scrapes, OTel collection callbacks),
+export the same logical metrics (published, dropped, latency, throughput,
+evictions, connection durations), and support topic cardinality limiting to
+prevent label explosion. See `tavernprom/` and `tavernotel/` for full API docs.
+
 ---
 
 ## Testing
@@ -1098,6 +1148,29 @@ tracker.Update("doc-123", userID, map[string]any{"cursor": pos})
 tracker.Leave("doc-123", userID)
 
 users := tracker.List("doc-123")
+```
+
+### tavernprom/ -- Prometheus export
+
+Exports Tavern metrics as Prometheus metrics via the `prometheus.Collector`
+interface. Metrics are computed on scrape -- no background goroutines. Supports
+namespace prefixing and topic cardinality limiting.
+
+```go
+import "github.com/catgoose/tavern/tavernprom"
+
+unreg, err := tavernprom.Register(broker, prometheus.DefaultRegisterer)
+```
+
+### tavernotel/ -- OpenTelemetry export
+
+Exports Tavern metrics as OTel observable instruments. Callbacks fire during
+SDK collection cycles. Same logical metrics as the Prometheus adapter.
+
+```go
+import "github.com/catgoose/tavern/tavernotel"
+
+stop, err := tavernotel.Register(broker, otel.GetMeterProvider())
 ```
 
 ### backend/ -- Distributed fan-out interface
@@ -1218,8 +1291,8 @@ block each other.
 
 Tavern follows the [dothog design philosophy](https://github.com/catgoose/dothog/blob/main/PHILOSOPHY.md)
 and the [Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md):
-the server drives state, the broker is just plumbing, and `sync.RWMutex` is
-the only dependency you need for thread safety.
+the server owns the representation, Tavern delivers it honestly, and
+`sync.RWMutex` is the only dependency you need for thread safety.
 
 > wife of Grug say from cave: "easy, easy, easy. like touching feet to ground
 > when get out of bed. server return html. browser render html. what is
@@ -1227,7 +1300,8 @@ the only dependency you need for thread safety.
 >
 > -- The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
 
-Server publish event. Browser receive event. What is difficult?
+Server publish event. Browser receive event. Tavern carry the voice. What is
+difficult?
 
 > SSE is the server telling the client what happened next, in real time. The
 > event stream is just another representation -- the server speaks, the client
