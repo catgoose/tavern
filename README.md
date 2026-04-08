@@ -5,7 +5,7 @@
 
 ![tavern](https://raw.githubusercontent.com/catgoose/screenshots/main/tavern/tavern.png)
 
-Thread-safe, topic-based pub/sub broker for Server-Sent Events (SSE) in Go.
+Live hypermedia delivery layer for Server-Sent Events (SSE) in Go.
 
 > A master of the React School visit Grug at cave.
 >
@@ -23,19 +23,25 @@ Thread-safe, topic-based pub/sub broker for Server-Sent Events (SSE) in Go.
 >
 > -- The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
 
-Tavern provides a minimal, concurrent-safe message broker that fans out string
-messages to subscribers by topic. It sits behind any HTTP handler and pushes
-real-time events to browser clients over SSE. No JavaScript framework required.
+Tavern delivers server-owned representations to browser clients over SSE. The
+server decides what changed; Tavern pushes it honestly -- with replay,
+reconnection recovery, and delivery shaping built in. No JavaScript framework
+required.
 
 For practical patterns and integration examples, see the
 [Recipe Cookbook](RECIPES.md).
+
+## Design boundaries
+
+Tavern has an explicit design note covering what belongs in core, what belongs
+outside it, and what Tavern should refuse to become. See [DESIGN.md](DESIGN.md).
 
 ---
 
 ## Where Tavern Shines
 
-Tavern is general-purpose pub/sub plumbing, but some patterns fall out of it so
-naturally that they deserve a callout.
+Tavern is a delivery layer for server-owned live representations, but some
+patterns fall out of it so naturally that they deserve a callout.
 
 **SaaS Notifications** -- Scoped subscriptions + filters + TTL + replay + OOB
 fragments = complete real-time notification system. Per-user streams, org-wide
