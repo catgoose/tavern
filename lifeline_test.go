@@ -239,7 +239,7 @@ func TestLifeline_NoDuplicateOwnership(t *testing.T) {
 	assertNoTopicMsg(t, ch, 50*time.Millisecond)
 }
 
-func TestLifeline_ReplayOnScopedReconnect(t *testing.T) {
+func TestLifeline_ReplayOnPanelStreamReconnect(t *testing.T) {
 	b := NewSSEBroker()
 	defer b.Close()
 

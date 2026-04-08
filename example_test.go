@@ -599,11 +599,11 @@ func ExampleSSEBroker_lifelineReplay() {
 	lifeline, lifelineUnsub := broker.SubscribeMultiWithMeta(tavern.SubscribeMeta{ID: "app"}, "control")
 	defer lifelineUnsub()
 
-	// Publish panel events with IDs while scoped stream is down.
+	// Publish panel events with IDs while panel stream is down.
 	broker.PublishWithID("panel", "e1", "update-1")
 	broker.PublishWithID("panel", "e2", "update-2")
 
-	// Scoped stream reconnects with last known ID -- replay fills the gap.
+	// Panel stream reconnects with last known ID -- replay fills the gap.
 	panelCh, panelUnsub := broker.SubscribeFromID("panel", "e1")
 	defer panelUnsub()
 
