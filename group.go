@@ -147,7 +147,7 @@ func (h *dynamicGroupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 // message as an SSE event with the topic as the event type. When the request
 // includes a Last-Event-ID header, cached messages after that ID are replayed
 // for each topic before the live stream begins.
-func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, topics []string, writer SSEWriterFunc, maxConnDuration time.Duration, reconnectDelay time.Duration) {
+func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, topics []string, writer SSEWriterFunc, maxConnDuration, reconnectDelay time.Duration) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
