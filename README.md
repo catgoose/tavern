@@ -831,6 +831,74 @@ if errors.Is(err, tavern.ErrPublishTimeout) {
 Also available: `PublishBlockingTo` for scoped subscribers. A zero timeout
 falls back to non-blocking behavior.
 
+### App-shell lifeline architecture
+
+For apps that go beyond page-local SSE, Tavern supports a **lifeline + scoped
+streams** pattern: one warm connection stays open for the life of the app shell,
+while optional high-bandwidth streams spin up and down as the user navigates.
+
+**Lifeline (control plane)** -- always connected, low volume:
+- notifications, presence, nav-state changes
+- invalidation signals ("data changed, refetch when ready")
+- small counters, theme broadcasts
+
+**Scoped streams (data plane)** -- active only for hot views:
+- charts, feeds, detail panels via `SubscribeScoped` / `PublishTo`
+- high-frequency section-specific updates with per-user isolation
+
+#### Handoff with AddTopic / RemoveTopic
+
+Use a single SSE connection with dynamic topic membership. Requires a
+`SubscribeMultiWithMeta` subscriber so `AddTopic` / `RemoveTopic` can target it
+by ID:
+
+```go
+// Lifeline starts with control-plane topics.
+ch, unsub := broker.SubscribeMultiWithMeta(
+    tavern.SubscribeMeta{ID: sessionID},
+    "notifications", "nav-state",
+)
+
+// User opens dashboard -- add its data topic.
+broker.AddTopic(sessionID, "dashboard-data", true)
+// Client receives tavern-topics-changed control event.
+
+// User leaves dashboard -- remove the topic.
+broker.RemoveTopic(sessionID, "dashboard-data", true)
+```
+
+#### Separate scoped connection
+
+When a view needs independent backpressure, per-user scoping, or its own
+buffer/eviction policy, use a separate SSE connection with `SubscribeScoped`.
+This works well under HTTP/2 and HTTP/3 where additional streams are cheap:
+
+```go
+// Main lifeline handler
+mux.Handle("/sse/app", broker.SSEHandler("control"))
+
+// Scoped panel stream -- per-user isolation with independent buffer
+// Use SubscribeScoped in a custom handler, or separate SSEHandler per panel:
+mux.Handle("/sse/panel", broker.SSEHandler("panel-data",
+    tavern.WithMaxConnectionDuration(10*time.Minute),
+))
+```
+
+#### Replay as fallback, not navigation
+
+Replay and `Last-Event-ID` resumption exist for **network interruptions**, not
+for navigating between views. Normal navigation should add/remove topics or
+create/tear down scoped streams. Replay kicks in automatically if a connection
+drops and the browser reconnects.
+
+#### Anti-patterns
+
+| Pattern | Problem |
+|---------|---------|
+| **Firehose** -- one connection subscribed to every topic | Buffer overflows, drops, backpressure issues |
+| **Reconnect-as-navigation** -- tear down SSE on every route change | Unnecessary latency, missed events during reconnect window |
+| **Duplicate DOM ownership** -- two streams updating the same element | Race conditions, flicker, unpredictable state |
+
 ---
 
 ## Error handling

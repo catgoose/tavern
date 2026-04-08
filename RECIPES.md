@@ -1643,3 +1643,188 @@ For cases where you want programmatic control instead of a banner:
 
 Setting `data-tavern-gap-action` to a custom name dispatches that as a DOM
 event, giving you full control over recovery.
+
+---
+
+## Recipe 27: App-shell lifeline with scoped panel streams
+
+One persistent SSE connection for app-level events, with scoped panel streams
+that spin up only for high-bandwidth views. Two alternative architectures are
+shown below -- choose one, not both.
+
+### Shared setup
+
+```go
+broker := tavern.NewSSEBroker(
+    tavern.WithBufferSize(32),
+    tavern.WithKeepalive(15*time.Second),
+)
+
+// Replay for scoped panel topics so reconnect can fill gaps.
+broker.SetReplayPolicy("dashboard-data", 50)
+broker.SetReplayPolicy("analytics-data", 50)
+```
+
+### Approach A: Single connection with AddTopic / RemoveTopic
+
+One SSE connection carries everything. The server mutates topic membership
+when the user navigates. Requires `SubscribeMultiWithMeta` for a subscriber
+ID that `AddTopic` / `RemoveTopic` can target.
+
+#### Lifeline handler
+
+```go
+// Custom handler that creates a SubscribeMultiWithMeta subscriber.
+func lifelineHandler(broker *tavern.SSEBroker) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        sessionID := r.Header.Get("X-Session-ID")
+
+        ch, unsub := broker.SubscribeMultiWithMeta(
+            tavern.SubscribeMeta{ID: sessionID},
+            "notifications", "nav-state",
+        )
+        defer unsub()
+
+        w.Header().Set("Content-Type", "text/event-stream")
+        w.Header().Set("Cache-Control", "no-cache")
+        w.Header().Set("Connection", "keep-alive")
+        flusher, _ := w.(http.Flusher)
+
+        for {
+            select {
+            case msg, ok := <-ch:
+                if !ok {
+                    return
+                }
+                fmt.Fprintf(w, "event: %s\ndata: %s\n\n", msg.Topic, msg.Data)
+                flusher.Flush()
+            case <-r.Context().Done():
+                return
+            }
+        }
+    }
+}
+
+mux.Handle("/sse/app", lifelineHandler(broker))
+```
+
+#### Navigation handler (topic handoff)
+
+```go
+// POST /navigate -- add or remove panel topics on the lifeline.
+func navigateHandler(broker *tavern.SSEBroker) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        sessionID := r.Header.Get("X-Session-ID")
+        panel := r.FormValue("panel")
+        action := r.FormValue("action") // "open" or "close"
+
+        topic := panel + "-data"
+        switch action {
+        case "open":
+            broker.AddTopic(sessionID, topic, true)
+        case "close":
+            broker.RemoveTopic(sessionID, topic, true)
+        }
+        w.WriteHeader(http.StatusNoContent)
+    }
+}
+```
+
+#### HTML (single connection)
+
+```html
+<!-- One persistent SSE connection -- topics change dynamically -->
+<div hx-ext="sse" sse-connect="/sse/app">
+  <nav id="nav-state" sse-swap="nav-state"></nav>
+  <div id="notifications" sse-swap="notifications"></div>
+  <!-- Panel swap targets added when tavern-topics-changed arrives -->
+  <div id="panel-content" sse-swap="dashboard-data"></div>
+</div>
+```
+
+### Approach B: Separate scoped connections
+
+The lifeline uses a standard handler for control-plane topics. Each panel opens
+its own SSE connection. Use this when panels need independent backpressure,
+buffer sizing, or eviction policies. Works well under HTTP/2 and HTTP/3 where
+additional streams are cheap.
+
+#### Handlers
+
+```go
+// Lifeline endpoint -- persistent app-shell connection.
+broker.DynamicGroup("app-shell", func(r *http.Request) []string {
+    return []string{"notifications", "nav-state"}
+})
+mux.Handle("/sse/app", broker.DynamicGroupHandler("app-shell"))
+
+// High-frequency scoped panel streams with their own handlers.
+mux.Handle("/sse/panel/dashboard", broker.SSEHandler("dashboard-data",
+    tavern.WithMaxConnectionDuration(10*time.Minute),
+))
+mux.Handle("/sse/panel/analytics", broker.SSEHandler("analytics-data"))
+```
+
+#### HTML (multiple connections)
+
+```html
+<!-- Persistent lifeline connection -- never torn down during navigation -->
+<div hx-ext="sse" sse-connect="/sse/app">
+  <nav id="nav-state" sse-swap="nav-state"></nav>
+  <div id="notifications" sse-swap="notifications"></div>
+</div>
+
+<!-- Panel content loaded on navigation -->
+<main id="panel-content">
+  <!-- Loaded via hx-get when user navigates -->
+</main>
+
+<!-- Example: dashboard panel (loaded into #panel-content) -->
+<template id="dashboard-panel">
+  <div hx-ext="sse" sse-connect="/sse/panel/dashboard">
+    <div id="chart" sse-swap="dashboard-data"></div>
+  </div>
+</template>
+```
+
+### Publishers (both approaches)
+
+```go
+// Control-plane: low-frequency app-shell events.
+broker.Publish("notifications", renderNotification(n))
+broker.Publish("nav-state", renderBreadcrumb(path))
+
+// Data-plane: high-frequency panel updates with IDs for replay.
+// Use PublishTo for user-scoped panels, PublishWithID for replayable streams.
+broker.PublishWithID("dashboard-data", eventID, renderChart(data))
+broker.PublishTo("analytics-data", userScope, renderMetrics(data))
+```
+
+### What happens
+
+1. **Page loads** -- browser opens `/sse/app`. Lifeline delivers notifications
+   and nav-state updates.
+2. **User clicks "Dashboard"**:
+   - *Approach A*: POST to `/navigate` calls `AddTopic` on the lifeline. Client
+     receives `tavern-topics-changed` and sets up swap targets.
+   - *Approach B*: App loads the dashboard panel via `hx-get`. The panel's
+     `sse-connect="/sse/panel/dashboard"` opens a second SSE stream.
+3. **Dashboard streams data** -- chart updates flow to the subscriber.
+4. **User clicks "Settings"**:
+   - *Approach A*: POST to `/navigate` calls `RemoveTopic` for dashboard,
+     `AddTopic` for settings.
+   - *Approach B*: Dashboard panel removed from DOM, its SSE connection closes.
+     Settings panel opens its own stream.
+5. **Network drops** -- browser's `EventSource` reconnects automatically with
+   `Last-Event-ID`. Lifeline replays control events. Panel stream replays
+   missed data updates.
+6. **Lifeline stays warm** -- even while panel streams churn, the app shell
+   never loses awareness of notifications or nav state.
+
+> **Tip:** Use `SetBundleOnReconnect` on high-volume panel topics to reduce DOM
+> churn when replaying many missed messages after a reconnect.
+
+> **Tip:** The lifeline connection should subscribe only to low-volume topics.
+> If a panel topic produces hundreds of messages per second, use Approach B
+> with separate connections -- this gives independent buffer and backpressure
+> behavior.
