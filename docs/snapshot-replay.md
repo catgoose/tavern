@@ -15,14 +15,20 @@ across every topic shape.
 ## ID-backed publishes are required for replay
 
 Replay and gap detection require ID-backed publish calls. The topic must
-receive messages via `PublishWithID` (or ID-bearing variants like
-`PublishWithTTL`) so that a replay log with event IDs exists. Without
-ID-backed publishes, subscribers never receive event IDs and
-`Last-Event-ID` reconnection is not meaningful.
+receive messages via `PublishWithID` so that a replay log with event IDs
+exists. Without ID-backed publishes, subscribers never receive event IDs
+and `Last-Event-ID` reconnection is not meaningful.
 
 `SetReplayPolicy` configures the replay buffer size. `PublishWithID`
-populates it. Both are needed. Calling `SetReplayGapPolicy` on a topic
-that only uses plain `Publish` has no effect at runtime.
+populates it with ID-bearing entries. Both are needed. Calling
+`SetReplayGapPolicy` on a topic that only uses plain `Publish` has no
+effect at runtime.
+
+Note: `PublishWithTTL` stores entries in the replay cache with expiry but
+does not assign event IDs. It supports buffer-position replay for new
+subscribers (they see unexpired cached messages), but not `Last-Event-ID`
+reconnection. If you need both TTL expiry and ID-based resumption, use
+`PublishWithID` and manage expiry in your snapshot function.
 
 ---
 
