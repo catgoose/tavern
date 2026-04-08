@@ -79,10 +79,74 @@ func TestMaxConnectionDuration_Jitter(t *testing.T) {
 }
 
 func TestMaxConnectionDuration_RetryDirective(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		b := NewSSEBroker()
+		defer b.Close()
+
+		handler := b.SSEHandler("events", WithMaxConnectionDuration(50*time.Millisecond))
+
+		rec := newFlushRecorder()
+		req := httptest.NewRequest("GET", "/sse", http.NoBody)
+
+		done := make(chan struct{})
+		go func() {
+			handler.ServeHTTP(rec, req)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler did not return")
+		}
+
+		body := rec.Body.String()
+		assert.Contains(t, body, "retry: 1000\n\n", "should contain default retry directive")
+		assert.Contains(t, body, ": max connection duration reached\n\n", "should contain close comment")
+
+		retryIdx := strings.Index(body, "retry: 1000")
+		commentIdx := strings.Index(body, ": max connection duration reached")
+		assert.Less(t, retryIdx, commentIdx, "retry directive should precede close comment")
+	})
+
+	t.Run("custom", func(t *testing.T) {
+		b := NewSSEBroker()
+		defer b.Close()
+
+		handler := b.SSEHandler("events",
+			WithMaxConnectionDuration(50*time.Millisecond),
+			WithReconnectDelay(5000*time.Millisecond),
+		)
+
+		rec := newFlushRecorder()
+		req := httptest.NewRequest("GET", "/sse", http.NoBody)
+
+		done := make(chan struct{})
+		go func() {
+			handler.ServeHTTP(rec, req)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler did not return")
+		}
+
+		body := rec.Body.String()
+		assert.Contains(t, body, "retry: 5000\n\n", "should contain custom retry directive")
+		assert.NotContains(t, body, "retry: 1000", "should not contain default retry")
+	})
+}
+
+func TestMaxConnectionDuration_CustomReconnectDelay(t *testing.T) {
 	b := NewSSEBroker()
 	defer b.Close()
 
-	handler := b.SSEHandler("events", WithMaxConnectionDuration(50*time.Millisecond))
+	handler := b.SSEHandler("events",
+		WithMaxConnectionDuration(50*time.Millisecond),
+		WithReconnectDelay(5000*time.Millisecond),
+	)
 
 	rec := newFlushRecorder()
 	req := httptest.NewRequest("GET", "/sse", http.NoBody)
@@ -100,13 +164,8 @@ func TestMaxConnectionDuration_RetryDirective(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	assert.Contains(t, body, "retry: 1000\n\n", "should contain retry directive")
-	assert.Contains(t, body, ": max connection duration reached\n\n", "should contain close comment")
-
-	// Retry should come before the comment.
-	retryIdx := strings.Index(body, "retry: 1000")
-	commentIdx := strings.Index(body, ": max connection duration reached")
-	assert.Less(t, retryIdx, commentIdx, "retry directive should precede close comment")
+	assert.Contains(t, body, "retry: 5000\n\n", "should contain retry: 5000")
+	assert.Contains(t, body, ": max connection duration reached\n\n")
 }
 
 func TestMaxConnectionDuration_LastEventIDReplay(t *testing.T) {
@@ -231,6 +290,70 @@ func TestMaxConnectionDuration_DynamicGroupHandler(t *testing.T) {
 
 	body := rec.Body.String()
 	assert.Contains(t, body, "retry: 1000")
+	assert.Contains(t, body, ": max connection duration reached")
+}
+
+func TestMaxConnectionDuration_GroupHandler_CustomReconnectDelay(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.DefineGroup("dash", []string{"metrics", "alerts"})
+	handler := b.GroupHandler("dash",
+		WithMaxConnectionDuration(100*time.Millisecond),
+		WithReconnectDelay(3000*time.Millisecond),
+	)
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/dash", http.NoBody)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after max connection duration")
+	}
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "retry: 3000")
+	assert.NotContains(t, body, "retry: 1000")
+	assert.Contains(t, body, ": max connection duration reached")
+}
+
+func TestMaxConnectionDuration_DynamicGroupHandler_CustomReconnectDelay(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.DynamicGroup("dyn", func(_ *http.Request) []string {
+		return []string{"a", "b"}
+	})
+	handler := b.DynamicGroupHandler("dyn",
+		WithMaxConnectionDuration(100*time.Millisecond),
+		WithReconnectDelay(2500*time.Millisecond),
+	)
+
+	rec := newFlushRecorder()
+	req := httptest.NewRequest("GET", "/sse/dyn", http.NoBody)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after max connection duration")
+	}
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "retry: 2500")
+	assert.NotContains(t, body, "retry: 1000")
 	assert.Contains(t, body, ": max connection duration reached")
 }
 

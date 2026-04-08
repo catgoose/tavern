@@ -24,6 +24,7 @@ type groupHandler struct {
 	topics          []string
 	writer          SSEWriterFunc
 	maxConnDuration time.Duration
+	reconnectDelay  time.Duration
 }
 
 // dynamicGroupHandler serves a multiplexed SSE stream for topics resolved per-request.
@@ -32,6 +33,7 @@ type dynamicGroupHandler struct {
 	fn              func(r *http.Request) []string
 	writer          SSEWriterFunc
 	maxConnDuration time.Duration
+	reconnectDelay  time.Duration
 }
 
 // DefineGroup registers a named static topic group. The group can later be
@@ -73,6 +75,9 @@ func (b *SSEBroker) GroupHandler(name string, opts ...SSEHandlerOption) http.Han
 		}
 		if adapter.maxConnDuration > 0 {
 			h.maxConnDuration = adapter.maxConnDuration
+		}
+		if adapter.reconnectDelay > 0 {
+			h.reconnectDelay = adapter.reconnectDelay
 		}
 	}
 	return h
@@ -118,20 +123,23 @@ func (b *SSEBroker) DynamicGroupHandler(name string, opts ...SSEHandlerOption) h
 		if adapter.maxConnDuration > 0 {
 			h.maxConnDuration = adapter.maxConnDuration
 		}
+		if adapter.reconnectDelay > 0 {
+			h.reconnectDelay = adapter.reconnectDelay
+		}
 	}
 	return h
 }
 
 // ServeHTTP handles an incoming SSE connection for the static topic group.
 func (h *groupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	serveGroupSSE(w, r, h.broker, h.topics, h.writer, h.maxConnDuration)
+	serveGroupSSE(w, r, h.broker, h.topics, h.writer, h.maxConnDuration, h.reconnectDelay)
 }
 
 // ServeHTTP handles an incoming SSE connection for the dynamic topic group,
 // resolving topics from the per-request function.
 func (h *dynamicGroupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	topics := h.fn(r)
-	serveGroupSSE(w, r, h.broker, topics, h.writer, h.maxConnDuration)
+	serveGroupSSE(w, r, h.broker, topics, h.writer, h.maxConnDuration, h.reconnectDelay)
 }
 
 // serveGroupSSE is the shared streaming loop for static and dynamic group
@@ -139,7 +147,7 @@ func (h *dynamicGroupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 // message as an SSE event with the topic as the event type. When the request
 // includes a Last-Event-ID header, cached messages after that ID are replayed
 // for each topic before the live stream begins.
-func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, topics []string, writer SSEWriterFunc, maxConnDuration time.Duration) {
+func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, topics []string, writer SSEWriterFunc, maxConnDuration, reconnectDelay time.Duration) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -180,7 +188,7 @@ func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, to
 		case <-r.Context().Done():
 			return // client disconnected
 		case <-maxDurC:
-			writeMaxDurationClose(w)
+			writeMaxDurationClose(w, reconnectDelay)
 			return
 		}
 	}

@@ -39,11 +39,22 @@ func WithMaxConnectionDuration(d time.Duration) SSEHandlerOption {
 	}
 }
 
+// WithReconnectDelay sets the SSE retry: value (in milliseconds) sent when a
+// connection is closed due to [WithMaxConnectionDuration]. The browser's
+// EventSource uses this value to determine how long to wait before
+// reconnecting. A zero or negative value defaults to 1000ms.
+func WithReconnectDelay(delay time.Duration) SSEHandlerOption {
+	return func(h *sseHandler) {
+		h.reconnectDelay = delay
+	}
+}
+
 type sseHandler struct {
 	broker          *SSEBroker
 	topic           string
 	writer          SSEWriterFunc
 	maxConnDuration time.Duration
+	reconnectDelay  time.Duration
 }
 
 // SSEHandler returns an [http.Handler] that streams SSE messages for the
@@ -125,16 +136,21 @@ func (h *sseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return // client disconnected
 		case <-maxDurC:
-			writeMaxDurationClose(w)
+			writeMaxDurationClose(w, h.reconnectDelay)
 			return
 		}
 	}
 }
 
 // writeMaxDurationClose writes the retry hint and comment before closing a
-// connection that has reached its maximum duration.
-func writeMaxDurationClose(w http.ResponseWriter) {
-	fmt.Fprint(w, "retry: 1000\n\n")
+// connection that has reached its maximum duration. When delay is zero or
+// negative, the default of 1000ms is used.
+func writeMaxDurationClose(w http.ResponseWriter, delay time.Duration) {
+	ms := delay.Milliseconds()
+	if ms <= 0 {
+		ms = 1000
+	}
+	fmt.Fprintf(w, "retry: %d\n\n", ms)
 	fmt.Fprint(w, ": max connection duration reached\n\n")
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
