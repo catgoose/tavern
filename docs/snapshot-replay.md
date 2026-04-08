@@ -12,6 +12,20 @@ across every topic shape.
 
 ---
 
+## ID-backed publishes are required for replay
+
+Replay and gap detection require ID-backed publish calls. The topic must
+receive messages via `PublishWithID` (or ID-bearing variants like
+`PublishWithTTL`) so that a replay log with event IDs exists. Without
+ID-backed publishes, subscribers never receive event IDs and
+`Last-Event-ID` reconnection is not meaningful.
+
+`SetReplayPolicy` configures the replay buffer size. `PublishWithID`
+populates it. Both are needed. Calling `SetReplayGapPolicy` on a topic
+that only uses plain `Publish` has no effect at runtime.
+
+---
+
 ## Replay vs snapshot -- when to use which
 
 ### Resource topics (`resource/<type>/<id>`)
@@ -32,11 +46,15 @@ broker.SetReplayGapPolicy("resource/tasks/42", tavern.GapFallbackToSnapshot, fun
 ch, unsub := broker.SubscribeWithSnapshot("resource/tasks/42", func() string {
     return renderTask(42)
 })
+
+// Publish with IDs so replay and gap detection work.
+broker.PublishWithID("resource/tasks/42", "evt-101", renderTask(42))
 ```
 
 A small replay buffer (5-10 entries) covers brief disconnects. Everything
 else gets a snapshot. The current state of a resource is always a complete
-answer.
+answer. Plain `Publish` calls do not populate the replay log -- always use
+`PublishWithID` for topics that need reconnection recovery.
 
 ### Collection topics (`collection/<type>`)
 
@@ -53,6 +71,9 @@ broker.SetReplayGapPolicy("collection/tasks", tavern.GapFallbackToSnapshot, func
 ch, unsub := broker.SubscribeWithSnapshot("collection/tasks", func() string {
     return renderTaskList()
 })
+
+// Every delta must carry an ID for replay to work.
+broker.PublishWithID("collection/tasks", "delta-47", renderTaskAdded(task))
 ```
 
 A larger replay buffer (50+) makes sense here -- collection deltas are
@@ -86,6 +107,9 @@ broker.SetReplayPolicy("admin/health", 100)
 broker.SetReplayGapPolicy("admin/health", tavern.GapFallbackToSnapshot, func() string {
     return renderSystemHealth()
 })
+
+// Low-volume topics still need ID-backed publishes for replay.
+broker.PublishWithID("admin/health", "health-308", renderSystemHealth())
 ```
 
 A generous replay buffer is cheap for low-volume topics and covers long
@@ -93,17 +117,21 @@ disconnects for ops dashboards left open in a background tab.
 
 ### Notification topics (`notify/<scope>/<id>`)
 
-Replay from `Last-Event-ID` with TTL. Notifications have a shelf life --
-a "deployment started" from two hours ago is not actionable. Use
-`PublishWithTTL` so stale notifications auto-expire from the replay cache.
+Notifications have a shelf life -- a "deployment started" from two hours
+ago is not actionable. Use `PublishWithTTL` to auto-expire stale
+notifications from the replay cache. Note that `PublishWithTTL` populates
+the replay cache but does not assign event IDs -- it supports
+buffer-position replay for new subscribers, not `Last-Event-ID`
+resumption.
 
 ```go
 broker.SetReplayPolicy("notify/user/alice", 50)
 broker.PublishWithTTL("notify/user/alice", renderNotification(n), 30*time.Minute)
 ```
 
-On gap, the replay cache already discards expired entries, so
-`SubscribeFromID` returns only what is still relevant.
+If you also need `Last-Event-ID` reconnection recovery for notifications,
+use `PublishWithID` and manage expiry at the application level (e.g.,
+filter expired notifications in the snapshot function).
 
 ---
 
@@ -111,7 +139,9 @@ On gap, the replay cache already discards expired entries, so
 
 A gap occurs when the client sends `Last-Event-ID` but the server's replay
 cache does not have it. The ID rolled out of the ring buffer, the server
-restarted, or a `ReplayStore` was not configured. This is normal.
+restarted, or a `ReplayStore` was not configured. This is normal. Gap
+detection only works for topics that use `PublishWithID` -- without event
+IDs, there is no `Last-Event-ID` to match against.
 
 Use `OnReplayGap` to observe gaps (the callback fires in its own goroutine)
 and `SetReplayGapPolicy` to define fallback behavior:
@@ -130,7 +160,7 @@ and `SetReplayGapPolicy` to define fallback behavior:
 | Collection | Full collection snapshot | Partial deltas with unknown gaps corrupt the view |
 | Presence | Current presence state | Stale join/leave events are misleading |
 | Admin | Current status snapshot | Ops dashboards need current truth |
-| Notification | Unexpired notifications only | TTL discards what is no longer actionable |
+| Notification | Unexpired notifications via snapshot | TTL handles cache expiry; snapshot filters what remains |
 
 When in doubt, snapshot. A fresh snapshot is always honest. A partial
 replay that skips unknown gaps is not.
@@ -153,8 +183,11 @@ subscriber reconnects with a `Last-Event-ID`. Log reconnection events,
 update metrics, or send a welcome-back control event.
 
 ```go
-broker.OnReconnect("collection/tasks", func() {
-    log.Info("subscriber reconnected to collection/tasks")
+broker.OnReconnect("collection/tasks", func(info tavern.ReconnectInfo) {
+    log.Info("subscriber reconnected",
+        "topic", info.Topic,
+        "lastEventID", info.LastEventID,
+        "missed", info.MissedCount)
 })
 ```
 
