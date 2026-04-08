@@ -122,12 +122,31 @@ func Register(broker *tavern.SSEBroker, mp metric.MeterProvider, opts ...Option)
 			topicCounts := e.broker.TopicCounts()
 			allowed := e.limitTopics(metrics.TopicStats, topicCounts)
 
+			// Aggregate overflow topics into a single "other" bucket.
+			type bucket struct {
+				published      int64
+				dropped        int64
+				peakSubscribers int64
+			}
+			agg := make(map[string]*bucket)
 			for topic, tm := range metrics.TopicStats {
 				label := e.resolveLabel(topic, allowed)
+				b, ok := agg[label]
+				if !ok {
+					b = &bucket{}
+					agg[label] = b
+				}
+				b.published += tm.Published
+				b.dropped += tm.Dropped
+				if int64(tm.PeakSubscribers) > b.peakSubscribers {
+					b.peakSubscribers = int64(tm.PeakSubscribers)
+				}
+			}
+			for label, b := range agg {
 				attrs := metric.WithAttributes(attribute.String("topic", label))
-				o.ObserveInt64(publishedTotal, tm.Published, attrs)
-				o.ObserveInt64(droppedTotal, tm.Dropped, attrs)
-				o.ObserveInt64(subscribersPeak, int64(tm.PeakSubscribers), attrs)
+				o.ObserveInt64(publishedTotal, b.published, attrs)
+				o.ObserveInt64(droppedTotal, b.dropped, attrs)
+				o.ObserveInt64(subscribersPeak, b.peakSubscribers, attrs)
 			}
 			return nil
 		},
@@ -176,21 +195,50 @@ func Register(broker *tavern.SSEBroker, mp metric.MeterProvider, opts ...Option)
 			topicCounts := e.broker.TopicCounts()
 			allowed := e.limitObsTopics(snap.Topics, topicCounts)
 
+			// Aggregate overflow topics into a single "other" bucket.
+			type obsBucket struct {
+				throughput float64
+				evictions  int64
+				latencyP50 float64
+				latencyP95 float64
+				latencyP99 float64
+				hasLatency bool
+			}
+			obsAgg := make(map[string]*obsBucket)
 			for topic, to := range snap.Topics {
 				label := e.resolveLabel(topic, allowed)
-				topicAttr := attribute.String("topic", label)
-
+				b, ok := obsAgg[label]
+				if !ok {
+					b = &obsBucket{}
+					obsAgg[label] = b
+				}
+				b.throughput += to.Throughput
+				b.evictions += to.EvictionCount
 				if to.PublishLatency.Count > 0 {
-					o.ObserveFloat64(publishLatency, to.PublishLatency.P50.Seconds(),
+					if to.PublishLatency.P50.Seconds() > b.latencyP50 {
+						b.latencyP50 = to.PublishLatency.P50.Seconds()
+					}
+					if to.PublishLatency.P95.Seconds() > b.latencyP95 {
+						b.latencyP95 = to.PublishLatency.P95.Seconds()
+					}
+					if to.PublishLatency.P99.Seconds() > b.latencyP99 {
+						b.latencyP99 = to.PublishLatency.P99.Seconds()
+					}
+					b.hasLatency = true
+				}
+			}
+			for label, b := range obsAgg {
+				topicAttr := attribute.String("topic", label)
+				if b.hasLatency {
+					o.ObserveFloat64(publishLatency, b.latencyP50,
 						metric.WithAttributes(topicAttr, attribute.String("quantile", "0.5")))
-					o.ObserveFloat64(publishLatency, to.PublishLatency.P95.Seconds(),
+					o.ObserveFloat64(publishLatency, b.latencyP95,
 						metric.WithAttributes(topicAttr, attribute.String("quantile", "0.95")))
-					o.ObserveFloat64(publishLatency, to.PublishLatency.P99.Seconds(),
+					o.ObserveFloat64(publishLatency, b.latencyP99,
 						metric.WithAttributes(topicAttr, attribute.String("quantile", "0.99")))
 				}
-
-				o.ObserveFloat64(throughput, to.Throughput, metric.WithAttributes(topicAttr))
-				o.ObserveInt64(evictions, to.EvictionCount, metric.WithAttributes(topicAttr))
+				o.ObserveFloat64(throughput, b.throughput, metric.WithAttributes(topicAttr))
+				o.ObserveInt64(evictions, b.evictions, metric.WithAttributes(topicAttr))
 			}
 			return nil
 		},

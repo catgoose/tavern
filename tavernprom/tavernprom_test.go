@@ -163,10 +163,19 @@ func TestCardinalityLimit(t *testing.T) {
 	}
 	defer unreg()
 
-	// Create 5 topics.
+	// Subscribe and publish to 5 topics so per-topic metrics exist.
+	var unsubs []func()
 	for _, topic := range []string{"a", "b", "c", "d", "e"} {
+		ch, unsub := broker.Subscribe(topic)
+		unsubs = append(unsubs, unsub)
+		go func() { for range ch {} }()
 		broker.Publish(topic, "x")
 	}
+	defer func() {
+		for _, unsub := range unsubs {
+			unsub()
+		}
+	}()
 
 	mfs, _ := reg.Gather()
 	for _, mf := range mfs {

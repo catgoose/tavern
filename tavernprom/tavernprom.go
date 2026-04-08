@@ -184,12 +184,30 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	topicCounts := c.broker.TopicCounts()
 	allowedTopics := c.limitTopics(metrics.TopicStats, topicCounts)
 
-	// Per-topic metrics from Metrics().
+	// Aggregate per-topic metrics, combining overflow topics into "other".
+	type metricsBucket struct {
+		published      float64
+		dropped        float64
+		peakSubscribers float64
+	}
+	aggregated := make(map[string]*metricsBucket)
 	for topic, tm := range metrics.TopicStats {
 		label := c.resolveLabel(topic, allowedTopics)
-		ch <- prometheus.MustNewConstMetric(c.publishedTotal, prometheus.CounterValue, float64(tm.Published), label)
-		ch <- prometheus.MustNewConstMetric(c.droppedTotal, prometheus.CounterValue, float64(tm.Dropped), label)
-		ch <- prometheus.MustNewConstMetric(c.subscribersPeak, prometheus.GaugeValue, float64(tm.PeakSubscribers), label)
+		b, ok := aggregated[label]
+		if !ok {
+			b = &metricsBucket{}
+			aggregated[label] = b
+		}
+		b.published += float64(tm.Published)
+		b.dropped += float64(tm.Dropped)
+		if float64(tm.PeakSubscribers) > b.peakSubscribers {
+			b.peakSubscribers = float64(tm.PeakSubscribers)
+		}
+	}
+	for label, b := range aggregated {
+		ch <- prometheus.MustNewConstMetric(c.publishedTotal, prometheus.CounterValue, b.published, label)
+		ch <- prometheus.MustNewConstMetric(c.droppedTotal, prometheus.CounterValue, b.dropped, label)
+		ch <- prometheus.MustNewConstMetric(c.subscribersPeak, prometheus.GaugeValue, b.peakSubscribers, label)
 	}
 
 	// Observability metrics (only when enabled).
@@ -198,26 +216,53 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 	snap := obs.Snapshot(c.broker)
+
+	// Aggregate observability metrics the same way.
+	type obsBucket struct {
+		throughput  float64
+		evictions   float64
+		durations   []time.Duration
+		latencyP50  float64
+		latencyP95  float64
+		latencyP99  float64
+		hasLatency  bool
+	}
+	obsAgg := make(map[string]*obsBucket)
 	for topic, to := range snap.Topics {
 		label := c.resolveLabel(topic, allowedTopics)
-
-		// Latency quantiles.
-		if to.PublishLatency.Count > 0 {
-			ch <- prometheus.MustNewConstMetric(c.publishLatency, prometheus.GaugeValue, to.PublishLatency.P50.Seconds(), label, "0.5")
-			ch <- prometheus.MustNewConstMetric(c.publishLatency, prometheus.GaugeValue, to.PublishLatency.P95.Seconds(), label, "0.95")
-			ch <- prometheus.MustNewConstMetric(c.publishLatency, prometheus.GaugeValue, to.PublishLatency.P99.Seconds(), label, "0.99")
+		b, ok := obsAgg[label]
+		if !ok {
+			b = &obsBucket{}
+			obsAgg[label] = b
 		}
-
-		// Throughput.
-		ch <- prometheus.MustNewConstMetric(c.throughput, prometheus.GaugeValue, to.Throughput, label)
-
-		// Evictions.
-		ch <- prometheus.MustNewConstMetric(c.evictionsTotal, prometheus.CounterValue, float64(to.EvictionCount), label)
-
-		// Connection durations as a histogram.
-		if len(to.ConnectionDurations) > 0 {
-			h := buildDurationHistogram(to.ConnectionDurations)
-			ch <- prometheus.MustNewConstHistogram(c.connDuration, uint64(len(to.ConnectionDurations)), h.sum, h.buckets, label)
+		b.throughput += to.Throughput
+		b.evictions += float64(to.EvictionCount)
+		b.durations = append(b.durations, to.ConnectionDurations...)
+		if to.PublishLatency.Count > 0 {
+			// For overflow, take the max of each quantile as a conservative upper bound.
+			if to.PublishLatency.P50.Seconds() > b.latencyP50 {
+				b.latencyP50 = to.PublishLatency.P50.Seconds()
+			}
+			if to.PublishLatency.P95.Seconds() > b.latencyP95 {
+				b.latencyP95 = to.PublishLatency.P95.Seconds()
+			}
+			if to.PublishLatency.P99.Seconds() > b.latencyP99 {
+				b.latencyP99 = to.PublishLatency.P99.Seconds()
+			}
+			b.hasLatency = true
+		}
+	}
+	for label, b := range obsAgg {
+		if b.hasLatency {
+			ch <- prometheus.MustNewConstMetric(c.publishLatency, prometheus.GaugeValue, b.latencyP50, label, "0.5")
+			ch <- prometheus.MustNewConstMetric(c.publishLatency, prometheus.GaugeValue, b.latencyP95, label, "0.95")
+			ch <- prometheus.MustNewConstMetric(c.publishLatency, prometheus.GaugeValue, b.latencyP99, label, "0.99")
+		}
+		ch <- prometheus.MustNewConstMetric(c.throughput, prometheus.GaugeValue, b.throughput, label)
+		ch <- prometheus.MustNewConstMetric(c.evictionsTotal, prometheus.CounterValue, b.evictions, label)
+		if len(b.durations) > 0 {
+			h := buildDurationHistogram(b.durations)
+			ch <- prometheus.MustNewConstHistogram(c.connDuration, uint64(len(b.durations)), h.sum, h.buckets, label)
 		}
 	}
 }
