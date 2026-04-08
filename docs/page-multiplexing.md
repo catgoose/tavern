@@ -167,13 +167,15 @@ name as the SSE event type, so `sse-swap` attributes match topic names
 directly. Each fragment targets a unique DOM ID; there is no collision.
 
 For atomic multi-fragment updates within a single topic, use
-`RenderFragments` to batch them:
+`RenderFragments` to batch them. Use `PublishWithID` so the resource
+topic remains replayable:
 
 ```go
-broker.PublishOOB("resource/projects/7",
-    tavern.Replace("project-header", renderHeader(p)),
-    tavern.Replace("project-status", renderStatus(p)),
-)
+broker.PublishWithID("resource/projects/7", "proj-7-v13",
+    tavern.RenderFragments(
+        tavern.Replace("project-header", renderHeader(p)),
+        tavern.Replace("project-status", renderStatus(p)),
+    ))
 ```
 
 Both fragments arrive in one SSE message and swap atomically.
