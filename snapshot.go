@@ -91,7 +91,7 @@ func (b *SSEBroker) SubscribeWithSnapshot(topic string, snapshotFn func() string
 
 // subscribeScopedWithSnapshot creates a scoped subscription with an atomic
 // pre-registration snapshot.
-func (b *SSEBroker) subscribeScopedWithSnapshot(topic, scope, snap string) (<-chan string, func()) {
+func (b *SSEBroker) subscribeScopedWithSnapshot(topic, scope, snap string) (msgs <-chan string, unsubscribe func()) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -149,7 +149,7 @@ func (b *SSEBroker) subscribeScopedWithSnapshot(topic, scope, snap string) (<-ch
 
 // subscribeWithFilterAndSnapshot creates a filtered subscription with an
 // atomic pre-registration snapshot.
-func (b *SSEBroker) subscribeWithFilterAndSnapshot(topic string, predicate FilterPredicate, snap string) (<-chan string, func()) {
+func (b *SSEBroker) subscribeWithFilterAndSnapshot(topic string, predicate FilterPredicate, snap string) (msgs <-chan string, unsubscribe func()) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -214,7 +214,7 @@ func (b *SSEBroker) subscribeWithFilterAndSnapshot(topic string, predicate Filte
 
 // subscribeScopedWithFilterAndSnapshot creates a scoped+filtered subscription
 // with an atomic pre-registration snapshot.
-func (b *SSEBroker) subscribeScopedWithFilterAndSnapshot(topic, scope string, predicate FilterPredicate, snap string) (<-chan string, func()) {
+func (b *SSEBroker) subscribeScopedWithFilterAndSnapshot(topic, scope string, predicate FilterPredicate, snap string) (msgs <-chan string, unsubscribe func()) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()

@@ -91,7 +91,7 @@ func extractSSEData(msg string) string {
 	}
 	// Trim the leading space that SSE format adds after "data:"
 	for i, line := range dataLines {
-		if len(line) > 0 && line[0] == ' ' {
+		if line != "" && line[0] == ' ' {
 			dataLines[i] = line[1:]
 		}
 	}
