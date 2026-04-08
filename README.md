@@ -733,6 +733,43 @@ broker.OnReconnect("dashboard", func(info tavern.ReconnectInfo) {
 broker.SetBundleOnReconnect("dashboard", true)
 ```
 
+### Buffer sizing for replay
+
+The subscriber buffer (`WithBufferSize`) and the replay window (`SetReplayPolicy`)
+serve different purposes:
+
+- **Replay window** determines how many past messages Tavern *retains* for
+  Last-Event-ID resumption.
+- **Buffer size** determines how many messages can be *queued* to a subscriber
+  channel at once — including replay messages delivered on reconnect.
+
+During reconnect, Tavern enqueues all eligible replay messages into the
+subscriber channel using non-blocking sends. If the replay burst exceeds the
+available buffer capacity, excess messages are dropped and a
+`tavern-replay-truncated` control event is emitted with the delivery counts.
+
+**Rule of thumb:** if you expect reconnect bursts of up to *N* missed messages,
+set the buffer size to at least *N* plus headroom for control events and
+concurrent live publishes:
+
+```go
+broker := tavern.NewSSEBroker(
+    tavern.WithBufferSize(64), // enough for reconnect bursts up to ~60 messages
+)
+broker.SetReplayPolicy("dashboard", 50)
+```
+
+| Scenario | Suggested buffer size |
+|----------|----------------------|
+| Small replay windows (≤ 10 messages) | Default (`10`) is fine |
+| Demo / test with intentional reconnect gaps | `64`–`128` |
+| Production with large replay windows | At least replay window size + 10–20 headroom |
+
+> **Note:** `SetBundleOnReconnect` combines all replay messages into a single
+> channel write, which avoids per-message buffer pressure. When bundling is
+> enabled, buffer size only needs to accommodate the single bundled write plus
+> control events.
+
 ### Adaptive backpressure
 
 Tiered response to slow subscribers -- throttle, simplify, then disconnect:
@@ -1023,7 +1060,7 @@ broker2 := tavern.NewSSEBroker(tavern.WithBackend(fork))
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `WithBufferSize(n)` | 10 | Subscriber channel buffer capacity |
+| `WithBufferSize(n)` | 10 | Subscriber channel buffer capacity. Also limits how many replay messages can be queued during reconnect — see [Buffer sizing for replay](#buffer-sizing-for-replay) |
 | `WithDropOldest()` | drop newest | Discard oldest queued message when buffer full |
 | `WithKeepalive(d)` | disabled | Send SSE comment keepalives at interval |
 | `WithTopicTTL(d)` | disabled | Auto-remove topics with no subscribers after TTL |
