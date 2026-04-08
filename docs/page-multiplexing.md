@@ -103,17 +103,17 @@ Each topic publishes OOB fragments targeting its own DOM region. The
 browser processes them in arrival order.
 
 ```go
-// Project metadata changed
-broker.PublishOOB("resource/projects/7",
-    tavern.Replace("project-header", renderProjectHeader(project)))
+// Project metadata changed -- PublishWithID for replay support.
+broker.PublishWithID("resource/projects/7", "proj-7-v12",
+    tavern.RenderFragments(tavern.Replace("project-header", renderProjectHeader(project))))
 
-// Task added to the collection
-broker.PublishOOB("collection/projects/7/tasks",
-    tavern.Append("task-list", renderTaskRow(task)))
+// Task added -- PublishWithID so collection deltas are replayable.
+broker.PublishWithID("collection/projects/7/tasks", "task-delta-91",
+    tavern.RenderFragments(tavern.Append("task-list", renderTaskRow(task))))
 
-// Presence updated
-broker.PublishOOB("presence/projects/7",
-    tavern.Replace("presence-avatars", renderPresence(participants)))
+// Presence updated -- no ID needed; presence always re-snapshots.
+broker.Publish("presence/projects/7",
+    tavern.RenderFragments(tavern.Replace("presence-avatars", renderPresence(participants))))
 ```
 
 ### Ops dashboard
@@ -209,13 +209,19 @@ in response.
 ## Reconnection with multiplexed subscriptions
 
 On reconnect, each topic in the group handles replay and snapshot
-independently per its category:
+independently per its category. As described in
+[Snapshot and Replay Patterns](snapshot-replay.md), `Last-Event-ID`
+reconnection requires ID-backed publishes (`PublishWithID`) on each
+topic that needs replay. Topics using only plain `Publish` will not
+participate in ID-based reconnection.
 
 - Resource topics replay from the small buffer or fall back to snapshot.
 - Collection topics replay deltas or fall back to a full collection snapshot.
 - Presence topics always re-snapshot. Stale join/leave events are never
   replayed.
-- Notification topics replay only unexpired entries (TTL filtering).
+- Notification topics use `PublishWithTTL` for cache expiry; if ID-based
+  resumption is also needed, use `PublishWithID` and manage expiry in
+  the snapshot function.
 
 The client experiences one reconnection event, not one per topic.
 GroupHandler sends a single `Last-Event-ID` and replays each topic's
