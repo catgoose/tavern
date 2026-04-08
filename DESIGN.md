@@ -40,8 +40,10 @@ application code:
   glue lives in examples or adapter packages.
 - **Client-side JavaScript.** Beyond SSE's built-in `EventSource`, client
   code lives in companion libraries like tavern-js.
-- **Application-level authorization.** Tavern provides admission hooks. Who
-  gets in is your problem.
+- **Application identity and policy decisions.** Tavern may provide
+  enforcement hooks and isolation primitives (admission, quotas, publish
+  authz), but the identity model, policy rules, and tenant definitions
+  belong in your application.
 - **Persistence of application state.** Tavern delivers representations. It
   does not store your domain objects.
 
