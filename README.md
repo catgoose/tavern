@@ -30,6 +30,11 @@ real-time events to browser clients over SSE. No JavaScript framework required.
 For practical patterns and integration examples, see the
 [Recipe Cookbook](RECIPES.md).
 
+## Design boundaries
+
+Tavern has an explicit design note covering what belongs in core, what belongs
+outside it, and what Tavern should refuse to become. See [DESIGN.md](DESIGN.md).
+
 ---
 
 ## Where Tavern Shines
