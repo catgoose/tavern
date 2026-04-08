@@ -779,6 +779,12 @@ func sseHandler(broker *tavern.SSEBroker) echo.HandlerFunc {
 > than the buffer covers, it gets only live messages -- which is usually the
 > right trade-off.
 
+> **Tip:** The subscriber buffer size (`WithBufferSize`) limits how many replay
+> messages can be queued during reconnect. If you set a large replay policy,
+> make sure the buffer is large enough to hold the replay burst — otherwise
+> some replayed messages will be dropped silently. For example, with a replay
+> policy of 50, use `WithBufferSize(64)` or larger.
+
 > **Note:** `SetReplayGapPolicy` and `OnReplayGap` only take effect when the
 > topic uses ID-backed replay (`PublishWithID` or `PublishWithTTL`). Calling
 > `SetReplayGapPolicy` on a topic that only uses plain `Publish` has no
