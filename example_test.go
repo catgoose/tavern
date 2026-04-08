@@ -536,6 +536,93 @@ func ExampleSSEBroker_SetReplayPolicy() {
 	// headline-3
 }
 
+func ExampleSSEBroker_lifelineHandoff() {
+	broker := tavern.NewSSEBroker()
+	defer broker.Close()
+
+	// Lifeline: one persistent connection for app-shell events.
+	ch, unsub := broker.SubscribeMultiWithMeta(tavern.SubscribeMeta{ID: "app"}, "control")
+	defer unsub()
+
+	// User navigates to dashboard -- add topic dynamically.
+	broker.AddTopic("app", "dashboard", true)
+
+	// Control event confirms the topic was added.
+	ctrl := <-ch
+	fmt.Println("control event topic:", ctrl.Topic)
+
+	// Both topics now deliver through the single lifeline channel.
+	broker.Publish("dashboard", "chart-update")
+	msg := <-ch
+	fmt.Printf("topic=%s data=%s\n", msg.Topic, msg.Data)
+
+	// User navigates away -- remove dashboard topic.
+	broker.RemoveTopic("app", "dashboard", true)
+
+	// Drain the removal control event.
+	<-ch
+
+	// Output:
+	// control event topic: tavern-topics-changed
+	// topic=dashboard data=chart-update
+}
+
+func ExampleSSEBroker_lifelineFallback() {
+	broker := tavern.NewSSEBroker()
+	defer broker.Close()
+
+	// Lifeline carries control-plane and fallback signals.
+	ch, unsub := broker.SubscribeMultiWithMeta(tavern.SubscribeMeta{ID: "app"}, "control", "fallback")
+	defer unsub()
+
+	// Scoped panel stream -- active while viewing the panel.
+	_, panelUnsub := broker.SubscribeScoped("panel-data", "user:1")
+
+	// User navigates away -- panel stream torn down.
+	panelUnsub()
+
+	// Lifeline still delivers fallback/invalidation signals.
+	broker.Publish("fallback", "data-stale")
+	msg := <-ch
+	fmt.Printf("topic=%s data=%s\n", msg.Topic, msg.Data)
+	// Output:
+	// topic=fallback data=data-stale
+}
+
+func ExampleSSEBroker_lifelineReplay() {
+	broker := tavern.NewSSEBroker()
+	defer broker.Close()
+
+	broker.SetReplayPolicy("panel", 10)
+
+	// Lifeline stays connected throughout.
+	lifeline, lifelineUnsub := broker.SubscribeMultiWithMeta(tavern.SubscribeMeta{ID: "app"}, "control")
+	defer lifelineUnsub()
+
+	// Publish panel events with IDs while panel stream is down.
+	broker.PublishWithID("panel", "e1", "update-1")
+	broker.PublishWithID("panel", "e2", "update-2")
+
+	// Panel stream reconnects with last known ID -- replay fills the gap.
+	panelCh, panelUnsub := broker.SubscribeFromID("panel", "e1")
+	defer panelUnsub()
+
+	// Skip the reconnected control event.
+	<-panelCh
+
+	// Replayed message arrives.
+	replayed := <-panelCh
+	fmt.Println("replayed:", extractData(replayed))
+
+	// Lifeline was never interrupted.
+	broker.Publish("control", "still-alive")
+	msg := <-lifeline
+	fmt.Printf("lifeline: topic=%s data=%s\n", msg.Topic, msg.Data)
+	// Output:
+	// replayed: update-2
+	// lifeline: topic=control data=still-alive
+}
+
 // extractData is a test helper that extracts the raw data from a message
 // that may contain injected SSE id: fields.
 func extractData(msg string) string {
