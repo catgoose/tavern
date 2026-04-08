@@ -1,6 +1,9 @@
 package tavern
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // ReconnectInfo provides context about a subscriber reconnection, including
 // the gap duration and number of missed messages. It is passed to callbacks
@@ -18,6 +21,13 @@ type ReconnectInfo struct {
 	// MissedCount is the number of messages published after LastEventID that
 	// the subscriber missed. Zero if the ID was not found in the replay log.
 	MissedCount int
+	// ReplayDelivered is the number of replay messages successfully enqueued
+	// to the subscriber channel. This may be less than MissedCount if the
+	// subscriber buffer was too small to hold all replay messages.
+	ReplayDelivered int
+	// ReplayDropped is the number of replay messages that could not be
+	// enqueued because the subscriber buffer was full.
+	ReplayDropped int
 	// SendToSubscriber sends a message directly to this subscriber's channel.
 	// The message is delivered as-is (raw SSE text). If the subscriber's buffer
 	// is full the message is dropped silently.
@@ -65,6 +75,13 @@ func (b *SSEBroker) SetBundleOnReconnect(topic string, bundle bool) {
 // notifies clients a reconnection was detected.
 func reconnectedControlEvent() string {
 	return NewSSEMessage("tavern-reconnected", "").String()
+}
+
+// replayTruncatedControlEvent returns an SSE control event indicating that
+// some replay messages were dropped due to subscriber buffer limits.
+func replayTruncatedControlEvent(delivered, dropped int) string {
+	return NewSSEMessage("tavern-replay-truncated",
+		fmt.Sprintf("delivered:%d dropped:%d", delivered, dropped)).String()
 }
 
 // buildReconnectInfo constructs a ReconnectInfo from the replay log state.

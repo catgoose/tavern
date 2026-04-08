@@ -227,10 +227,6 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		case ch <- controlMsg:
 		default:
 		}
-		// Fire reconnect callbacks in their own goroutines.
-		for _, fn := range reconnectCallbacks {
-			go fn(reconnectInfo)
-		}
 	}
 
 	// Handle replay gap: fire callbacks, optionally send control event and snapshot.
@@ -258,6 +254,7 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 	}
 
 	// Deliver replay messages, optionally bundled into a single write.
+	var replayDelivered, replayDropped int
 	if bundle && len(replayMsgs) > 0 {
 		var bundled strings.Builder
 		for _, msg := range replayMsgs {
@@ -265,12 +262,32 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 		}
 		select {
 		case ch <- bundled.String():
+			replayDelivered = len(replayMsgs)
 		default:
+			replayDropped = len(replayMsgs)
 		}
 	} else {
 		for _, msg := range replayMsgs {
 			select {
 			case ch <- msg:
+				replayDelivered++
+			default:
+				replayDropped++
+			}
+		}
+	}
+
+	// Populate replay delivery stats and fire reconnect callbacks.
+	if isReconnect {
+		reconnectInfo.ReplayDelivered = replayDelivered
+		reconnectInfo.ReplayDropped = replayDropped
+		for _, fn := range reconnectCallbacks {
+			go fn(reconnectInfo)
+		}
+		// Emit truncation control event when replay messages were dropped.
+		if replayDropped > 0 {
+			select {
+			case ch <- replayTruncatedControlEvent(replayDelivered, replayDropped):
 			default:
 			}
 		}

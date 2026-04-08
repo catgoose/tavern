@@ -48,6 +48,8 @@ func TestOnReconnect_FiresOnReconnection(t *testing.T) {
 	assert.Equal(t, "events", captured.Topic)
 	assert.Equal(t, "1", captured.LastEventID)
 	assert.Equal(t, 2, captured.MissedCount)
+	assert.Equal(t, 2, captured.ReplayDelivered)
+	assert.Equal(t, 0, captured.ReplayDropped)
 	assert.Greater(t, captured.Gap, time.Duration(0))
 
 	// Drain channel.
@@ -147,6 +149,8 @@ func TestOnReconnect_GapDurationAndMissedCount(t *testing.T) {
 	}
 
 	assert.Equal(t, 3, captured.MissedCount)
+	assert.Equal(t, 3, captured.ReplayDelivered)
+	assert.Equal(t, 0, captured.ReplayDropped)
 	assert.Greater(t, captured.Gap, 10*time.Millisecond)
 
 	drainCh(ch)
@@ -630,6 +634,8 @@ func TestOnReconnect_MissedCountAtEndOfLog(t *testing.T) {
 	}
 
 	assert.Equal(t, 0, captured.MissedCount)
+	assert.Equal(t, 0, captured.ReplayDelivered)
+	assert.Equal(t, 0, captured.ReplayDropped)
 	drainCh(ch)
 }
 
@@ -697,6 +703,113 @@ func TestOnReconnect_TopicIsolation(t *testing.T) {
 	}
 
 	drainCh(ch)
+}
+
+func TestOnReconnect_ReplayTruncation(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(3))
+	defer b.Close()
+
+	b.SetReplayPolicy("events", 50)
+	// Publish enough messages to exceed the buffer.
+	for i := 1; i <= 20; i++ {
+		b.PublishWithID("events", fmt.Sprintf("%d", i), fmt.Sprintf("msg-%d", i))
+	}
+
+	var captured ReconnectInfo
+	done := make(chan struct{}, 1)
+
+	b.OnReconnect("events", func(info ReconnectInfo) {
+		captured = info
+		done <- struct{}{}
+	})
+
+	ch, unsub := b.SubscribeFromID("events", "1")
+	defer unsub()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("callback not fired")
+	}
+
+	assert.Equal(t, 19, captured.MissedCount)
+	assert.Equal(t, 19, captured.ReplayDelivered+captured.ReplayDropped)
+	assert.Greater(t, captured.ReplayDropped, 0, "expected some replay messages to be dropped")
+	assert.Greater(t, captured.ReplayDelivered, 0, "expected some replay messages to be delivered")
+
+	drainCh(ch)
+}
+
+func TestOnReconnect_NoTruncationEventWhenAllDelivered(t *testing.T) {
+	// When all replay messages fit in the buffer, no truncation event is sent.
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("events", 50)
+	for i := 1; i <= 5; i++ {
+		b.PublishWithID("events", fmt.Sprintf("%d", i), fmt.Sprintf("msg-%d", i))
+	}
+
+	ch, unsub := b.SubscribeFromID("events", "1")
+	defer unsub()
+
+	var msgs []string
+	timeout := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case msg := <-ch:
+			msgs = append(msgs, msg)
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	for _, m := range msgs {
+		assert.NotContains(t, m, "event: tavern-replay-truncated",
+			"no truncation event expected when all replay messages were delivered")
+	}
+}
+
+func TestBundleOnReconnect_TruncationAccounting(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(2))
+	defer b.Close()
+
+	b.SetReplayPolicy("events", 50)
+	b.SetBundleOnReconnect("events", true)
+
+	for i := 1; i <= 20; i++ {
+		b.PublishWithID("events", fmt.Sprintf("%d", i), fmt.Sprintf("msg-%d", i))
+	}
+
+	var captured ReconnectInfo
+	done := make(chan struct{}, 1)
+
+	b.OnReconnect("events", func(info ReconnectInfo) {
+		captured = info
+		done <- struct{}{}
+	})
+
+	ch, unsub := b.SubscribeFromID("events", "1")
+	defer unsub()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("callback not fired")
+	}
+
+	// Bundled: either all delivered or all dropped.
+	assert.Equal(t, 19, captured.MissedCount)
+	assert.Equal(t, 19, captured.ReplayDelivered+captured.ReplayDropped)
+
+	drainCh(ch)
+}
+
+func TestReplayTruncatedControlEvent_Format(t *testing.T) {
+	msg := replayTruncatedControlEvent(5, 3)
+	assert.Contains(t, msg, "event: tavern-replay-truncated")
+	assert.Contains(t, msg, "delivered:5 dropped:3")
+	assert.True(t, strings.HasSuffix(msg, "\n\n"), "SSE message must end with double newline")
 }
 
 func TestOnReconnect_ConcurrentSafety(t *testing.T) {
