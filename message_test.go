@@ -181,6 +181,35 @@ func TestWrapForGroup(t *testing.T) {
 	})
 }
 
+func TestIsSSEComment(t *testing.T) {
+	assert.True(t, isSSEComment(": keepalive\n"))
+	assert.True(t, isSSEComment(": keepalive"))
+	assert.True(t, isSSEComment(": line1\n: line2\n"))
+	assert.False(t, isSSEComment("data: hello\n"))
+	assert.False(t, isSSEComment(": comment\ndata: hello\n"))
+	assert.False(t, isSSEComment("just raw text"))
+}
+
+func TestWrapForGroup_KeepalivePassthrough(t *testing.T) {
+	t.Run("keepalive comment passed through unchanged", func(t *testing.T) {
+		ka := ": keepalive\n"
+		got := wrapForGroup("metrics", ka)
+		assert.Equal(t, ka, got, "keepalive comments should pass through unchanged")
+	})
+
+	t.Run("multi-line comment passed through unchanged", func(t *testing.T) {
+		comment := ": line1\n: line2\n"
+		got := wrapForGroup("metrics", comment)
+		assert.Equal(t, comment, got, "multi-line comments should pass through unchanged")
+	})
+
+	t.Run("normal messages still wrapped after comment passthrough", func(t *testing.T) {
+		got := wrapForGroup("metrics", "cpu=42")
+		assert.Contains(t, got, "event: metrics\n")
+		assert.Contains(t, got, "data: cpu=42\n")
+	})
+}
+
 func TestIsSSEFormatted(t *testing.T) {
 	assert.True(t, isSSEFormatted("event: update\ndata: hello\n\n"))
 	assert.True(t, isSSEFormatted("data: hello\n\n"))
