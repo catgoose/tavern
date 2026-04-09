@@ -52,7 +52,7 @@ func TestStreamSSE_StreamsString(t *testing.T) {
 	ch <- NewSSEMessage("ping", "three").String()
 
 	rec := newFlushRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	done := make(chan error, 1)
@@ -80,7 +80,7 @@ func TestStreamSSE_StreamsTopicMessage(t *testing.T) {
 	ch <- TopicMessage{Topic: "invoices", Data: "paid"}
 
 	rec := newFlushRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	done := make(chan error, 1)
@@ -106,7 +106,7 @@ func TestStreamSSE_ContextCancellation(t *testing.T) {
 
 	ch := make(chan string)
 	rec := newFlushRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 
 	done := make(chan error, 1)
 	go func() {
@@ -128,12 +128,10 @@ func TestStreamSSE_ChannelClose(t *testing.T) {
 
 	ch := make(chan string)
 	rec := newFlushRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- StreamSSE(ctx, rec, ch, func(s string) string { return s })
+		done <- StreamSSE(t.Context(), rec, ch, func(s string) string { return s })
 	}()
 
 	close(ch)
@@ -169,7 +167,7 @@ func TestStreamSSE_HeadersSet(t *testing.T) {
 
 	rec := newFlushRecorder()
 	ch := make(chan string)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 
 	done := make(chan error, 1)
 	go func() {
@@ -195,7 +193,7 @@ func TestStreamSSE_Snapshot(t *testing.T) {
 	ch <- NewSSEMessage("update", "live").String()
 
 	rec := newFlushRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	snapshot := NewSSEMessage("snapshot", "initial").String()
@@ -227,7 +225,7 @@ func TestStreamSSE_SnapshotEmpty(t *testing.T) {
 	ch <- NewSSEMessage("event", "hello").String()
 
 	rec := newFlushRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var snapshotCalls int32
@@ -257,7 +255,7 @@ func TestStreamSSE_Heartbeat(t *testing.T) {
 
 	ch := make(chan string)
 	rec := newFlushRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	done := make(chan error, 1)
@@ -286,7 +284,7 @@ func TestStreamSSE_EncoderEmptySkips(t *testing.T) {
 	ch <- 4 // skipped
 
 	rec := newFlushRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	encode := func(n int) string {
@@ -324,7 +322,7 @@ func TestStreamSSE_CustomWriter(t *testing.T) {
 	ch <- "frame-b"
 
 	rec := newFlushRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var calls int32
@@ -365,7 +363,7 @@ func TestStreamSSE_NilEncode(t *testing.T) {
 	rec := newFlushRecorder()
 	ch := make(chan string)
 
-	err := StreamSSE[string](context.Background(), rec, ch, nil)
+	err := StreamSSE(context.Background(), rec, ch, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "encode")
 }
