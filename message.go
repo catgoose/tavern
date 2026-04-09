@@ -118,12 +118,28 @@ func extractSSEID(msg string) (cleaned, id string) {
 	return strings.Join(filtered, "\n"), id
 }
 
+// isSSEComment reports whether msg consists entirely of SSE comment lines
+// (lines starting with ':'). Such frames — including keepalive comments —
+// must pass through without being re-wrapped into data: lines.
+func isSSEComment(msg string) bool {
+	for _, line := range strings.Split(strings.TrimRight(msg, "\n"), "\n") {
+		if !strings.HasPrefix(line, ":") {
+			return false
+		}
+	}
+	return true
+}
+
 // wrapForGroup formats a raw subscriber message for grouped SSE output. Control
-// events are forwarded as-is. Pre-formatted SSE messages have their data
-// extracted and re-wrapped with the topic as the event type to avoid
-// double-wrapping. Raw strings are wrapped with [NewSSEMessage] as before.
+// events and SSE comment frames (e.g. keepalives) are forwarded as-is.
+// Pre-formatted SSE messages have their data extracted and re-wrapped with the
+// topic as the event type to avoid double-wrapping. Raw strings are wrapped
+// with [NewSSEMessage] as before.
 func wrapForGroup(topic, msg string) string {
 	if isControlEvent(msg) {
+		return msg
+	}
+	if isSSEComment(msg) {
 		return msg
 	}
 	if isSSEFormatted(msg) {
