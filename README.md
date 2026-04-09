@@ -925,6 +925,10 @@ drops and the browser reconnects.
 | **Reconnect-as-navigation** -- tear down SSE on every route change | Unnecessary latency, missed events during reconnect window |
 | **Duplicate DOM ownership** -- two streams updating the same element | Race conditions, flicker, unpredictable state |
 
+> **Rendering on hot pages:** Transport backpressure and browser render cadence
+> are separate concerns. If delivery metrics look healthy but the page stutters,
+> see [Recipe 28: Browser-safe rendering for high-frequency SSE](RECIPES.md#28-browser-safe-rendering-for-high-frequency-sse).
+
 ---
 
 ## Error handling
