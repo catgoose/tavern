@@ -1828,3 +1828,109 @@ broker.PublishTo("analytics-data", userScope, renderMetrics(data))
 > If a panel topic produces hundreds of messages per second, use Approach B
 > with separate connections -- this gives independent buffer and backpressure
 > behavior.
+
+---
+
+## 28. Browser-safe rendering for high-frequency SSE
+
+SSE delivery can be faster than the browser should repaint. Tavern's
+backpressure, throttling, and adaptive degradation protect the **transport
+layer** -- they keep subscriber buffers healthy and prevent slow clients from
+stalling publishers. But once a message reaches the browser, the **render
+layer** is your application's responsibility.
+
+These are different concerns at different layers:
+
+| Layer | Concern | Tools |
+|-------|---------|-------|
+| **Transport** | Buffer depth, drop policy, subscriber eviction | Tavern backpressure, `WithAdaptiveBackpressure`, `PublishBlocking` |
+| **Render** | DOM mutation rate, layout thrash, paint budget | Application JavaScript, CSS containment, request-animation-frame discipline |
+
+A stream publishing 50 messages/second through a healthy broker can still make
+a page unusable if every message triggers synchronous DOM work. The fixes live
+in client-side rendering code, not in Tavern configuration.
+
+### Recommendations
+
+**Do not assume one DOM update per message on hot streams.** When a topic
+publishes faster than ~15-20 Hz, coalesce incoming messages and render on a
+bounded window. A 25-100 ms render interval is a reasonable starting point --
+tune from there based on what the user actually needs to see.
+
+**Prefer append + bounded logs over prepend + unbounded churn.** Appending to a
+container is cheaper than prepending (no layout shift on existing elements).
+Cap the container to a fixed number of children and remove overflow from the
+tail. Unbounded growth eventually kills any page, no matter how well the
+transport performs.
+
+**Be cautious with unconditional auto-follow / auto-scroll.** Scrolling on
+every message in a hot feed fights the user when they try to read. Gate
+auto-scroll on whether the user is already at the bottom, and pause it when
+they scroll up.
+
+**Be cautious with View Transitions on hot live pages.** The View Transitions
+API serializes transitions -- if a new SSE message triggers a transition while
+the previous one is still animating, the browser queues or drops it. On a hot
+page this causes visible stutter. Limit transitions to user-initiated
+navigation or low-frequency updates, and skip them for high-cadence streams.
+
+**A tiny client-side queue can be the right fix for hot views.** Rather than
+fighting HTMX's eager swap behavior, intercept SSE events before they reach
+the DOM, buffer them, and flush on a render tick. This decouples transport
+cadence from render cadence without changing anything on the server.
+
+### Example: coalesced render loop
+
+A minimal pattern that buffers SSE messages and flushes at a bounded rate:
+
+```html
+<div id="feed" sse-connect="/sse/dashboard" sse-swap="update"></div>
+
+<script>
+(function () {
+  const feed = document.getElementById("feed");
+  const queue = [];
+  const MAX_CHILDREN = 200;
+  const RENDER_INTERVAL_MS = 50; // 20 Hz cap -- tune to taste
+
+  // Intercept SSE messages before HTMX swaps them.
+  feed.addEventListener("htmx:sseBeforeMessage", function (evt) {
+    evt.preventDefault(); // stop HTMX from swapping immediately
+    queue.push(evt.detail.elt);
+  });
+
+  // Flush the queue on a fixed interval.
+  setInterval(function () {
+    if (queue.length === 0) return;
+
+    const fragment = document.createDocumentFragment();
+    while (queue.length > 0) {
+      fragment.appendChild(queue.shift());
+    }
+    feed.appendChild(fragment);
+
+    // Trim overflow from the top.
+    while (feed.children.length > MAX_CHILDREN) {
+      feed.removeChild(feed.firstElementChild);
+    }
+  }, RENDER_INTERVAL_MS);
+})();
+</script>
+```
+
+> **Note:** The exact HTMX event name and `detail` shape depend on the
+> `hx-ext="sse"` extension version. Check the
+> [HTMX SSE extension docs](https://htmx.org/extensions/sse/) for the current
+> API. The pattern -- intercept, buffer, flush on a timer -- is the same
+> regardless of the event plumbing.
+
+### When to reach for this
+
+- Dashboard panels updating more than ~10 times/second
+- Activity feeds or log tails on topics with burst traffic
+- Any page where users report "it feels laggy" but Tavern metrics show healthy
+  delivery and no drops
+
+If transport metrics look fine but the page stutters, the bottleneck is almost
+certainly in the render layer. Add a coalesced render window before reaching for
+server-side throttling.
