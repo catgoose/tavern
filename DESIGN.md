@@ -24,6 +24,8 @@ package:
   core.
 - **SSE handler integration with topic groups.** Static and dynamic topic
   groups, single-connection multi-topic streams, Last-Event-ID handling.
+  `StreamSSE` is the composable primitive beneath the turnkey handlers for
+  routes that need a custom subscription flow.
 - **Publish middleware and hooks.** Chaining server-side effects on publish,
   mutation signals, subscriber filtering.
 - **Admission control and subscriber management.** Rate limiting, subscriber

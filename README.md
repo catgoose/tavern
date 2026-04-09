@@ -407,6 +407,24 @@ streams messages with flush:
 mux.Handle("/sse/events", broker.SSEHandler("events"))
 ```
 
+### `StreamSSE` (composable primitive)
+
+For routes that need a custom subscription flow — scoped, filtered, multi-topic,
+or with a bespoke message-to-frame encoder — use `StreamSSE`. It sits between
+raw subscription channels and the turnkey `SSEHandler`, handling headers,
+`http.Flusher` checks, context cancellation, optional snapshots, and optional
+heartbeats, while leaving subscription choice and encoding at the call site.
+
+```go
+ch, unsub := broker.SubscribeScoped("orders", userID)
+defer unsub()
+return tavern.StreamSSE(r.Context(), w, ch, func(s string) string { return s })
+```
+
+Pair with `WithStreamSnapshot` to deliver initial state, `WithStreamHeartbeat`
+to keep per-connection keepalives flowing, or `WithStreamWriter` to plug in a
+custom frame writer (e.g. htmx-go).
+
 ### Topic groups (GroupHandler / DynamicGroupHandler)
 
 Serve multiple topics on a single SSE connection:
