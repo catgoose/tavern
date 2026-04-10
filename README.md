@@ -120,6 +120,38 @@ gap recovery, and topic change notifications — with zero custom JavaScript:
 See the [tavern-js README](https://github.com/catgoose/tavern-js) for full
 API documentation, data attributes, and examples.
 
+### Commands from Hot DOM Regions
+
+Some Tavern-driven interfaces update so quickly that interactive elements
+inside the SSE-swapped region can be replaced while the user is clicking
+them. In these "hotspots", `hx-post` or element-bound click handlers are
+unreliable because the target node may be gone before the action fires.
+
+`Tavern.command()` provides a stable way to POST intent to your normal
+application endpoints from volatile UI regions:
+
+```js
+// Delegated click on a stable parent — buttons inside are ephemeral
+document.getElementById("task-list").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action='complete']");
+  if (!btn) return;
+  Tavern.command("/tasks/complete", { id: btn.dataset.id });
+});
+```
+
+The architecture stays server-driven:
+
+1. Client sends intent via ordinary `POST` to an application-defined route
+2. Server processes the command and decides what changed
+3. Tavern delivers the updated representation back down over SSE
+
+Normal forms and `hx-post` remain the right choice outside hotspots.
+`Tavern.command()` is a documented escape hatch, not a replacement for
+standard HTTP interactions.
+
+See the [tavern-js README](https://github.com/catgoose/tavern-js) for the
+full `command()` API, options, and additional examples.
+
 ---
 
 ## Quick start
