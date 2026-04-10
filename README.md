@@ -110,10 +110,10 @@ gap recovery, and topic change notifications — with zero custom JavaScript:
 <script src="https://cdn.jsdelivr.net/gh/catgoose/tavern-js@latest/dist/tavern.min.js"></script>
 <div sse-connect="/sse/notifications"
      sse-swap="message"
-     data-tavern-reconnecting-class="opacity-50"
-     data-tavern-gap-action="banner">
+     tavern-reconnecting-class="opacity-50"
+     tavern-gap-action="banner">
 
-  <div data-tavern-status class="hidden">Reconnecting...</div>
+  <div tavern-status class="hidden">Reconnecting...</div>
 </div>
 ```
 
