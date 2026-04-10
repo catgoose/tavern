@@ -1600,11 +1600,11 @@ mux.Handle("/sse/dashboard", broker.SSEHandler("dashboard",
 <div id="dashboard"
      sse-connect="/sse/dashboard"
      sse-swap="update"
-     data-tavern-reconnecting-class="opacity-50 pointer-events-none"
-     data-tavern-gap-action="banner"
-     data-tavern-gap-banner-text="Dashboard was disconnected. Click to refresh.">
+     tavern-reconnecting-class="opacity-50 pointer-events-none"
+     tavern-gap-action="banner"
+     tavern-gap-banner-text="Dashboard was disconnected. Click to refresh.">
 
-  <div data-tavern-status class="hidden">
+  <div tavern-status class="hidden">
     <div class="animate-pulse text-gray-500">Reconnecting...</div>
   </div>
 
@@ -1631,7 +1631,7 @@ For cases where you want programmatic control instead of a banner:
 <div id="prices"
      sse-connect="/sse/prices"
      sse-swap="ticker"
-     data-tavern-gap-action="prices-stale">
+     tavern-gap-action="prices-stale">
 </div>
 
 <script>
@@ -1641,7 +1641,7 @@ For cases where you want programmatic control instead of a banner:
 </script>
 ```
 
-Setting `data-tavern-gap-action` to a custom name dispatches that as a DOM
+Setting `tavern-gap-action` to a custom name dispatches that as a DOM
 event, giving you full control over recovery.
 
 ---
