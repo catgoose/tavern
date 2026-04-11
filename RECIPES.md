@@ -1214,6 +1214,22 @@ broker.OnBackpressureTierChange(func(sub *tavern.SubscriberInfo, oldTier, newTie
 })
 ```
 
+When a subscriber's tier changes, Tavern automatically emits a
+`tavern-backpressure` control event over the SSE stream with the new tier,
+previous tier, and topic. Clients can listen for this event to show
+degradation indicators:
+
+```js
+es.addEventListener("tavern-backpressure", (e) => {
+    const { tier, previousTier, topic } = JSON.parse(e.data);
+    if (tier === "throttle" || tier === "simplify") {
+        showDegradationBanner(topic, tier);
+    } else if (tier === "normal") {
+        hideDegradationBanner(topic);
+    }
+});
+```
+
 ### Go publisher
 
 ```go

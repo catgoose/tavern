@@ -729,6 +729,9 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 				if b.adaptive != nil {
 					b.resetDropCount(ch)
 					if oldTier, changed := b.adaptive.resetState(ch); changed {
+						// Inject backpressure control event for recovery.
+						ctrl := backpressureControlEvent(TierNormal.String(), oldTier.String(), topic)
+						b.send(ch, ctrl)
 						b.fireTierChange(ch, oldTier, TierNormal)
 					}
 				}
@@ -744,6 +747,14 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 					drops := b.incrementDropCount(ch)
 					oldTier, newTier, changed := b.adaptive.updateTier(ch, drops)
 					if changed {
+						// Inject backpressure control event before applying tier effects.
+						// Use non-blocking send — the channel may be full (that's why
+						// we're in backpressure). If it can't be delivered, that's OK.
+						ctrl := backpressureControlEvent(newTier.String(), oldTier.String(), topic)
+						select {
+						case ch <- ctrl:
+						default:
+						}
 						b.fireTierChange(ch, oldTier, newTier)
 					}
 					if newTier == TierDisconnect {

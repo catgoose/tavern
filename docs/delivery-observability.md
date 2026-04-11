@@ -18,6 +18,7 @@ when they fire, what they carry, and what they mean for the client.
 | `tavern-replay-gap` | `Last-Event-ID` not found in replay log | `{"lastEventId": "..."}` | Messages were missed. Region is stale until fresh data arrives. |
 | `tavern-replay-truncated` | Replay buffer too small for full recovery | `{"delivered": N, "dropped": N}` | Partial recovery. Some messages lost to buffer limits. |
 | `tavern-topics-changed` | Topic added or removed dynamically | `{"action": "added"/"removed", "topic": "...", "topics": [...]}` | Subscription set changed. Full topic list in `topics`. |
+| `tavern-backpressure` | Subscriber's backpressure tier changes | `{"tier": "...", "previousTier": "...", "topic": "..."}` | Degradation level changed. Adapt UX to current tier. |
 
 All control events use structured JSON in the SSE `data` field. The event
 type (SSE `event` field) is the control event name shown above.
@@ -66,6 +67,26 @@ The gap event means the client missed an unknown number of messages. If no
 snapshot fallback is configured, the client should treat the region as stale
 until fresh data arrives from normal publishes.
 
+### Backpressure tier change
+
+When adaptive backpressure is enabled and a subscriber's tier changes (due to
+consecutive message drops or recovery after a successful send), the subscriber
+receives:
+
+- `tavern-backpressure` with `{"tier": "throttle", "previousTier": "normal", "topic": "dashboard"}`
+
+Tier values: `"normal"`, `"throttle"`, `"simplify"`, `"disconnect"`.
+
+The event fires on both escalation (normal→throttle→simplify→disconnect) and
+recovery (any tier→normal after a successful send). For escalation, the
+control event is sent via non-blocking send since the channel may be full --
+if the subscriber is too backed up to receive even the control event, it is
+dropped silently. For disconnect, the event is sent before the channel is
+closed.
+
+Clients can use this event to show degradation indicators, suggest the user
+refresh, or explain why updates are slower than expected.
+
 ### Normal operation (no control events)
 
 During normal connected operation, no control events fire. The client
@@ -97,6 +118,8 @@ behaviors:
 - **`tavern-replay-truncated`**: Signals partial recovery so the UI can warn
   about incomplete data.
 - **`tavern-topics-changed`**: Updates internal subscription tracking.
+- **`tavern-backpressure`**: Signals degradation tier changes so the client
+  can show backpressure indicators or adapt rendering fidelity.
 
 All of this happens through data attributes on HTML elements -- no custom
 JavaScript required for the default behaviors. See the
@@ -127,6 +150,11 @@ es.addEventListener("tavern-replay-gap", (e) => {
 es.addEventListener("tavern-replay-truncated", (e) => {
   const { delivered, dropped } = JSON.parse(e.data);
   console.warn(`Replay truncated: ${delivered} delivered, ${dropped} dropped`);
+});
+
+es.addEventListener("tavern-backpressure", (e) => {
+  const { tier, previousTier, topic } = JSON.parse(e.data);
+  console.warn(`Backpressure: ${previousTier} → ${tier} on ${topic}`);
 });
 ```
 
