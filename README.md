@@ -619,6 +619,12 @@ broker.AddTopicForScope("admin", "audit-log", true)
 A `tavern-topics-changed` control event notifies the client so it can set up
 new SSE-swap targets.
 
+Query the current topic set for a subscriber:
+
+```go
+topics := broker.SubscriberTopics(subscriberID) // []string{"notifications", "nav-state", "dashboard-data"}
+```
+
 ### Message coalescing (SubscribeWithCoalescing)
 
 Latest-value-wins subscription for high-frequency data. When multiple messages
@@ -933,83 +939,21 @@ falls back to non-blocking behavior.
 
 ### App-shell lifeline architecture
 
-> **Full contract:** See [docs/stream-contract.md](docs/stream-contract.md) for
-> the complete lifeline/scoped stream contract, including guarantees, failure
-> isolation, reconnection behavior, and decision guidance.
-
 For apps that go beyond page-local SSE, Tavern supports a **lifeline + scoped
-streams** pattern: one warm connection stays open for the life of the app shell,
-while optional high-bandwidth streams spin up and down as the user navigates.
+streams** pattern: one persistent connection for control-plane topics
+(notifications, presence, nav-state) and optional high-bandwidth connections
+that spin up and down as the user navigates.
 
-**Lifeline (control plane)** -- always connected, low volume. Use this for
-topics that are relevant across the entire session:
-- notifications, presence, nav-state changes
-- invalidation signals ("data changed, refetch when ready")
-- small counters, theme broadcasts
-- any topic producing less than ~1 msg/s under load
+- **Lifeline** -- always connected, low volume (< 1 msg/s). Topics mutated
+  with `AddTopic` / `RemoveTopic` as the user navigates.
+- **Scoped streams** -- high-bandwidth, per-view connections with independent
+  buffer sizing and backpressure. Torn down when the view is dismissed.
 
-**Scoped streams (data plane)** -- active only for hot views. Use a separate
-connection when bandwidth or lifecycle demands it:
-- charts, feeds, detail panels via `SubscribeScoped` / `PublishTo`
-- high-frequency section-specific updates with per-user isolation
-- topics that need independent buffer sizing, eviction, or backpressure
-
-#### Handoff with AddTopic / RemoveTopic
-
-Use a single SSE connection with dynamic topic membership. Requires a
-`SubscribeMultiWithMeta` subscriber so `AddTopic` / `RemoveTopic` can target it
-by ID:
-
-```go
-// Lifeline starts with control-plane topics.
-ch, unsub := broker.SubscribeMultiWithMeta(
-    tavern.SubscribeMeta{ID: sessionID},
-    "notifications", "nav-state",
-)
-
-// User opens dashboard -- add its data topic.
-broker.AddTopic(sessionID, "dashboard-data", true)
-// Client receives tavern-topics-changed control event.
-
-// User leaves dashboard -- remove the topic.
-broker.RemoveTopic(sessionID, "dashboard-data", true)
-```
-
-#### Separate scoped connection
-
-When a view needs independent backpressure, per-user scoping, or its own
-buffer/eviction policy, use a separate SSE connection with `SubscribeScoped`.
-This works well under HTTP/2 and HTTP/3 where additional streams are cheap:
-
-```go
-// Main lifeline handler
-mux.Handle("/sse/app", broker.SSEHandler("control"))
-
-// Scoped panel stream -- per-user isolation with independent buffer
-// Use SubscribeScoped in a custom handler, or separate SSEHandler per panel:
-mux.Handle("/sse/panel", broker.SSEHandler("panel-data",
-    tavern.WithMaxConnectionDuration(10*time.Minute),
-))
-```
-
-#### Replay as fallback, not navigation
-
-Replay and `Last-Event-ID` resumption exist for **network interruptions**, not
-for navigating between views. Normal navigation should add/remove topics or
-create/tear down scoped streams. Replay kicks in automatically if a connection
-drops and the browser reconnects.
-
-#### Anti-patterns
-
-| Pattern | Problem |
-|---------|---------|
-| **Firehose** -- one connection subscribed to every topic | High-bandwidth topics cause backpressure that stalls control events. Buffer overflows drop notifications. |
-| **Reconnect-as-navigation** -- tear down SSE on every route change | Unnecessary latency, missed events during reconnect window, no replay continuity |
-| **Duplicate DOM ownership** -- two streams updating the same element | Race conditions, flicker, unpredictable state |
-| **Lifeline as data pipe** -- routing high-bandwidth data through the lifeline | Backpressure from data topics delays control events |
-
-> See [docs/stream-contract.md](docs/stream-contract.md) for the full
-> anti-patterns list and decision guidance table.
+See [docs/stream-contract.md](docs/stream-contract.md) for the full contract:
+stream roles, failure isolation, reconnection guarantees, anti-patterns, and a
+decision guidance table. For implementation, see
+[Recipe 27](RECIPES.md#recipe-27-app-shell-lifeline-with-scoped-panel-streams)
+and [Recipe 31](RECIPES.md#31-app-shell-with-lifeline-and-scoped-streams).
 
 > **Rendering on hot pages:** Transport backpressure and browser render cadence
 > are separate concerns. If delivery metrics look healthy but the page stutters,

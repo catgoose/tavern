@@ -1947,3 +1947,515 @@ A minimal pattern that buffers SSE messages and flushes at a bounded rate:
 If transport metrics look fine but the page stutters, the bottleneck is almost
 certainly in the render layer. Add a coalesced render window before reaching for
 server-side throttling.
+
+---
+
+## 29. Interaction insulation for hot-region commands
+
+When the DOM inside an SSE-swapped region is replaced faster than the user can
+click, node-bound handlers (`hx-post`, `onclick`) break because the target node
+is gone before the browser dispatches the event. Delegated commands solve this
+by binding the listener on the stable `sse-connect` parent and matching
+ephemeral children at event time.
+
+### Go handler (topic publisher)
+
+```go
+func tickerPublisher(ctx context.Context, broker *tavern.SSEBroker, db *sql.DB) {
+    ticker := time.NewTicker(500 * time.Millisecond)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ticker.C:
+            tasks := fetchActiveTasks(db)
+            broker.PublishOOB("task-feed",
+                tavern.Replace("task-list", renderTaskList(tasks)),
+            )
+        case <-ctx.Done():
+            return
+        }
+    }
+}
+```
+
+### Go handler (command endpoint)
+
+```go
+func completeTask(broker *tavern.SSEBroker, db *sql.DB) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        var body struct {
+            ID string `json:"id"`
+        }
+        json.NewDecoder(r.Body).Decode(&body)
+        markComplete(db, body.ID)
+
+        // The updated task list arrives via SSE on the next tick.
+        w.WriteHeader(http.StatusNoContent)
+    }
+}
+
+mux.Handle("/sse/tasks", broker.SSEHandler("task-feed"))
+mux.HandleFunc("POST /tasks/complete", completeTask(broker, db))
+```
+
+### HTML (tavern-js delegated commands)
+
+```html
+<script src="https://cdn.jsdelivr.net/gh/catgoose/tavern-js@latest/dist/tavern.min.js"></script>
+
+<div id="task-region"
+     sse-connect="/sse/tasks"
+     sse-swap="message"
+     tavern-command-delegate="pointerdown"
+     tavern-command-target="[command-url]">
+
+  <!-- Replaced by SSE every 500ms — buttons are ephemeral -->
+  <div id="task-list">
+    <button command-url="/tasks/complete" command-id="42">Done</button>
+    <button command-url="/tasks/complete" command-id="43">Done</button>
+  </div>
+</div>
+```
+
+### How it works
+
+1. `tavern-command-delegate="pointerdown"` binds a single listener on the
+   `sse-connect` element for `pointerdown` events.
+2. When the user clicks a button, `closest("[command-url]")` finds the nearest
+   matching element -- even though that element may be replaced milliseconds
+   later.
+3. `command-url` becomes the POST endpoint. All other `command-*` attributes
+   become the JSON body (`command-id="42"` becomes `{"id": "42"}`).
+4. `Tavern.command(url, body)` fires automatically. The server processes the
+   command and publishes the result back over SSE.
+
+> **Why `pointerdown` instead of `click`?** In very hot regions, a `click`
+> (which fires on button release) races with the next SSE swap. `pointerdown`
+> captures intent at first contact, before the DOM can churn.
+
+> Normal forms and `hx-post` remain the right choice outside hotspots.
+> Delegated commands are an escape hatch for regions where SSE replacement
+> outpaces human interaction speed.
+
+---
+
+## 30. Consuming structured control events in app code
+
+Tavern's control events carry structured JSON payloads. While
+[tavern-js](https://github.com/catgoose/tavern-js) handles common UX
+patterns declaratively, your app code can listen for the same DOM events
+to implement custom recovery logic.
+
+For the full control event reference and delivery scenarios, see
+[Delivery Observability](docs/delivery-observability.md).
+
+### Listen for control events
+
+```html
+<div id="dashboard"
+     sse-connect="/sse/dashboard"
+     sse-swap="update"
+     tavern-stale-class="opacity-50"
+     tavern-live-class="opacity-100">
+
+  <span tavern-status-live>Live</span>
+  <span tavern-status-stale class="hidden">Data may be stale</span>
+  <span tavern-status-recovering class="hidden">Reconnecting...</span>
+</div>
+
+<script>
+const dash = document.getElementById("dashboard");
+
+// tavern:reconnected — check recovery quality
+dash.addEventListener("tavern:reconnected", () => {
+  // tavern-js restores the live state automatically.
+  // Use this hook for app-level side effects.
+  console.log("Dashboard reconnected");
+});
+
+// tavern:replay-gap — the replay log couldn't satisfy Last-Event-ID.
+// The region is stale until fresh data arrives.
+dash.addEventListener("tavern:stale", (e) => {
+  if (e.detail.reason === "replay-gap") {
+    showToast("Dashboard data may be incomplete. Refreshing...");
+    htmx.ajax("GET", "/partials/dashboard", { target: "#dashboard" });
+  }
+});
+
+// tavern:live — region is fully caught up again
+dash.addEventListener("tavern:live", () => {
+  clearToast();
+});
+</script>
+```
+
+### Listening for raw SSE control events (without tavern-js)
+
+If you use a raw `EventSource` without tavern-js, listen directly on the SSE
+event types to access the full structured payloads:
+
+```js
+const es = new EventSource("/sse/dashboard");
+
+es.addEventListener("tavern-reconnected", (e) => {
+  const { replayDelivered, replayDropped } = JSON.parse(e.data);
+  if (replayDropped > 0) {
+    showBanner(`Reconnected, but ${replayDropped} messages were lost`);
+  } else {
+    console.log(`Clean recovery: ${replayDelivered} messages replayed`);
+  }
+});
+
+es.addEventListener("tavern-replay-gap", (e) => {
+  const { lastEventId } = JSON.parse(e.data);
+  console.warn("Gap detected — last known ID:", lastEventId);
+  // Trigger a full page refresh or re-fetch the affected region.
+  location.reload();
+});
+
+es.addEventListener("tavern-replay-truncated", (e) => {
+  const { delivered, dropped } = JSON.parse(e.data);
+  showBanner(`Partial recovery: ${delivered} replayed, ${dropped} lost`);
+});
+
+es.addEventListener("tavern-topics-changed", (e) => {
+  const { action, topic, topics } = JSON.parse(e.data);
+  console.log(`Topic ${action}: ${topic}. Active topics:`, topics);
+});
+```
+
+> **tavern-js vs raw SSE:** tavern-js translates SSE control events into
+> declarative class changes, status elements, and DOM events -- no custom
+> JavaScript needed for common patterns. Use the raw `EventSource` approach
+> only when you need full control over recovery logic.
+
+---
+
+## 31. App-shell with lifeline and scoped streams
+
+> **Contract reference:** See [docs/stream-contract.md](docs/stream-contract.md)
+> for the full stream contract and decision guidance table.
+
+A complete app-shell pattern with a persistent lifeline for control-plane
+events and scoped connections for high-bandwidth panel data. This recipe
+extends [Recipe 27](#recipe-27-app-shell-lifeline-with-scoped-panel-streams)
+with dynamic topic management, navigation handling, and client-side
+`tavern:topics-changed` integration.
+
+### Go server setup
+
+```go
+broker := tavern.NewSSEBroker(
+    tavern.WithBufferSize(32),
+    tavern.WithKeepalive(15*time.Second),
+)
+
+// Replay for panel topics.
+broker.SetReplayPolicy("dashboard-data", 50)
+broker.SetReplayGapPolicy("dashboard-data", tavern.GapFallbackToSnapshot, func() string {
+    return renderDashboard()
+})
+```
+
+### Lifeline handler (control + notifications)
+
+```go
+func lifelineHandler(broker *tavern.SSEBroker) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        sessionID := r.Header.Get("X-Session-ID")
+
+        ch, unsub := broker.SubscribeMultiWithMeta(
+            tavern.SubscribeMeta{ID: sessionID},
+            "notifications", "nav-state",
+        )
+        defer unsub()
+
+        w.Header().Set("Content-Type", "text/event-stream")
+        w.Header().Set("Cache-Control", "no-cache")
+        w.Header().Set("Connection", "keep-alive")
+        flusher, _ := w.(http.Flusher)
+
+        for {
+            select {
+            case msg, ok := <-ch:
+                if !ok {
+                    return
+                }
+                fmt.Fprintf(w, "event: %s\ndata: %s\n\n", msg.Topic, msg.Data)
+                flusher.Flush()
+            case <-r.Context().Done():
+                return
+            }
+        }
+    }
+}
+
+mux.Handle("/sse/app", lifelineHandler(broker))
+```
+
+### Navigation handler (AddTopic / RemoveTopic)
+
+```go
+func navigateHandler(broker *tavern.SSEBroker) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        sessionID := r.Header.Get("X-Session-ID")
+        panel := r.FormValue("panel")
+        action := r.FormValue("action") // "open" or "close"
+
+        topic := panel + "-data"
+        switch action {
+        case "open":
+            broker.AddTopic(sessionID, topic, true) // sends tavern-topics-changed
+        case "close":
+            broker.RemoveTopic(sessionID, topic, true)
+        }
+        w.WriteHeader(http.StatusNoContent)
+    }
+}
+
+mux.HandleFunc("POST /navigate", navigateHandler(broker))
+```
+
+### Scoped panel handler (high-bandwidth detail view)
+
+```go
+// Independent SSE connection for high-frequency data.
+mux.Handle("/sse/panel/analytics", broker.SSEHandler("analytics-data",
+    tavern.WithMaxConnectionDuration(10*time.Minute),
+))
+```
+
+### HTML (lifeline + scoped connections)
+
+```html
+<script src="https://cdn.jsdelivr.net/gh/catgoose/tavern-js@latest/dist/tavern.min.js"></script>
+
+<!-- Lifeline: persistent app-shell connection -->
+<div id="app-shell"
+     sse-connect="/sse/app"
+     tavern-reconnecting-class="opacity-50">
+
+  <nav id="nav-state" sse-swap="nav-state"></nav>
+  <div id="notifications" sse-swap="notifications"></div>
+  <div tavern-status class="hidden">Reconnecting app shell...</div>
+
+  <!-- Panel region: swap target created when topic is added -->
+  <main id="panel-content"></main>
+</div>
+
+<!-- Scoped panel: separate connection, independent backpressure -->
+<template id="analytics-panel-template">
+  <div sse-connect="/sse/panel/analytics"
+       sse-swap="analytics-data"
+       tavern-stale-class="opacity-50"
+       tavern-live-class="opacity-100">
+    <div id="analytics-chart"></div>
+    <span tavern-status-stale class="hidden">Analytics data stale</span>
+  </div>
+</template>
+```
+
+### Client-side topic change handling
+
+```js
+document.getElementById("app-shell").addEventListener("tavern:topics-changed", (e) => {
+  const { action, topic, topics } = e.detail;
+
+  if (action === "added") {
+    // Create a swap target for the new topic.
+    const target = document.createElement("div");
+    target.id = topic + "-region";
+    target.setAttribute("sse-swap", topic);
+    document.getElementById("panel-content").appendChild(target);
+  }
+
+  if (action === "removed") {
+    const el = document.getElementById(topic + "-region");
+    if (el) el.remove();
+  }
+
+  console.log("Active topics:", topics);
+});
+
+// Navigation: open/close panels via AddTopic/RemoveTopic
+function openPanel(panel) {
+  fetch("/navigate", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `panel=${panel}&action=open`,
+  });
+}
+
+function closePanel(panel) {
+  fetch("/navigate", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `panel=${panel}&action=close`,
+  });
+}
+```
+
+### What happens
+
+1. **Page loads** -- browser opens `/sse/app`. Lifeline delivers notifications
+   and nav-state.
+2. **User opens a panel** -- `openPanel("dashboard")` calls `AddTopic`. The
+   lifeline starts delivering `dashboard-data` events. A
+   `tavern-topics-changed` event fires and the client creates a swap target.
+3. **User opens analytics** -- a separate `sse-connect` opens
+   `/sse/panel/analytics` with its own buffer and backpressure.
+4. **Network drops** -- each stream reconnects independently. Lifeline replays
+   control events; panel stream replays data. No cross-contamination.
+5. **User closes dashboard** -- `closePanel("dashboard")` calls `RemoveTopic`.
+   The client removes the swap target.
+
+> **When to use AddTopic vs scoped connection:** Low-bandwidth topics that
+> share the lifeline's lifecycle belong on `AddTopic`. High-bandwidth topics
+> that need independent buffer sizing or per-user scoping belong on a separate
+> scoped connection. See [docs/stream-contract.md](docs/stream-contract.md)
+> for the full decision guidance.
+
+---
+
+## 32. Stale/degraded/live region handling
+
+The full lifecycle of a Tavern-connected region, from initial connection
+through disconnection, recovery, and potential staleness. This recipe shows
+how to wire up visual indicators and programmatic hooks for every state.
+
+### State machine
+
+```
+connecting → LIVE → (sseError) → DISCONNECTED → (sseOpen) → RECOVERING
+RECOVERING → (tavern-reconnected) → LIVE
+RECOVERING → (tavern-replay-gap) → STALE
+STALE → (tavern-reconnected with clean replay) → LIVE
+LIVE → (replay-gap without reload) → STALE
+```
+
+### HTML (visual state indicators)
+
+```html
+<script src="https://cdn.jsdelivr.net/gh/catgoose/tavern-js@latest/dist/tavern.min.js"></script>
+
+<div id="feed"
+     sse-connect="/sse/feed"
+     sse-swap="post"
+     tavern-stale-class="border-amber-500 bg-amber-50"
+     tavern-live-class="border-green-500 bg-white"
+     tavern-reconnecting-class="opacity-50 pointer-events-none"
+     class="border-2 rounded-lg p-4 transition-all duration-300">
+
+  <!-- State-specific status elements (tavern-js shows/hides automatically) -->
+  <div tavern-status-live class="hidden text-green-600 text-sm mb-2">
+    Live
+  </div>
+  <div tavern-status-stale class="hidden text-amber-600 text-sm mb-2">
+    Data may be incomplete — waiting for recovery
+  </div>
+  <div tavern-status-recovering class="hidden text-blue-600 text-sm mb-2">
+    <span class="animate-pulse">Reconnecting...</span>
+  </div>
+
+  <!-- Normal SSE content -->
+  <div id="feed-content"></div>
+</div>
+```
+
+### CSS
+
+```css
+/* Base transition for smooth state changes */
+#feed {
+  transition: border-color 0.3s, background-color 0.3s, opacity 0.3s;
+}
+
+/* tavern-js applies these classes automatically */
+.border-amber-500 { border-color: #f59e0b; }
+.bg-amber-50 { background-color: #fffbeb; }
+.border-green-500 { border-color: #22c55e; }
+.bg-white { background-color: #fff; }
+.opacity-50 { opacity: 0.5; }
+.pointer-events-none { pointer-events: none; }
+```
+
+### Go server (replay + gap fallback)
+
+```go
+broker.SetReplayPolicy("feed", 100)
+broker.SetReplayGapPolicy("feed", tavern.GapFallbackToSnapshot, func() string {
+    return renderFeed()
+})
+broker.SetBundleOnReconnect("feed", true)
+
+mux.Handle("/sse/feed", broker.SSEHandler("feed"))
+```
+
+### How the states interact
+
+**LIVE:** The region has an active SSE connection and is receiving fresh data.
+`tavern-live-class` is applied, `tavern-status-live` is visible. No action
+needed.
+
+**DISCONNECTED:** The SSE connection dropped (`sseError` fired).
+`tavern-reconnecting-class` is applied, `tavern-status-recovering` becomes
+visible. The browser's `EventSource` auto-reconnects. Interactive elements
+are dimmed and non-clickable.
+
+**RECOVERING:** The transport is open again (`sseOpen`) but the server hasn't
+confirmed recovery yet. The region stays in the reconnecting visual state
+until `tavern-reconnected` arrives.
+
+**LIVE (clean recovery):** The server replayed all missed messages and sent
+`tavern-reconnected` with `replayDropped: 0`. tavern-js removes reconnecting
+classes, applies `tavern-live-class`, and shows `tavern-status-live`. The
+region is fully caught up.
+
+**STALE (gap or truncation):** The server sent `tavern-replay-gap` (ID not in
+replay log) or `tavern-replay-truncated` (buffer too small). tavern-js applies
+`tavern-stale-class` and shows `tavern-status-stale`. The region has missed
+messages and may show incomplete data.
+
+**STALE to LIVE:** When fresh data eventually brings the region up to date
+(either through a gap fallback snapshot or normal publishes), the region
+transitions back to live. A subsequent `tavern-reconnected` with clean
+replay also clears stale state.
+
+### Programmatic hooks for custom recovery
+
+```js
+const feed = document.getElementById("feed");
+
+feed.addEventListener("tavern:stale", (e) => {
+  // e.detail.reason tells you why: "replay-gap" or "replay-truncated"
+  if (e.detail.reason === "replay-gap") {
+    // Gap fallback snapshot may have already been delivered by the server.
+    // Show a manual refresh button as a safety net.
+    showRefreshButton();
+  }
+});
+
+feed.addEventListener("tavern:live", () => {
+  hideRefreshButton();
+});
+
+feed.addEventListener("tavern:recovering", () => {
+  // Optimistic: disable interactions while recovery is in progress
+  disableFormInputs();
+});
+
+feed.addEventListener("tavern:reconnected", () => {
+  enableFormInputs();
+});
+```
+
+> **Gap vs truncation:** A gap means the `Last-Event-ID` wasn't in the
+> replay log at all -- unknown message loss. A truncation means the server
+> found the ID but the subscriber's buffer couldn't hold all replayed
+> messages -- known, bounded loss. Both result in stale state, but
+> truncation gives you exact `delivered`/`dropped` counts for the UI.
+
+> **Server-side configuration matters:** `SetReplayGapPolicy` with
+> `GapFallbackToSnapshot` delivers a fresh snapshot on gap, which often
+> brings the region back to a usable state immediately. Without a fallback
+> policy, the region stays stale until normal publishes refresh it.
