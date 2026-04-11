@@ -120,6 +120,23 @@ gap recovery, and topic change notifications — with zero custom JavaScript:
 See the [tavern-js README](https://github.com/catgoose/tavern-js) for full
 API documentation, data attributes, and examples.
 
+### Interaction Insulation
+
+In hot SSE regions where the DOM is replaced frequently, standard node-bound
+handlers (like `hx-post` or `onclick`) break because targets are replaced
+between events. `tavern-js` provides a stable interaction boundary on the
+`sse-connect` element through three layers:
+
+- **Intent capture** — delegated command handling that survives DOM replacement
+- **Interaction safety** — hot-region policies that pause swaps during user activity
+- **Delivery truth** — stale/live state indicators driven by Tavern's control events
+
+Tavern core provides the honest delivery side: replay, reconnect, and control
+events with structured metadata. `tavern-js` translates those into safe,
+insulated browser interactions. See the
+[tavern-js README](https://github.com/catgoose/tavern-js) for full details on
+interaction insulation features.
+
 ### Commands from Hot DOM Regions
 
 Some Tavern-driven interfaces update so quickly that interactive elements
