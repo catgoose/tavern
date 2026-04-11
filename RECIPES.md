@@ -1952,6 +1952,10 @@ server-side throttling.
 
 ## 29. Interaction insulation for hot-region commands
 
+> _Hypertext is the simultaneous presentation of information and controls such that the information BECOMES THE AFFORDANCE through which choices are obtained and actions are selected._
+>
+> — The Wisdom of the Uniform Interface
+
 When the DOM inside an SSE-swapped region is replaced faster than the user can
 click, node-bound handlers (`hx-post`, `onclick`) break because the target node
 is gone before the browser dispatches the event. Delegated commands solve this
@@ -2040,6 +2044,10 @@ mux.HandleFunc("POST /tasks/complete", completeTask(broker, db))
 ---
 
 ## 30. Consuming structured control events in app code
+
+> _A media type is a COVENANT. A sacred compact. It says: "if you receive this, here is how you shall process it." It defines the processing model, the structure, the controls, the semantics._
+>
+> — The Wisdom of the Uniform Interface
 
 Tavern's control events carry structured JSON payloads. While
 [tavern-js](https://github.com/catgoose/tavern-js) handles common UX
@@ -2132,6 +2140,16 @@ es.addEventListener("tavern-topics-changed", (e) => {
 ---
 
 ## 31. App-shell with lifeline and scoped streams
+
+> _Master say: "but how does the client know when state changes?"_
+>
+> _Grug say: "server tell it."_
+>
+> _Master say: "but--"_
+>
+> _Grug say: "server. tell. it."_
+>
+> — The Recorded Sayings of Layman Grug, [The Dothog Manifesto](https://github.com/catgoose/dothog/blob/main/MANIFESTO.md)
 
 > **Contract reference:** See [docs/stream-contract.md](docs/stream-contract.md)
 > for the full stream contract and decision guidance table.
@@ -2318,6 +2336,10 @@ function closePanel(panel) {
 ---
 
 ## 32. Stale/degraded/live region handling
+
+> _When what is possible changes, the representation changes, and the client adapts, because the client was never hardcoded to anything except "follow the links."_
+>
+> — The Wisdom of the Uniform Interface
 
 The full lifecycle of a Tavern-connected region, from initial connection
 through disconnection, recovery, and potential staleness. This recipe shows
