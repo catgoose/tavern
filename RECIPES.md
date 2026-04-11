@@ -1648,6 +1648,11 @@ event, giving you full control over recovery.
 
 ## Recipe 27: App-shell lifeline with scoped panel streams
 
+> **Contract reference:** See [docs/stream-contract.md](docs/stream-contract.md)
+> for the full lifeline/scoped stream contract -- guarantees, failure isolation,
+> reconnection semantics, and a decision guidance table for when to use each
+> approach.
+
 One persistent SSE connection for app-level events, with scoped panel streams
 that spin up only for high-bandwidth views. Two alternative architectures are
 shown below -- choose one, not both.
@@ -1666,6 +1671,10 @@ broker.SetReplayPolicy("analytics-data", 50)
 ```
 
 ### Approach A: Single connection with AddTopic / RemoveTopic
+
+Best for low-bandwidth panel topics that share the lifeline's lifecycle. See
+the [stream contract decision guidance](docs/stream-contract.md#decision-guidance)
+for when this is the right choice.
 
 One SSE connection carries everything. The server mutates topic membership
 when the user navigates. Requires `SubscribeMultiWithMeta` for a subscriber
@@ -1744,10 +1753,14 @@ func navigateHandler(broker *tavern.SSEBroker) http.HandlerFunc {
 
 ### Approach B: Separate scoped connections
 
+Best for high-bandwidth panel topics that need independent backpressure, buffer
+sizing, or eviction policies. See the
+[stream contract decision guidance](docs/stream-contract.md#decision-guidance)
+for when this is the right choice.
+
 The lifeline uses a standard handler for control-plane topics. Each panel opens
-its own SSE connection. Use this when panels need independent backpressure,
-buffer sizing, or eviction policies. Works well under HTTP/2 and HTTP/3 where
-additional streams are cheap.
+its own SSE connection. Works well under HTTP/2 and HTTP/3 where additional
+streams are cheap.
 
 #### Handlers
 
