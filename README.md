@@ -909,18 +909,26 @@ falls back to non-blocking behavior.
 
 ### App-shell lifeline architecture
 
+> **Full contract:** See [docs/stream-contract.md](docs/stream-contract.md) for
+> the complete lifeline/scoped stream contract, including guarantees, failure
+> isolation, reconnection behavior, and decision guidance.
+
 For apps that go beyond page-local SSE, Tavern supports a **lifeline + scoped
 streams** pattern: one warm connection stays open for the life of the app shell,
 while optional high-bandwidth streams spin up and down as the user navigates.
 
-**Lifeline (control plane)** -- always connected, low volume:
+**Lifeline (control plane)** -- always connected, low volume. Use this for
+topics that are relevant across the entire session:
 - notifications, presence, nav-state changes
 - invalidation signals ("data changed, refetch when ready")
 - small counters, theme broadcasts
+- any topic producing less than ~1 msg/s under load
 
-**Scoped streams (data plane)** -- active only for hot views:
+**Scoped streams (data plane)** -- active only for hot views. Use a separate
+connection when bandwidth or lifecycle demands it:
 - charts, feeds, detail panels via `SubscribeScoped` / `PublishTo`
 - high-frequency section-specific updates with per-user isolation
+- topics that need independent buffer sizing, eviction, or backpressure
 
 #### Handoff with AddTopic / RemoveTopic
 
@@ -971,9 +979,13 @@ drops and the browser reconnects.
 
 | Pattern | Problem |
 |---------|---------|
-| **Firehose** -- one connection subscribed to every topic | Buffer overflows, drops, backpressure issues |
-| **Reconnect-as-navigation** -- tear down SSE on every route change | Unnecessary latency, missed events during reconnect window |
+| **Firehose** -- one connection subscribed to every topic | High-bandwidth topics cause backpressure that stalls control events. Buffer overflows drop notifications. |
+| **Reconnect-as-navigation** -- tear down SSE on every route change | Unnecessary latency, missed events during reconnect window, no replay continuity |
 | **Duplicate DOM ownership** -- two streams updating the same element | Race conditions, flicker, unpredictable state |
+| **Lifeline as data pipe** -- routing high-bandwidth data through the lifeline | Backpressure from data topics delays control events |
+
+> See [docs/stream-contract.md](docs/stream-contract.md) for the full
+> anti-patterns list and decision guidance table.
 
 > **Rendering on hot pages:** Transport backpressure and browser render cadence
 > are separate concerns. If delivery metrics look healthy but the page stutters,

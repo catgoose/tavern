@@ -8,7 +8,10 @@ and how.
 
 These patterns build on the topic vocabulary defined in
 [Topic Semantics](topic-semantics.md) and the replay/snapshot strategies
-defined in [Snapshot and Replay Patterns](snapshot-replay.md).
+defined in [Snapshot and Replay Patterns](snapshot-replay.md). For the
+app-shell lifeline/scoped stream contract (when to multiplex on one
+connection vs open separate streams), see
+[Stream Contract](stream-contract.md).
 
 ---
 
@@ -183,6 +186,10 @@ Both fragments arrive in one SSE message and swap atomically.
 ---
 
 ## Dynamic topic changes
+
+> For the full `tavern-topics-changed` payload guarantees and guidance on
+> when to use `AddTopic`/`RemoveTopic` vs separate scoped connections, see
+> the [Stream Contract](stream-contract.md).
 
 `AddTopic` and `RemoveTopic` modify a subscriber's topic set without
 tearing down the connection. This requires `SubscribeMultiWithMeta` so
