@@ -21,6 +21,7 @@ type multiSub struct {
 	mu     sync.Mutex
 	topics map[string]chan string // topic → internal channel
 	unsubs map[string]func()     // topic → unsubscribe function
+	closed bool                  // set when unsubscribe starts; prevents new wg.Add after wg.Wait
 }
 
 // AddTopic adds a topic to an existing subscriber identified by subscriberID.
@@ -66,12 +67,20 @@ func (b *SSEBroker) AddTopic(subscriberID, topic string, sendControl bool) bool 
 		unsub()
 		return false
 	}
+	// If the subscriber is closing, bail out to avoid wg.Add after wg.Wait.
+	if ms.closed {
+		ms.mu.Unlock()
+		unsub()
+		return false
+	}
 	ms.topics[topic] = b.readToBidir(topic, ch)
 	ms.unsubs[topic] = unsub
+
+	// Start fan-in goroutine for the new topic. wg.Add must happen under
+	// ms.mu so it cannot race with the unsubscribe path's wg.Wait.
+	ms.wg.Add(1)
 	ms.mu.Unlock()
 
-	// Start fan-in goroutine for the new topic.
-	ms.wg.Add(1)
 	go func() {
 		defer ms.wg.Done()
 		for {
@@ -229,6 +238,12 @@ func (b *SSEBroker) SubscribeMultiWithMeta(meta SubscribeMeta, topics ...string)
 	var unsubOnce sync.Once
 	doUnsub := func() {
 		unsubOnce.Do(func() {
+			// Mark closed under ms.mu so concurrent AddTopic sees it before
+			// wg.Wait, preventing wg.Add after wg.Wait.
+			ms.mu.Lock()
+			ms.closed = true
+			ms.mu.Unlock()
+
 			close(done)
 			ms.mu.Lock()
 			for _, unsub := range ms.unsubs {
@@ -254,6 +269,28 @@ func (b *SSEBroker) SubscribeMultiWithMeta(meta SubscribeMeta, topics ...string)
 		ms.wg.Wait()
 		closeOut()
 	}
+}
+
+// SubscriberTopics returns the current set of topics for a managed
+// multi-subscriber identified by subscriberID. Returns nil if the
+// subscriber is not found. The returned slice is a snapshot safe to
+// read without synchronization.
+func (b *SSEBroker) SubscriberTopics(subscriberID string) []string {
+	b.mu.RLock()
+	ms := b.findMultiSub(subscriberID)
+	b.mu.RUnlock()
+
+	if ms == nil {
+		return nil
+	}
+
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	topics := make([]string, 0, len(ms.topics))
+	for t := range ms.topics {
+		topics = append(topics, t)
+	}
+	return topics
 }
 
 // findMultiSub returns the multiSub for the given subscriber ID.

@@ -364,3 +364,112 @@ func TestLifeline_ConcurrentHandoff(t *testing.T) {
 	// Test completing without panic is the assertion.
 	<-done
 }
+
+func TestLifeline_ScopedReconnectCycleDoesNotLeakToLifeline(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "app"}, "control", "notifications")
+	defer unsub()
+
+	// Simulate multiple scoped stream connect/disconnect cycles.
+	for i := 0; i < 10; i++ {
+		scopedCh, scopedUnsub := b.SubscribeScoped("dashboard", "user:1")
+		b.PublishTo("dashboard", "user:1", fmt.Sprintf("data-%d", i))
+		msg := awaitStringMsg(t, scopedCh, time.Second)
+		assert.Equal(t, fmt.Sprintf("data-%d", i), msg)
+		scopedUnsub()
+	}
+
+	// Lifeline is untouched by scoped churn.
+	b.Publish("control", "after-churn")
+	msg := awaitTopicMsg(t, ch, time.Second)
+	assert.Equal(t, "control", msg.Topic)
+	assert.Equal(t, "after-churn", msg.Data)
+
+	// Verify no stale messages leaked onto the lifeline.
+	assertNoTopicMsg(t, ch, 100*time.Millisecond)
+}
+
+func TestLifeline_TopicSetQueryDuringHandoff(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	_, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub1"}, "control")
+	defer unsub()
+
+	topics := b.SubscriberTopics("sub1")
+	require.Len(t, topics, 1)
+	assert.Contains(t, topics, "control")
+
+	b.AddTopic("sub1", "panel-a", false)
+	b.AddTopic("sub1", "panel-b", false)
+
+	topics = b.SubscriberTopics("sub1")
+	assert.Len(t, topics, 3)
+	assert.ElementsMatch(t, []string{"control", "panel-a", "panel-b"}, topics)
+
+	b.RemoveTopic("sub1", "panel-a", false)
+	topics = b.SubscriberTopics("sub1")
+	assert.Len(t, topics, 2)
+	assert.ElementsMatch(t, []string{"control", "panel-b"}, topics)
+}
+
+func TestLifeline_AddRemoveWithControlEvents_TopicListAccuracy(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub1"}, "control")
+	defer unsub()
+
+	// Add three topics with control events.
+	for _, topic := range []string{"panel-a", "panel-b", "panel-c"} {
+		b.AddTopic("sub1", topic, true)
+		ctrl := awaitTopicMsg(t, ch, time.Second)
+		assert.Equal(t, topicsChangedEvent, ctrl.Topic)
+		assert.Contains(t, ctrl.Data, `"action":"added"`)
+	}
+
+	// Remove middle topic.
+	b.RemoveTopic("sub1", "panel-b", true)
+	ctrl := awaitTopicMsg(t, ch, time.Second)
+	assert.Equal(t, topicsChangedEvent, ctrl.Topic)
+	assert.Contains(t, ctrl.Data, `"action":"removed"`)
+	assert.Contains(t, ctrl.Data, `"topic":"panel-b"`)
+
+	// Verify SubscriberTopics matches what the control events reported.
+	topics := b.SubscriberTopics("sub1")
+	assert.ElementsMatch(t, []string{"control", "panel-a", "panel-c"}, topics)
+}
+
+func TestLifeline_MultipleLifelinesIndependent(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch1, unsub1 := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "app1"}, "control")
+	defer unsub1()
+
+	ch2, unsub2 := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "app2"}, "control")
+	defer unsub2()
+
+	// Add different topics to each lifeline.
+	b.AddTopic("app1", "panel-a", false)
+	b.AddTopic("app2", "panel-b", false)
+
+	b.Publish("panel-a", "for-app1")
+	b.Publish("panel-b", "for-app2")
+
+	// app1 gets panel-a but not panel-b.
+	msg1 := awaitTopicMsg(t, ch1, time.Second)
+	assert.Equal(t, "panel-a", msg1.Topic)
+	assert.Equal(t, "for-app1", msg1.Data)
+
+	// app2 gets panel-b but not panel-a.
+	msg2 := awaitTopicMsg(t, ch2, time.Second)
+	assert.Equal(t, "panel-b", msg2.Topic)
+	assert.Equal(t, "for-app2", msg2.Data)
+
+	// No cross-contamination.
+	assertNoTopicMsg(t, ch1, 50*time.Millisecond)
+	assertNoTopicMsg(t, ch2, 50*time.Millisecond)
+}
