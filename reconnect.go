@@ -72,16 +72,18 @@ func (b *SSEBroker) SetBundleOnReconnect(topic string, bundle bool) {
 }
 
 // reconnectedControlEvent returns the wire-format SSE control event that
-// notifies clients a reconnection was detected.
-func reconnectedControlEvent() string {
-	return NewSSEMessage("tavern-reconnected", "").String()
+// notifies clients a reconnection was detected. The payload includes replay
+// delivery statistics so the client knows how much catch-up occurred.
+func reconnectedControlEvent(replayDelivered, replayDropped int) string {
+	return NewSSEMessage("tavern-reconnected",
+		fmt.Sprintf(`{"replayDelivered":%d,"replayDropped":%d}`, replayDelivered, replayDropped)).String()
 }
 
 // replayTruncatedControlEvent returns an SSE control event indicating that
 // some replay messages were dropped due to subscriber buffer limits.
 func replayTruncatedControlEvent(delivered, dropped int) string {
 	return NewSSEMessage("tavern-replay-truncated",
-		fmt.Sprintf("delivered:%d dropped:%d", delivered, dropped)).String()
+		fmt.Sprintf(`{"delivered":%d,"dropped":%d}`, delivered, dropped)).String()
 }
 
 // buildReconnectInfo constructs a ReconnectInfo from the replay log state.

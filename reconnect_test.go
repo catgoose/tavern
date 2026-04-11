@@ -253,21 +253,22 @@ func TestReconnectedControlEvent(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// First message should be the reconnected control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("no control event received")
-	}
-
-	// Then the replayed message (with id field injected).
+	// First: the replayed message (with id field injected).
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "msg-2")
 		assert.Contains(t, msg, "id: 2")
 	case <-time.After(time.Second):
 		t.Fatal("no replay message received")
+	}
+
+	// Then: reconnected control event with replay stats.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+		assert.Contains(t, msg, `"replayDelivered":1`)
+	case <-time.After(time.Second):
+		t.Fatal("no control event received")
 	}
 }
 
@@ -285,21 +286,22 @@ func TestBundleOnReconnect(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// First: reconnected control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("no control event")
-	}
-
-	// Second: bundled replay (msg-2 and msg-3 in a single string).
+	// First: bundled replay (msg-2 and msg-3 in a single string).
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "msg-2")
 		assert.Contains(t, msg, "msg-3")
 	case <-time.After(time.Second):
 		t.Fatal("no bundled replay received")
+	}
+
+	// Then: reconnected control event with replay stats.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+		assert.Contains(t, msg, `"replayDelivered":2`)
+	case <-time.After(time.Second):
+		t.Fatal("no control event")
 	}
 
 	// No more replay messages — they were bundled.
@@ -325,10 +327,7 @@ func TestBundleOnReconnect_Disabled(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// Skip control event.
-	<-ch
-
-	// Should receive individual messages (with id fields injected).
+	// Should receive individual replay messages first (with id fields injected).
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "msg-2")
@@ -342,6 +341,14 @@ func TestBundleOnReconnect_Disabled(t *testing.T) {
 		assert.Contains(t, msg, "id: 3")
 	case <-time.After(time.Second):
 		t.Fatal("no second replay")
+	}
+
+	// Then reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("no control event")
 	}
 }
 
@@ -602,9 +609,10 @@ func TestBundleOnReconnect_ClearedByClearReplay(t *testing.T) {
 }
 
 func TestReconnectedControlEvent_Format(t *testing.T) {
-	msg := reconnectedControlEvent()
+	msg := reconnectedControlEvent(5, 2)
 	assert.Contains(t, msg, "event: tavern-reconnected")
-	assert.Contains(t, msg, "data: ")
+	assert.Contains(t, msg, `"replayDelivered":5`)
+	assert.Contains(t, msg, `"replayDropped":2`)
 	assert.True(t, strings.HasSuffix(msg, "\n\n"), "SSE message must end with double newline")
 }
 
@@ -652,16 +660,21 @@ func TestBundleOnReconnect_SingleMessage(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// Skip control event.
-	<-ch
-
-	// Single bundled message containing only msg-2 (with id field).
+	// Single bundled replay message containing only msg-2 (with id field).
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "msg-2")
 		assert.Contains(t, msg, "id: 2")
 	case <-time.After(time.Second):
 		t.Fatal("no bundled replay received")
+	}
+
+	// Then reconnected control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("no control event")
 	}
 }
 
@@ -808,7 +821,8 @@ func TestBundleOnReconnect_TruncationAccounting(t *testing.T) {
 func TestReplayTruncatedControlEvent_Format(t *testing.T) {
 	msg := replayTruncatedControlEvent(5, 3)
 	assert.Contains(t, msg, "event: tavern-replay-truncated")
-	assert.Contains(t, msg, "delivered:5 dropped:3")
+	assert.Contains(t, msg, `"delivered":5`)
+	assert.Contains(t, msg, `"dropped":3`)
 	assert.True(t, strings.HasSuffix(msg, "\n\n"), "SSE message must end with double newline")
 }
 

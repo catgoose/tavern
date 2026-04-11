@@ -283,15 +283,6 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		replayMsgs = filtered
 	}
 
-	// Send reconnected control event when Last-Event-ID is present.
-	if isReconnect {
-		controlMsg := reconnectedControlEvent()
-		select {
-		case ch <- controlMsg:
-		default:
-		}
-	}
-
 	// Handle replay gap: fire callbacks, optionally send control event and snapshot.
 	if gapDetected {
 		// Fire registered gap callbacks regardless of strategy.
@@ -344,6 +335,13 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 	if isReconnect {
 		reconnectInfo.ReplayDelivered = replayDelivered
 		reconnectInfo.ReplayDropped = replayDropped
+
+		// Send reconnected control event with replay stats.
+		select {
+		case ch <- reconnectedControlEvent(replayDelivered, replayDropped):
+		default:
+		}
+
 		for _, fn := range reconnectCallbacks {
 			go fn(reconnectInfo)
 		}

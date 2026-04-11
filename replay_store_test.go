@@ -212,14 +212,7 @@ func TestBrokerWithReplayStore_PublishWithID_SubscribeFromID(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "3")
 	defer unsub()
 
-	// Drain reconnected control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnected control event")
-	}
-
+	// Replay messages come first, then reconnected control event.
 	var got []string
 	for range 2 {
 		select {
@@ -234,6 +227,15 @@ func TestBrokerWithReplayStore_PublishWithID_SubscribeFromID(t *testing.T) {
 	assert.Contains(t, got[0], "id: 4")
 	assert.Contains(t, got[1], "msg-5")
 	assert.Contains(t, got[1], "id: 5")
+
+	// Reconnected control event with replay stats.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+		assert.Contains(t, msg, `"replayDelivered":2`)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
 }
 
 func TestBrokerWithReplayStore_GapDetection(t *testing.T) {
@@ -252,20 +254,20 @@ func TestBrokerWithReplayStore_GapDetection(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "unknown-id")
 	defer unsub()
 
-	// Reconnected control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("timed out")
-	}
-
-	// Gap control event.
+	// Gap control event comes first.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-replay-gap")
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for gap control event")
+	}
+
+	// Then reconnected control event with replay stats.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
 	}
 
 	// No replay messages.

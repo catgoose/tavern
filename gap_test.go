@@ -69,21 +69,21 @@ func TestSubscribeFromID_GapControlEvent(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// First: reconnected control event.
+	// First: gap control event.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-replay-gap")
+		assert.Contains(t, msg, `"lastEventId":"1"`)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for gap control event")
+	}
+
+	// Then: reconnected control event with replay stats.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-reconnected")
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for reconnected control event")
-	}
-
-	// Then: gap control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-replay-gap")
-		assert.Contains(t, msg, "data: 1")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for gap control event")
 	}
 }
 
@@ -104,15 +104,7 @@ func TestSubscribeFromID_GapFallbackToSnapshot(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// First: reconnected control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnected control event")
-	}
-
-	// Second: gap control event.
+	// First: gap control event.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-replay-gap")
@@ -120,12 +112,20 @@ func TestSubscribeFromID_GapFallbackToSnapshot(t *testing.T) {
 		t.Fatal("timed out waiting for gap control event")
 	}
 
-	// Third: snapshot.
+	// Second: snapshot.
 	select {
 	case msg := <-ch:
 		assert.Equal(t, snapshotData, msg)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for snapshot")
+	}
+
+	// Third: reconnected control event with replay stats.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
 	}
 
 	// No more buffered messages (no replay since ID was not found).
@@ -152,20 +152,20 @@ func TestSubscribeFromID_GapSnapshotEmpty(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// First: reconnected control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnected control event")
-	}
-
-	// Then: gap control event.
+	// First: gap control event.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-replay-gap")
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for gap control event")
+	}
+
+	// Then: reconnected control event with replay stats.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
 	}
 
 	select {
@@ -303,7 +303,7 @@ func TestSetReplayGapPolicy_ClosedBrokerNoop(t *testing.T) {
 func TestGapControlEventFormat(t *testing.T) {
 	msg := replayGapControlEvent("abc-123")
 	assert.True(t, strings.HasPrefix(msg, "event: tavern-replay-gap\n"))
-	assert.Contains(t, msg, "data: abc-123")
+	assert.Contains(t, msg, `"lastEventId":"abc-123"`)
 	assert.True(t, strings.HasSuffix(msg, "\n\n"), "SSE messages must end with double newline")
 }
 
@@ -393,20 +393,20 @@ func TestSetReplayGapPolicy_NilSnapshotFn(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// First: reconnected control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnected control event")
-	}
-
-	// Then: gap control event.
+	// First: gap control event.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-replay-gap")
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for gap control event")
+	}
+
+	// Then: reconnected control event with replay stats.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
 	}
 
 	select {

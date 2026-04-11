@@ -121,8 +121,8 @@ func TestSSEMessage_SingleLineData(t *testing.T) {
 }
 
 func TestIsControlEvent(t *testing.T) {
-	assert.True(t, isControlEvent("event: tavern-reconnected\ndata: \n\n"))
-	assert.True(t, isControlEvent("event: tavern-replay-gap\ndata: old-id\n\n"))
+	assert.True(t, isControlEvent("event: tavern-reconnected\ndata: {\"replayDelivered\":0,\"replayDropped\":0}\n\n"))
+	assert.True(t, isControlEvent("event: tavern-replay-gap\ndata: {\"lastEventId\":\"old-id\"}\n\n"))
 	assert.False(t, isControlEvent("event: metrics\ndata: cpu=42\n\n"))
 	assert.False(t, isControlEvent("just raw text"))
 	assert.False(t, isControlEvent(""))
@@ -156,7 +156,7 @@ func TestExtractSSEID(t *testing.T) {
 
 func TestWrapForGroup(t *testing.T) {
 	t.Run("control event passed through", func(t *testing.T) {
-		ctrl := "event: tavern-reconnected\ndata: \n\n"
+		ctrl := reconnectedControlEvent(0, 0)
 		got := wrapForGroup("metrics", ctrl)
 		assert.Equal(t, ctrl, got, "control events should pass through unchanged")
 	})
@@ -213,7 +213,7 @@ func TestWrapForGroup_KeepalivePassthrough(t *testing.T) {
 func TestIsSSEFormatted(t *testing.T) {
 	assert.True(t, isSSEFormatted("event: update\ndata: hello\n\n"))
 	assert.True(t, isSSEFormatted("data: hello\n\n"))
-	assert.True(t, isSSEFormatted("event: tavern-reconnected\ndata: \n\n"))
+	assert.True(t, isSSEFormatted(reconnectedControlEvent(0, 0)))
 	// id: and retry: alone are NOT considered pre-formatted SSE
 	assert.False(t, isSSEFormatted("id: 42\ndata: hello\n\n"))
 	assert.False(t, isSSEFormatted("retry: 3000\n\n"))
@@ -280,7 +280,7 @@ func TestWrapForGroup_PreformattedSSE(t *testing.T) {
 	})
 
 	t.Run("control event still passes through", func(t *testing.T) {
-		ctrl := "event: tavern-reconnected\ndata: \n\n"
+		ctrl := reconnectedControlEvent(0, 0)
 		got := wrapForGroup("metrics", ctrl)
 		assert.Equal(t, ctrl, got)
 	})
