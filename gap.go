@@ -1,5 +1,7 @@
 package tavern
 
+import "fmt"
+
 // GapStrategy determines how the broker responds when a subscriber reconnects
 // with a Last-Event-ID that is no longer in the replay log (i.e., the log has
 // rolled over and the requested ID is gone). Configure per-topic via
@@ -86,5 +88,6 @@ func (b *SSEBroker) SetReplayGapPolicy(topic string, strategy GapStrategy, snaps
 // replayGapControlEvent returns the wire-format SSE control event that
 // notifies clients a replay gap was detected.
 func replayGapControlEvent(lastEventID string) string {
-	return NewSSEMessage("tavern-replay-gap", lastEventID).String()
+	return NewSSEMessage("tavern-replay-gap",
+		fmt.Sprintf(`{"lastEventId":"%s"}`, lastEventID)).String()
 }

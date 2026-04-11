@@ -292,13 +292,7 @@ func TestPublishWithTTL_SubscribeFromID_FiltersExpired(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "1")
 	defer unsub()
 
-	// Drain the reconnected control event injected by the reconnection feature.
-	select {
-	case <-ch:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnect event")
-	}
-
+	// Replay message comes first (expired entry skipped).
 	var got []string
 	for range 1 {
 		select {
@@ -311,6 +305,13 @@ func TestPublishWithTTL_SubscribeFromID_FiltersExpired(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Contains(t, got[0], "msg-2")
 	assert.Contains(t, got[0], "id: 2")
+
+	// Drain the reconnected control event.
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnect event")
+	}
 
 	// No more messages.
 	select {

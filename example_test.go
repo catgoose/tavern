@@ -607,12 +607,12 @@ func ExampleSSEBroker_lifelineReplay() {
 	panelCh, panelUnsub := broker.SubscribeFromID("panel", "e1")
 	defer panelUnsub()
 
-	// Skip the reconnected control event.
-	<-panelCh
-
-	// Replayed message arrives.
+	// Replayed message arrives first.
 	replayed := <-panelCh
 	fmt.Println("replayed:", extractData(replayed))
+
+	// Skip the reconnected control event that follows replay.
+	<-panelCh
 
 	// Lifeline was never interrupted.
 	broker.Publish("control", "still-alive")

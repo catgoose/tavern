@@ -40,14 +40,7 @@ func TestSubscribeFromID_ReplaysAfterID(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "3")
 	defer unsub()
 
-	// First message is the reconnected control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnected control event")
-	}
-
+	// Replay messages come first, then reconnected control event.
 	var got []string
 	for range 2 {
 		select {
@@ -62,6 +55,16 @@ func TestSubscribeFromID_ReplaysAfterID(t *testing.T) {
 	assert.Contains(t, got[0], "id: 4")
 	assert.Contains(t, got[1], "msg-5")
 	assert.Contains(t, got[1], "id: 5")
+
+	// Reconnected control event with replay stats comes after replay.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+		assert.Contains(t, msg, `"replayDelivered":2`)
+		assert.Contains(t, msg, `"replayDropped":0`)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
 
 	// Verify no more replay messages are buffered.
 	select {
@@ -150,10 +153,11 @@ func TestSubscribeFromID_AllCaughtUp(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "3")
 	defer unsub()
 
-	// First message is the reconnected control event.
+	// Reconnected control event (no replay messages preceded it).
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-reconnected")
+		assert.Contains(t, msg, `"replayDelivered":0`)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for reconnected control event")
 	}
@@ -335,15 +339,7 @@ func TestPublishWithID_RoundTrip(t *testing.T) {
 	ch, unsub := b.SubscribeFromID("events", "evt-1")
 	defer unsub()
 
-	// Drain reconnected control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnected control event")
-	}
-
-	// Replayed messages should contain id fields.
+	// Replayed messages should contain id fields (come before reconnected event).
 	for _, expected := range []struct {
 		data string
 		id   string
@@ -358,5 +354,14 @@ func TestPublishWithID_RoundTrip(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("timed out waiting for replay of %s", expected.id)
 		}
+	}
+
+	// Reconnected control event with replay stats comes after replay.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+		assert.Contains(t, msg, `"replayDelivered":2`)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
 	}
 }

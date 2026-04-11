@@ -33,14 +33,6 @@ func TestSubscribeFromIDWith_FilterAppliesToReplayAndLive(t *testing.T) {
 	require.NotNil(t, ch)
 	defer unsub()
 
-	// First message must be the reconnect control event (always bypasses filter).
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnected control event")
-	}
-
 	// Replay messages 2..5, but only "keep-2" and "keep-4" should pass.
 	var replay []string
 	timeout := time.After(200 * time.Millisecond)
@@ -51,6 +43,14 @@ func TestSubscribeFromIDWith_FilterAppliesToReplayAndLive(t *testing.T) {
 		case <-timeout:
 			t.Fatalf("timed out waiting for filtered replay messages, got %v", replay)
 		}
+	}
+
+	// Reconnected control event comes after replay (always bypasses filter).
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
 	}
 	require.Len(t, replay, 2)
 	assert.Contains(t, replay[0], "keep-2")
@@ -220,16 +220,7 @@ func TestSubscribeFromIDWith_SnapshotSkippedOnResume(t *testing.T) {
 
 	assert.False(t, snapCalled, "snapshot fn must not be invoked on resume")
 
-	// First message must be the reconnect control event, not the snapshot.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-		assert.NotContains(t, msg, "should-not-be-delivered")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnected control event")
-	}
-
-	// Replay messages 2 and 3 should follow.
+	// Replay messages 2 and 3 come first.
 	var replay []string
 	for len(replay) < 2 {
 		select {
@@ -242,6 +233,15 @@ func TestSubscribeFromIDWith_SnapshotSkippedOnResume(t *testing.T) {
 	require.Len(t, replay, 2)
 	assert.Contains(t, replay[0], "msg-2")
 	assert.Contains(t, replay[1], "msg-3")
+
+	// Reconnected control event comes after replay (not the snapshot).
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+		assert.NotContains(t, msg, "should-not-be-delivered")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
+	}
 
 	// And nothing else.
 	select {
@@ -316,15 +316,7 @@ func TestSubscribeFromIDWith_GapFallbackStillWorks(t *testing.T) {
 
 	assert.False(t, userSnapCalled, "user snapshot must not fire on resume")
 
-	// First: reconnect control event.
-	select {
-	case msg := <-ch:
-		assert.Contains(t, msg, "event: tavern-reconnected")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reconnected control event")
-	}
-
-	// Second: gap control event.
+	// First: gap control event.
 	select {
 	case msg := <-ch:
 		assert.Contains(t, msg, "event: tavern-replay-gap")
@@ -332,12 +324,20 @@ func TestSubscribeFromIDWith_GapFallbackStillWorks(t *testing.T) {
 		t.Fatal("timed out waiting for gap control event")
 	}
 
-	// Third: gap-fallback snapshot.
+	// Second: gap-fallback snapshot.
 	select {
 	case msg := <-ch:
 		assert.Equal(t, "gap-fallback-snapshot", msg)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for gap-fallback snapshot")
+	}
+
+	// Third: reconnected control event with replay stats.
+	select {
+	case msg := <-ch:
+		assert.Contains(t, msg, "event: tavern-reconnected")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reconnected control event")
 	}
 }
 

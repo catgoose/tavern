@@ -281,15 +281,16 @@ func TestLifeline_ReplayOnPanelStreamReconnect(t *testing.T) {
 	require.NotNil(t, panelCh2)
 	defer panelUnsub2()
 
-	// First message is the tavern-reconnected control event -- drain it.
-	reconnectMsg := awaitStringMsg(t, panelCh2, time.Second)
-	assert.Contains(t, reconnectMsg, "tavern-reconnected")
-
-	// Assert next 3 messages are the replayed ones.
+	// First 3 messages are the replayed ones, then the reconnected control event.
 	for i := 6; i <= 8; i++ {
 		msg := awaitStringMsg(t, panelCh2, time.Second)
 		assert.Contains(t, msg, fmt.Sprintf("panel-%d", i))
 	}
+
+	// Then the tavern-reconnected control event with replay stats.
+	reconnectMsg := awaitStringMsg(t, panelCh2, time.Second)
+	assert.Contains(t, reconnectMsg, "tavern-reconnected")
+	assert.Contains(t, reconnectMsg, `"replayDelivered":3`)
 
 	// Meanwhile, lifeline is never interrupted.
 	b.Publish("control", "control-during-replay")
