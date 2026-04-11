@@ -528,3 +528,228 @@ func TestSubscribeMultiWithMeta_BrokerClose(t *testing.T) {
 	for range ch {
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SubscriberTopics — query current topic set
+// ---------------------------------------------------------------------------
+
+func TestSubscriberTopics_ReflectsCurrentState(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	_, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub1"}, "a", "b")
+	defer unsub()
+
+	topics := b.SubscriberTopics("sub1")
+	assert.Len(t, topics, 2)
+	assert.ElementsMatch(t, []string{"a", "b"}, topics)
+
+	b.AddTopic("sub1", "c", false)
+	topics = b.SubscriberTopics("sub1")
+	assert.Len(t, topics, 3)
+	assert.ElementsMatch(t, []string{"a", "b", "c"}, topics)
+
+	b.RemoveTopic("sub1", "a", false)
+	topics = b.SubscriberTopics("sub1")
+	assert.Len(t, topics, 2)
+	assert.ElementsMatch(t, []string{"b", "c"}, topics)
+}
+
+func TestSubscriberTopics_UnknownSubscriber(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	topics := b.SubscriberTopics("nonexistent")
+	assert.Nil(t, topics)
+}
+
+func TestSubscriberTopics_AfterUnsubscribe(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	_, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub1"}, "a")
+	unsub()
+
+	topics := b.SubscriberTopics("sub1")
+	assert.Nil(t, topics, "should return nil after unsubscribe deregisters the multi-sub")
+}
+
+// ---------------------------------------------------------------------------
+// AddTopic does NOT replay historical messages
+// ---------------------------------------------------------------------------
+
+func TestAddTopic_NoHistoricalReplay(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	b.SetReplayPolicy("hot-topic", 10)
+
+	// Publish messages BEFORE subscribing via AddTopic.
+	for i := 0; i < 5; i++ {
+		b.Publish("hot-topic", "pre-existing-"+strings.Repeat("x", i))
+	}
+
+	ch, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub1"}, "control")
+	defer unsub()
+
+	b.AddTopic("sub1", "hot-topic", false)
+
+	// Publish a new message after AddTopic.
+	b.Publish("hot-topic", "after-add")
+
+	msg := <-ch
+	assert.Equal(t, "hot-topic", msg.Topic)
+	assert.Equal(t, "after-add", msg.Data, "should only receive messages published after AddTopic, not historical replay")
+
+	// No more messages should arrive.
+	select {
+	case extra := <-ch:
+		t.Fatalf("unexpected extra message: %+v", extra)
+	case <-time.After(100 * time.Millisecond):
+		// Expected
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RemoveTopic while messages are in-flight
+// ---------------------------------------------------------------------------
+
+func TestRemoveTopic_InFlightMessages(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	ch, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub1"}, "keep", "remove-me")
+	defer unsub()
+
+	// Rapidly publish to the topic we're about to remove.
+	for i := 0; i < 10; i++ {
+		b.Publish("remove-me", "inflight-msg")
+	}
+
+	// Remove topic while messages may still be in the fan-in pipeline.
+	ok := b.RemoveTopic("sub1", "remove-me", false)
+	assert.True(t, ok)
+
+	// Publish to the kept topic to verify the subscriber is still alive.
+	b.Publish("keep", "still-alive")
+
+	// Drain all messages and verify we eventually get our "keep" message.
+	deadline := time.After(2 * time.Second)
+	gotKeep := false
+	for !gotKeep {
+		select {
+		case msg := <-ch:
+			if msg.Topic == "keep" && msg.Data == "still-alive" {
+				gotKeep = true
+			}
+			// Ignore any in-flight "remove-me" messages that arrived before cleanup.
+		case <-deadline:
+			t.Fatal("timed out waiting for 'keep' topic message after RemoveTopic")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unsubscribe while AddTopic goroutines may still be running
+// ---------------------------------------------------------------------------
+
+func TestUnsubscribe_WhileAddTopicInProgress(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	_, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub1"}, "base")
+
+	var wg sync.WaitGroup
+
+	// Spin up concurrent AddTopic calls.
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			b.AddTopic("sub1", "dyn-"+strings.Repeat("x", idx), false)
+		}(i)
+	}
+
+	// Immediately unsubscribe while AddTopic goroutines are likely in-flight.
+	unsub()
+
+	wg.Wait()
+	// Test passes if no panic, deadlock, or goroutine leak.
+}
+
+// ---------------------------------------------------------------------------
+// AddTopic/RemoveTopic after the subscriber has been unsubscribed
+// ---------------------------------------------------------------------------
+
+func TestAddTopic_AfterUnsubscribe(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	_, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub1"}, "a")
+	unsub()
+
+	ok := b.AddTopic("sub1", "b", false)
+	assert.False(t, ok, "AddTopic on unsubscribed subscriber should return false")
+}
+
+func TestRemoveTopic_AfterUnsubscribe(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	_, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub1"}, "a")
+	unsub()
+
+	ok := b.RemoveTopic("sub1", "a", false)
+	assert.False(t, ok, "RemoveTopic on unsubscribed subscriber should return false")
+}
+
+// ---------------------------------------------------------------------------
+// AddTopicForScope / RemoveTopicForScope during concurrent reconnects
+// ---------------------------------------------------------------------------
+
+func TestScopeOps_DuringConcurrentActivity(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+
+	// Create multiple subscribers with the same scope.
+	var unsubs []func()
+	for i := 0; i < 5; i++ {
+		_, unsub := b.SubscribeMultiWithMeta(SubscribeMeta{ID: "sub-" + strings.Repeat("x", i)}, "base")
+		b.mu.Lock()
+		for _, info := range b.subscriberMeta {
+			if info.ID == "sub-"+strings.Repeat("x", i) {
+				info.Scope = "team:42"
+			}
+		}
+		b.mu.Unlock()
+		unsubs = append(unsubs, unsub)
+	}
+	defer func() {
+		for _, u := range unsubs {
+			u()
+		}
+	}()
+
+	var wg sync.WaitGroup
+
+	// Concurrently add and remove topics for the scope while publishing.
+	for i := 0; i < 10; i++ {
+		wg.Add(3)
+		topic := "scope-topic-" + strings.Repeat("x", i%3)
+		go func() {
+			defer wg.Done()
+			b.AddTopicForScope("team:42", topic, false)
+		}()
+		go func() {
+			defer wg.Done()
+			b.RemoveTopicForScope("team:42", topic, false)
+		}()
+		go func() {
+			defer wg.Done()
+			b.Publish("base", "ping")
+		}()
+	}
+
+	wg.Wait()
+	// Test passes if no panics or deadlocks.
+}
