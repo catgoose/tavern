@@ -155,7 +155,8 @@ and `SetReplayGapPolicy` to define fallback behavior:
 - `GapSilent` -- no replay, subscriber receives only live messages.
   Backwards compatible but not honest.
 - `GapFallbackToSnapshot` -- call the snapshot function and deliver it
-  as the first message, preceded by a `tavern-replay-gap` control event.
+  as the first message, preceded by a `tavern-replay-gap` control event
+  carrying `{"lastEventId": "..."}` so the client knows which ID was lost.
   Honest.
 
 **Recommended fallbacks by topic category:**
@@ -196,6 +197,12 @@ broker.OnReconnect("collection/tasks", func(info tavern.ReconnectInfo) {
         "missed", info.MissedCount)
 })
 ```
+
+All reconnection control events (`tavern-reconnected`, `tavern-replay-gap`,
+`tavern-replay-truncated`) carry structured JSON payloads so the client can
+distinguish clean recovery from partial or failed recovery. See
+[Delivery Observability](delivery-observability.md) for the full control
+event reference and delivery scenarios.
 
 ---
 

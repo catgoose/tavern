@@ -48,6 +48,9 @@ on top of Tavern:
 - [Page-Level Multiplexing](docs/page-multiplexing.md) -- single-connection
   multi-topic pages. StaticGroup vs DynamicGroup vs SubscribeMulti. OOB
   fragment composition for multi-region updates.
+- [Delivery Observability](docs/delivery-observability.md) -- control events
+  clients receive during reconnection and subscription changes. Structured
+  JSON payloads, delivery scenarios, and how tavern-js consumes them.
 
 ---
 
@@ -101,7 +104,9 @@ go get github.com/catgoose/tavern/tavernotel   # OpenTelemetry export
 ## Client-Side Helpers
 
 Tavern emits control events (`tavern-reconnected`, `tavern-replay-gap`,
-`tavern-topics-changed`) over the SSE stream. The companion library
+`tavern-replay-truncated`, `tavern-topics-changed`) over the SSE stream with
+structured JSON payloads carrying delivery statistics, gap details, and
+subscription state. The companion library
 [tavern-js](https://github.com/catgoose/tavern-js) listens for these events
 and translates them into declarative UI behaviors — reconnection overlays,
 gap recovery, and topic change notifications — with zero custom JavaScript:
@@ -118,7 +123,9 @@ gap recovery, and topic change notifications — with zero custom JavaScript:
 ```
 
 See the [tavern-js README](https://github.com/catgoose/tavern-js) for full
-API documentation, data attributes, and examples.
+API documentation, data attributes, and examples. For the complete control
+event contract and delivery scenarios, see
+[Delivery Observability](docs/delivery-observability.md).
 
 ### Commands from Hot DOM Regions
 
