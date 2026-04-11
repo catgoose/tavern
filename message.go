@@ -61,6 +61,15 @@ func (m SSEMessage) WithRetry(ms int) SSEMessage {
 	return m
 }
 
+// backpressureControlEvent returns the wire-format SSE control event that
+// notifies a subscriber their backpressure tier has changed. The payload
+// includes the new tier, previous tier, and affected topic so the client
+// can adapt its UX (e.g., showing degradation indicators).
+func backpressureControlEvent(tier, previousTier, topic string) string {
+	return NewSSEMessage("tavern-backpressure",
+		fmt.Sprintf(`{"tier":%q,"previousTier":%q,"topic":%q}`, tier, previousTier, topic)).String()
+}
+
 // isControlEvent reports whether msg is a tavern control event (e.g.,
 // tavern-reconnected, tavern-replay-gap). Control events are already
 // fully-formatted SSE frames and must not be re-wrapped.

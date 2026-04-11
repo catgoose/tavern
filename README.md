@@ -104,7 +104,7 @@ go get github.com/catgoose/tavern/tavernotel   # OpenTelemetry export
 ## Client-Side Helpers
 
 Tavern emits control events (`tavern-reconnected`, `tavern-replay-gap`,
-`tavern-replay-truncated`, `tavern-topics-changed`) over the SSE stream with
+`tavern-replay-truncated`, `tavern-topics-changed`, `tavern-backpressure`) over the SSE stream with
 structured JSON payloads carrying delivery statistics, gap details, and
 subscription state. The companion library
 [tavern-js](https://github.com/catgoose/tavern-js) listens for these events
