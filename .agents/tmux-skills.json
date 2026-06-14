@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "roadmap": {
+    "directory": "plans",
+    "roadmap_glob": "roadmap-*.md",
+    "handoff_glob": "handoff-*.md",
+    "done_directory": "plans/done"
+  },
+  "qa": {
+    "directory": "plans/qa",
+    "artifact_glob": "qa-*.md",
+    "human_conduit": "simulated",
+    "harness": ""
+  },
+  "workflow": {
+    "commit_policy": "ask",
+    "tests": "optional",
+    "qa_frame": "manual",
+    "philosophy_check": "if_present",
+    "cleanup_check": "required"
+  },
+  "philosophy": {
+    "source": "docs/architecture/PHILOSOPHY.md",
+    "mode": "if_present",
+    "upstream_sources": [
+      {
+        "name": "dothog",
+        "url": "https://raw.githubusercontent.com/catgoose/dothog/main/PHILOSOPHY.md",
+        "target": "docs/architecture/PHILOSOPHY.md"
+      }
+    ]
+  },
+  "transport": {
+    "compact_policy": "never",
+    "compact_every_n": 3,
+    "compact_policy_handoff": "",
+    "compact_policy_review": "",
+    "compact_every_n_handoff": "",
+    "compact_every_n_review": "",
+    "compact_threshold_bytes": "",
+    "compact_threshold_bytes_handoff": "",
+    "compact_threshold_bytes_review": "",
+    "compact_before_handoff": false,
+    "compact_before_review": false,
+    "handoff_prefix": "",
+    "review_prefix": "",
+    "send_delay": "1.0",
+    "compact_settle_delay": "3.0"
+  },
+  "validation": {
+    "commands": []
+  }
+}

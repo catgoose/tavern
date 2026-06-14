@@ -117,6 +117,25 @@ dashboard) but the content is tenant-specific or user-specific. The topic
 name stays clean for metrics and logging. Replay and snapshot policies
 apply per scope automatically.
 
+**Scoped topic names** -- When you choose topic path scoping but want a flat,
+colon-delimited name instead of a slash hierarchy, [tavern.ScopedTopic]
+builds one from a base and ordered parts:
+
+```go
+tavern.ScopedTopic("sales-goals", "subdivision", subID)        // "sales-goals:subdivision:12"
+tavern.ScopedTopic("sales-goals", "subdivision", subID, "agent", agentID)
+tavern.ScopedTopic("theme", "session", sessionID)              // "theme:session:<id>"
+```
+
+It is naming-only glue: parts are joined verbatim with `:`, with no escaping
+or validation. Empty parts are preserved as empty segments rather than
+dropped, so a missing scope yields a distinct dead topic
+(`ScopedTopic("theme", "session", "")` is `theme:session:`) instead of
+silently collapsing onto a shorter, real topic. This separator (`:`) is
+deliberately distinct from the `/` used by glob-matched topic paths -- these
+names are flat identifiers, not hierarchies. Use it to keep scoped names
+consistent across an app; use plain `/` paths when you want glob composition.
+
 **When to choose which:**
 
 - If two users subscribing to the same topic should see the same content,
