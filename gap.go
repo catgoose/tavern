@@ -89,5 +89,5 @@ func (b *SSEBroker) SetReplayGapPolicy(topic string, strategy GapStrategy, snaps
 // notifies clients a replay gap was detected.
 func replayGapControlEvent(lastEventID string) string {
 	return NewSSEMessage("tavern-replay-gap",
-		fmt.Sprintf(`{"lastEventId":"%s"}`, lastEventID)).String()
+		fmt.Sprintf(`{"lastEventId":%q}`, lastEventID)).String()
 }
