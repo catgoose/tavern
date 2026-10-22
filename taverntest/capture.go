@@ -1,6 +1,7 @@
 package taverntest
 
 import (
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -83,56 +84,57 @@ func (c *Capture) waitFor(n int, timeout time.Duration) bool {
 	}
 }
 
+// waitForAll blocks until every expected message is collected or timeout
+// elapses, returning the expected messages still missing.
+func (c *Capture) waitForAll(expected []string, timeout time.Duration) []string {
+	deadline := time.After(timeout)
+	for {
+		missing := c.missing(expected)
+		if len(missing) == 0 {
+			return nil
+		}
+		select {
+		case <-deadline:
+			return missing
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func (c *Capture) missing(expected []string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var missing []string
+	for _, exp := range expected {
+		if !slices.Contains(c.msgs, exp) {
+			missing = append(missing, exp)
+		}
+	}
+	return missing
+}
+
+func (c *Capture) assertReceived(t testing.TB, timeout time.Duration, expected []string) {
+	t.Helper()
+	missing := c.waitForAll(expected, timeout)
+	if len(missing) == 0 {
+		return
+	}
+	got := c.Messages()
+	t.Fatalf("timed out after %v waiting for messages %q; collected %d messages: %q", timeout, missing, len(got), got)
+}
+
 // AssertReceived fails the test if the collected messages do not contain all
 // of the expected messages (in any order). It waits up to 1 second for
 // messages to arrive.
 func (c *Capture) AssertReceived(t testing.TB, expected ...string) {
 	t.Helper()
-	if !c.waitFor(len(expected), time.Second) {
-		c.mu.Lock()
-		got := len(c.msgs)
-		c.mu.Unlock()
-		t.Fatalf("timed out waiting for %d messages, got %d", len(expected), got)
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, exp := range expected {
-		found := false
-		for _, msg := range c.msgs {
-			if msg == exp {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("expected message %q not found in %d collected messages", exp, len(c.msgs))
-		}
-	}
+	c.assertReceived(t, time.Second, expected)
 }
 
 // AssertReceivedWithin is like [Capture.AssertReceived] but with a custom timeout.
 func (c *Capture) AssertReceivedWithin(t testing.TB, timeout time.Duration, expected ...string) {
 	t.Helper()
-	if !c.waitFor(len(expected), timeout) {
-		c.mu.Lock()
-		got := len(c.msgs)
-		c.mu.Unlock()
-		t.Fatalf("timed out after %v waiting for %d messages, got %d", timeout, len(expected), got)
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, exp := range expected {
-		found := false
-		for _, msg := range c.msgs {
-			if msg == exp {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("expected message %q not found in %d collected messages", exp, len(c.msgs))
-		}
-	}
+	c.assertReceived(t, timeout, expected)
 }
 
 // AssertReceivedExactly fails the test if the collected messages do not match
