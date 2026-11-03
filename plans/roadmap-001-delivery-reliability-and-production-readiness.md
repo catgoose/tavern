@@ -47,14 +47,15 @@ The existing commit_policy: ask is satisfied by the user's explicit commit/PR/me
   - Review: https://github.com/catgoose/tavern/pull/233 (merged).
     - Reviewed commit: `e78acc040dc194707519a5469730accaaff387db`
 
-- [ ] Pass 005: Reproducible CI, dependency updates, and releases.
+- [x] Pass 005: Reproducible CI, dependency updates, and releases.
   - Requirements: Dependency and Go baseline changes are reviewed and tested before reaching main. Exercise root and adapter modules against the local source; pin tooling and make supported Go versions explicit. Separate dependency maintenance from release decisions and keep release checks tied to the exact tested revision. Preserve practical release automation without silently raising consumer requirements or publishing unvalidated code.
   - Plan: .agents/.local/plans/handoff-011-reproducible-ci-and-reviewed-dependency-releases.md
-  - Review:
+  - Review: https://github.com/catgoose/tavern/pull/234 (merged).
+    - Reviewed commit: `427ae22cb21baf4c5836e319a0ab53254eb7c4f0`
 
 - [ ] Pass 006: Reference deployment and capacity validation.
   - Requirements: A runnable server-owned UI reference demonstrates snapshot, updates, distinct invalidations, loss/reconnect, canonical refetch, and shutdown. Test real HTTP streaming and a reproducible proxy deployment. Supply a repeatable load/capacity exercise covering fanout, payload sizes, retained bytes, slow consumers and reconnect bursts, with measured limits and assumptions instead of universal capacity claims. Reconcile #128 and #187 with delivered evidence; the user's current authorization includes building this example.
-  - Plan:
+  - Plan: .agents/.local/plans/handoff-012-reference-deployment-and-repeatable-capacity-validation.md
   - Review:
 
 ## Review Risks

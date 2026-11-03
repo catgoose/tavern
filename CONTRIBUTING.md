@@ -9,7 +9,10 @@
 - actionlint and shellcheck on the workflows and scripts, and the release
   script's dry-run tests.
 
-`make check-module MODULE=tavernprom` checks one module. Lint and actionlint
+`make check-module MODULE=tavernprom` checks one module. The examples under
+`examples/` belong to the root module, so these checks cover them.
+`make proxy-smoke` runs the task board behind nginx (Docker required; CI
+runs it on every pull request), and `make capacity` runs the load presets. Lint and actionlint
 run through `go run` at the versions pinned in the Makefile, so no separate
 install is needed; shellcheck must be on `PATH`.
 

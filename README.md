@@ -1490,6 +1490,14 @@ unordered), batch flush, scoped publish, and content-based dedup.
 
 ---
 
+## Examples
+
+- [Task board](examples/taskboard/README.md): a runnable HTMX reference with
+  live updates across windows, recovery from a slow connection, graceful
+  shutdown and a tested nginx configuration (`go run ./examples/taskboard`).
+- [Capacity exercise](examples/capacity/README.md): repeatable load scenarios
+  with measured results (`go run ./examples/capacity -preset all`).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks, the Go baseline,
