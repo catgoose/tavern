@@ -60,22 +60,20 @@ func WithReplayStoreErrorHandler(fn func(*ReplayStoreError)) BrokerOption {
 	}
 }
 
-// replayStoreFailed records a failed store operation and returns the error
-// reported for it. The caller must not hold b.mu.
-func (b *SSEBroker) replayStoreFailed(op ReplayStoreOp, topic string, err error) *ReplayStoreError {
-	rse := &ReplayStoreError{Op: op, Topic: topic, Err: err}
+// reportReplayStoreError records a failed store operation. The caller must
+// not hold b.mu.
+func (b *SSEBroker) reportReplayStoreError(rse *ReplayStoreError) {
 	b.replayStoreErrs.Add(1)
 	if b.logger != nil {
-		b.logger.Error("replay store failed", "op", op.String(), "topic", topic, "err", err)
+		b.logger.Error("replay store failed", "op", rse.Op.String(), "topic", rse.Topic, "err", rse.Err)
 	}
 	if b.onReplayStoreError != nil {
 		b.onReplayStoreError(rse)
 	}
-	return rse
 }
 
 func (b *SSEBroker) appendReplay(store ReplayStore, topic string, entry ReplayEntry) {
 	if err := store.Append(context.Background(), topic, entry); err != nil {
-		b.replayStoreFailed(ReplayOpAppend, topic, err)
+		b.reportReplayStoreError(&ReplayStoreError{Op: ReplayOpAppend, Topic: topic, Err: err})
 	}
 }

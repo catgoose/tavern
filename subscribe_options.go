@@ -1,6 +1,7 @@
 package tavern
 
 import (
+	"slices"
 	"sync"
 	"time"
 )
@@ -267,7 +268,7 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 		opts := innerOpts
 		if tracked {
 			in.status = NewSubscriptionStatus()
-			opts = append(innerOpts[:len(innerOpts):len(innerOpts)], SubWithStatus(in.status))
+			opts = slices.Concat(innerOpts, []SubscribeOption{SubWithStatus(in.status)})
 		}
 		ch, unsub := b.SubscribeWith(topic, opts...)
 		if ch == nil {

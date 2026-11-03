@@ -416,7 +416,8 @@ func (b *SSEBroker) subscribeLive(topic string, spec subSpec, withSnapshot bool)
 	if store != nil {
 		entries, err := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
 		if err != nil {
-			rse := b.replayStoreFailed(ReplayOpLatest, topic, err)
+			rse := &ReplayStoreError{Op: ReplayOpLatest, Topic: topic, Err: err}
+			b.reportReplayStoreError(rse)
 			if spec.terminateOnReplayError {
 				return b.failReplay(topic, j.ch, rse)
 			}
@@ -911,7 +912,7 @@ func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 		b.mu.Unlock()
 		if store != nil {
 			if err := store.DeleteTopic(context.Background(), topic); err != nil {
-				b.replayStoreFailed(ReplayOpDeleteTopic, topic, err)
+				b.reportReplayStoreError(&ReplayStoreError{Op: ReplayOpDeleteTopic, Topic: topic, Err: err})
 			}
 		}
 		return
@@ -928,7 +929,7 @@ func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 	b.mu.Unlock()
 	if store != nil {
 		if err := store.SetMaxEntries(context.Background(), topic, n); err != nil {
-			b.replayStoreFailed(ReplayOpSetMaxEntries, topic, err)
+			b.reportReplayStoreError(&ReplayStoreError{Op: ReplayOpSetMaxEntries, Topic: topic, Err: err})
 		}
 	}
 }
@@ -947,7 +948,7 @@ func (b *SSEBroker) ClearReplay(topic string) {
 	b.mu.Unlock()
 	if store != nil {
 		if err := store.DeleteTopic(context.Background(), topic); err != nil {
-			b.replayStoreFailed(ReplayOpDeleteTopic, topic, err)
+			b.reportReplayStoreError(&ReplayStoreError{Op: ReplayOpDeleteTopic, Topic: topic, Err: err})
 		}
 	}
 }

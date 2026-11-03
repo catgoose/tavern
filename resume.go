@@ -187,7 +187,8 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		if lastEventID == "" {
 			entries, err := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
 			if err != nil {
-				rse := b.replayStoreFailed(ReplayOpLatest, topic, err)
+				rse := &ReplayStoreError{Op: ReplayOpLatest, Topic: topic, Err: err}
+				b.reportReplayStoreError(rse)
 				if cfg.terminateOnReplayError {
 					return b.failReplay(topic, ch, rse)
 				}
@@ -205,7 +206,8 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 				// Partial entries and found are not trusted once the read
 				// failed, so a failure-aware resume never reports a gap or a
 				// successful reconnect for it.
-				rse := b.replayStoreFailed(ReplayOpAfterID, topic, err)
+				rse := &ReplayStoreError{Op: ReplayOpAfterID, Topic: topic, Err: err}
+				b.reportReplayStoreError(rse)
 				if cfg.terminateOnReplayError {
 					return b.failReplay(topic, ch, rse)
 				}
