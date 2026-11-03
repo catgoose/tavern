@@ -2,10 +2,8 @@ package tavern
 
 import (
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"sync"
-	"time"
 )
 
 // groupDef is a static topic group definition.
@@ -20,20 +18,16 @@ type dynamicGroupDef struct {
 
 // groupHandler serves a multiplexed SSE stream for a set of topics.
 type groupHandler struct {
-	broker          *SSEBroker
-	topics          []string
-	writer          SSEWriterFunc
-	maxConnDuration time.Duration
-	reconnectDelay  time.Duration
+	broker *SSEBroker
+	topics []string
+	handlerStream
 }
 
 // dynamicGroupHandler serves a multiplexed SSE stream for topics resolved per-request.
 type dynamicGroupHandler struct {
-	broker          *SSEBroker
-	fn              func(r *http.Request) []string
-	writer          SSEWriterFunc
-	maxConnDuration time.Duration
-	reconnectDelay  time.Duration
+	broker *SSEBroker
+	fn     func(r *http.Request) []string
+	handlerStream
 }
 
 // DefineGroup registers a named static topic group. The group can later be
@@ -62,25 +56,7 @@ func (b *SSEBroker) GroupHandler(name string, opts ...SSEHandlerOption) http.Han
 			http.Error(w, fmt.Sprintf("group %q not defined", name), http.StatusNotFound)
 		})
 	}
-	h := &groupHandler{
-		broker: b,
-		topics: g.topics,
-		writer: defaultSSEWriter,
-	}
-	for _, opt := range opts {
-		adapter := &sseHandler{}
-		opt(adapter)
-		if adapter.writer != nil {
-			h.writer = adapter.writer
-		}
-		if adapter.maxConnDuration > 0 {
-			h.maxConnDuration = adapter.maxConnDuration
-		}
-		if adapter.reconnectDelay > 0 {
-			h.reconnectDelay = adapter.reconnectDelay
-		}
-	}
-	return h
+	return &groupHandler{broker: b, topics: g.topics, handlerStream: handlerStreamFrom(opts)}
 }
 
 // DynamicGroup registers a named dynamic topic group. The provided function is
@@ -109,48 +85,32 @@ func (b *SSEBroker) DynamicGroupHandler(name string, opts ...SSEHandlerOption) h
 			http.Error(w, fmt.Sprintf("dynamic group %q not defined", name), http.StatusNotFound)
 		})
 	}
-	h := &dynamicGroupHandler{
-		broker: b,
-		fn:     g.fn,
-		writer: defaultSSEWriter,
-	}
-	for _, opt := range opts {
-		adapter := &sseHandler{}
-		opt(adapter)
-		if adapter.writer != nil {
-			h.writer = adapter.writer
-		}
-		if adapter.maxConnDuration > 0 {
-			h.maxConnDuration = adapter.maxConnDuration
-		}
-		if adapter.reconnectDelay > 0 {
-			h.reconnectDelay = adapter.reconnectDelay
-		}
-	}
-	return h
+	return &dynamicGroupHandler{broker: b, fn: g.fn, handlerStream: handlerStreamFrom(opts)}
 }
 
 // ServeHTTP handles an incoming SSE connection for the static topic group.
 func (h *groupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	serveGroupSSE(w, r, h.broker, h.topics, h.writer, h.maxConnDuration, h.reconnectDelay)
+	h.serveGroup(w, r, h.broker, h.topics)
 }
 
 // ServeHTTP handles an incoming SSE connection for the dynamic topic group,
 // resolving topics from the per-request function.
 func (h *dynamicGroupHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	topics := h.fn(r)
-	serveGroupSSE(w, r, h.broker, topics, h.writer, h.maxConnDuration, h.reconnectDelay)
+	h.serveGroup(w, r, h.broker, topics)
 }
 
-// serveGroupSSE is the shared streaming loop for static and dynamic group
+// serveGroup is the shared streaming loop for static and dynamic group
 // handlers. It subscribes to all topics via SubscribeMulti and writes each
 // message as an SSE event with the topic as the event type. When the request
 // includes a Last-Event-ID header, cached messages after that ID are replayed
 // for each topic before the live stream begins.
-func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, topics []string, writer SSEWriterFunc, maxConnDuration, reconnectDelay time.Duration) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+func (c *handlerStream) serveGroup(w http.ResponseWriter, r *http.Request, broker *SSEBroker, topics []string) {
+	fw := c.begin(broker, w)
+	if fw == nil {
+		return
+	}
+	defer fw.releaseOnCancel(r.Context())()
 
 	lastID := r.Header.Get("Last-Event-ID")
 
@@ -160,20 +120,19 @@ func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, to
 	if lastID != "" {
 		// When Last-Event-ID is present, use subscribeMultiFromID to replay
 		// only messages after the given ID from each topic's replay log.
-		ch, unsub = broker.subscribeMultiFromID(topics, lastID, writer, w)
-		if ch == nil {
-			return // writer error during replay
+		var err error
+		ch, unsub, err = broker.subscribeMultiFromID(topics, lastID, fw)
+		if err != nil {
+			c.report(broker, err)
+			return
 		}
 	} else {
 		ch, unsub = broker.SubscribeMulti(topics...)
 	}
 	defer unsub()
 
-	var maxDurC <-chan time.Time
-	if maxConnDuration > 0 {
-		actual := maxConnDuration + time.Duration(rand.Int64N(int64(maxConnDuration/10)))
-		maxDurC = time.After(actual)
-	}
+	maxDurC, stopMaxDur := c.maxDuration()
+	defer stopMaxDur()
 
 	for {
 		select {
@@ -181,14 +140,14 @@ func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, to
 			if !ok {
 				return // broker closed
 			}
-			sseMsg := wrapForGroup(msg.Topic, msg.Data)
-			if err := writer(w, sseMsg); err != nil {
-				return // client disconnected
+			if err := fw.frame(wrapForGroup(msg.Topic, msg.Data)); err != nil {
+				c.report(broker, err)
+				return
 			}
 		case <-r.Context().Done():
 			return // client disconnected
 		case <-maxDurC:
-			writeMaxDurationClose(w, reconnectDelay)
+			c.closeForMaxDuration(broker, fw)
 			return
 		}
 	}
@@ -196,10 +155,10 @@ func serveGroupSSE(w http.ResponseWriter, r *http.Request, broker *SSEBroker, to
 
 // subscribeMultiFromID subscribes to multiple topics using SubscribeFromID for
 // each topic (with the same lastEventID), then replays the missed messages
-// formatted as SSE events via the writer. It returns a merged channel and
-// unsubscribe function like SubscribeMulti. If a write error occurs during
-// replay, it returns nil for the channel.
-func (b *SSEBroker) subscribeMultiFromID(topics []string, lastEventID string, writer SSEWriterFunc, w http.ResponseWriter) (msgs <-chan TopicMessage, unsubscribe func()) {
+// formatted as SSE events through fw. It returns a merged channel and
+// unsubscribe function like SubscribeMulti. If a replay write fails, it
+// unsubscribes and returns the error.
+func (b *SSEBroker) subscribeMultiFromID(topics []string, lastEventID string, fw *frameWriter) (msgs <-chan TopicMessage, unsubscribe func(), err error) {
 	out := make(chan TopicMessage, b.bufferSize)
 	unsubs := make([]func(), 0, len(topics))
 	done := make(chan struct{})
@@ -225,14 +184,11 @@ func (b *SSEBroker) subscribeMultiFromID(topics []string, lastEventID string, wr
 				if !ok {
 					break drainTopic
 				}
-				sseMsg := wrapForGroup(topic, msg)
-				if err := writer(w, sseMsg); err != nil {
-					// Clean up on write error.
+				if err := fw.frame(wrapForGroup(topic, msg)); err != nil {
 					for _, unsub := range unsubs {
 						unsub()
 					}
-					close(out)
-					return nil, func() {}
+					return nil, nil, err
 				}
 			default:
 				break drainTopic
@@ -289,7 +245,7 @@ func (b *SSEBroker) subscribeMultiFromID(topics []string, lastEventID string, wr
 		doUnsub()
 		wg.Wait()
 		closeOut()
-	}
+	}, nil
 }
 
 // initGroupFields initializes the group-related maps on the broker.
