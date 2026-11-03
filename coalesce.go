@@ -46,7 +46,7 @@ func (b *SSEBroker) subscribeCoalescing(topic, scope string) (msgs <-chan string
 	j, closed := b.registerLocked(topic, subSpec{scope: scope, coalescing: cs})
 	b.mu.Unlock()
 	if j == nil {
-		return rejectedSubscription(closed)
+		return rejectedSubscription(closed, nil, topic)
 	}
 	b.finishJoin(topic, j)
 

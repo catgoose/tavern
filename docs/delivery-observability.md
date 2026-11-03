@@ -163,6 +163,90 @@ declarative attribute system.
 
 ---
 
+## Subscription termination
+
+Control events travel through the subscriber's queue, so they can be lost
+exactly when something goes wrong. To learn why a subscription ended, attach
+a `SubscriptionStatus` with `SubWithStatus` (supported by `SubscribeWith`,
+`SubscribeFromIDWith` and `SubscribeMultiWith`; `SubscribeGlobWith` panics).
+
+| Reason | Cause |
+|---|---|
+| `TerminationUnsubscribe` | The caller's unsubscribe function |
+| `TerminationDisconnect` | `Disconnect` |
+| `TerminationQueueLoss` | A `SubWithDisconnectOnLoss` subscription could not queue a live message, including a `PublishBlocking` timeout |
+| `TerminationEvicted` | Slow-subscriber eviction or the adaptive disconnect tier |
+| `TerminationBrokerClosed` | `Close`, or subscribing to a closed broker |
+| `TerminationReplayFailure` | A failed `ReplayStore` read with `SubWithTerminateOnReplayError`; `Err` is the `*ReplayStoreError` |
+| `TerminationRejected` | Admission control refused the subscription |
+
+Guarantees:
+
+- The first cause wins. Later unsubscribe, sibling cancellation or `Close`
+  never overwrites it.
+- The cause is recorded before the data channel closes, so code that sees the
+  channel close can read `Termination()` immediately. `Done()` closes at the
+  same moment.
+- The status does not depend on the queue. It is readable while the queue is
+  full, while the consumer is blocked elsewhere, and after the broker has
+  dropped the subscription. It holds one cause and no history.
+
+For a multi-topic subscription the status describes the aggregate. With
+`SubWithTerminateOnInnerClose` or `SubWithDisconnectOnLoss` it holds the
+cause and `Topic` of the first inner subscription to end, and cancelling the
+siblings does not replace it. Without those options the aggregate stays open
+until every inner subscription ends, and the status holds the cause of the
+last one. The cause is decided when the inner subscriptions end, not when
+the fan-in reads their channels. The aggregate's own unsubscribe records
+`TerminationUnsubscribe` with an empty topic only if no cause was recorded
+before it.
+
+After a loss or replay failure, refetch canonical state before
+resubscribing; queued messages that were readable before the close are not
+a complete history.
+
+---
+
+## Replay store failures
+
+Every failed `ReplayStore` operation (`Append`, `AfterID`, `Latest`,
+`DeleteTopic`, `SetMaxEntries`) is reported as a `*ReplayStoreError` carrying
+the operation, the topic and the store's error (`errors.Is` / `errors.As`
+work on it). Reports go to `WithReplayStoreErrorHandler`, to the logger when
+`WithLogger` is set, and to the `BrokerStats.ReplayStoreErrors` counter. The
+handler runs synchronously on the goroutine that called the store, outside
+broker locks, so it must return quickly.
+
+- **Writes.** `Append` runs before the live fan-out. A failed `Append` does
+  not stop that best-effort delivery attempt, but the message is not retained
+  for replay, and the failure says nothing about which subscribers or
+  browsers received it. Nothing is retried.
+- **Policy calls.** Failed `SetMaxEntries` and `DeleteTopic` calls from
+  `SetReplayPolicy` and `ClearReplay` are reported the same way.
+- **Reads, default.** The subscription continues and replays whatever
+  entries the store returned alongside the error (usually none). A failed
+  `AfterID` that reports `found=false` is handled like a Last-Event-ID that
+  was not found (gap policy and `tavern-replay-gap`); one that reports
+  `found=true` resumes with its entries and `tavern-reconnected`. Clients
+  cannot tell this from a genuine gap or a successful resume.
+- **Reads, with `SubWithTerminateOnReplayError`.** The subscription ends with
+  `TerminationReplayFailure`. No replay entries, gap event, gap snapshot,
+  `tavern-reconnected` event or reconnect callback is produced for the failed
+  read. A fresh-subscribe snapshot that was already queued stays readable
+  before the channel closes.
+
+---
+
+## Queued is not delivered
+
+Tavern's counters and statuses describe its own queues. A message counted as
+sent was queued for a subscriber; whether it was written to the connection
+depends on the HTTP writer, and whether the browser applied it is known only
+to the application. Use client acknowledgements or canonical refetch when
+that distinction matters.
+
+---
+
 ## Relationship to server-side observability
 
 The control events described here are the **client-visible** half of Tavern's

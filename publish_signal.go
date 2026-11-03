@@ -88,7 +88,7 @@ func (b *SSEBroker) publishBlocking(topic, scope, msg string, timeout time.Durat
 			if _, expired := b.sendBlocking(ch, msg, timeout); expired {
 				timedOut = true
 				if b.isLossAware(ch) {
-					b.evictSubscriber(topic, ch)
+					b.evictSubscriber(topic, ch, TerminationQueueLoss)
 				}
 			}
 		}()

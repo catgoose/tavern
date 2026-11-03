@@ -19,6 +19,10 @@ type subSpec struct {
 	rate       time.Duration // 0 = not rate-limited
 	lossAware  bool
 	coalescing *coalescingState
+	status     *SubscriptionStatus
+	// terminateOnReplayError ends the subscription with
+	// TerminationReplayFailure when a ReplayStore read fails.
+	terminateOnReplayError bool
 	// preload is queued before the channel becomes visible, so it is always
 	// the first message (snapshot-first delivery). Empty = nothing.
 	preload string
@@ -43,10 +47,12 @@ type left struct {
 // rejectedSubscription is returned when registration does not happen: a
 // closed channel and a no-op unsubscribe after Close, or nil, nil when
 // admission control rejects the subscriber.
-func rejectedSubscription(closed bool) (msgs <-chan string, unsubscribe func()) {
+func rejectedSubscription(closed bool, status *SubscriptionStatus, topic string) (msgs <-chan string, unsubscribe func()) {
 	if !closed {
+		status.finish(Termination{Reason: TerminationRejected, Topic: topic})
 		return nil, nil
 	}
+	status.finish(Termination{Reason: TerminationBrokerClosed, Topic: topic})
 	ch := make(chan string)
 	close(ch)
 	return ch, func() {}
@@ -64,7 +70,7 @@ func (b *SSEBroker) registerLocked(topic string, spec subSpec) (j *joined, close
 		return nil, false
 	}
 	ch := make(chan string, b.bufferSize)
-	g := &chanGuard{lossAware: spec.lossAware}
+	g := &chanGuard{lossAware: spec.lossAware, status: spec.status}
 	j = &joined{ch: ch}
 	if spec.coalescing != nil {
 		j.closing = g.signal()
@@ -144,7 +150,7 @@ func (b *SSEBroker) finishJoin(topic string, j *joined) {
 // removeLocked unregisters ch from topic, releases its delivery policy and
 // closes it. The caller holds b.mu and runs finishLeave after unlocking. A
 // subscriber that is already gone is left alone (removed is false).
-func (b *SSEBroker) removeLocked(topic string, ch chan string) left {
+func (b *SSEBroker) removeLocked(topic string, ch chan string, t Termination) left {
 	_, unscoped := b.topics[topic][ch]
 	_, scoped := b.scopedTopics[topic][ch]
 	if !unscoped && !scoped {
@@ -160,7 +166,7 @@ func (b *SSEBroker) removeLocked(topic string, ch chan string) left {
 	delete(b.filterPredicates, ch)
 	delete(b.coalescingChans, ch)
 	b.rateLimit.remove(ch)
-	b.closeChan(ch)
+	b.closeChan(ch, t)
 	if len(b.topics[topic])+len(b.scopedTopics[topic]) == 0 {
 		l.isLast = true
 		l.lastHooks = b.onLast[topic]
@@ -193,19 +199,26 @@ func (b *SSEBroker) finishLeave(topic string, ch chan string, l left) {
 	}
 }
 
-func (b *SSEBroker) removeSubscriber(topic string, ch chan string) bool {
+func (b *SSEBroker) removeSubscriber(topic string, ch chan string, t Termination) bool {
 	b.mu.Lock()
-	l := b.removeLocked(topic, ch)
+	l := b.removeLocked(topic, ch, t)
 	b.mu.Unlock()
 	b.finishLeave(topic, ch, l)
 	return l.removed
+}
+
+// failReplay ends a subscription whose replay read failed. The returned
+// channel is already closing; its unsubscribe is a no-op.
+func (b *SSEBroker) failReplay(topic string, ch chan string, rse *ReplayStoreError) (msgs <-chan string, unsubscribe func()) {
+	b.removeSubscriber(topic, ch, Termination{Reason: TerminationReplayFailure, Topic: topic, Err: rse})
+	return ch, b.unsubscriber(topic, ch)
 }
 
 // unsubscriber returns the unsubscribe function for a registered subscriber.
 // Calling it after any other removal path, or more than once, is a no-op.
 func (b *SSEBroker) unsubscriber(topic string, ch chan string) func() {
 	return func() {
-		if b.removeSubscriber(topic, ch) {
+		if b.removeSubscriber(topic, ch, Termination{Reason: TerminationUnsubscribe, Topic: topic}) {
 			b.publishConnectionEvent("unsubscribe", topic, -1)
 		}
 	}

@@ -1,7 +1,6 @@
 package tavern
 
 import (
-	"context"
 	"time"
 )
 
@@ -47,7 +46,7 @@ func (b *SSEBroker) PublishWithTTL(topic, msg string, ttl time.Duration, opts ..
 	b.mu.Unlock()
 
 	if store != nil {
-		_ = store.Append(context.Background(), topic, entry)
+		b.appendReplay(store, topic, entry)
 	}
 
 	b.ensureTTLSweeper()
@@ -93,7 +92,7 @@ func (b *SSEBroker) PublishToWithTTL(topic, scope, msg string, ttl time.Duration
 	b.mu.Unlock()
 
 	if store != nil {
-		_ = store.Append(context.Background(), topic, entry)
+		b.appendReplay(store, topic, entry)
 	}
 
 	b.ensureTTLSweeper()
@@ -136,7 +135,7 @@ func (b *SSEBroker) PublishIfChangedWithTTL(topic, msg string, ttl time.Duration
 	b.mu.Unlock()
 
 	if store != nil {
-		_ = store.Append(context.Background(), topic, entry)
+		b.appendReplay(store, topic, entry)
 	}
 
 	b.ensureTTLSweeper()

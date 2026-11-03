@@ -64,7 +64,7 @@ func (b *SSEBroker) PublishWithID(topic, id, msg string) {
 	b.mu.Unlock()
 
 	if store != nil {
-		_ = store.Append(context.Background(), topic, ReplayEntry{ID: id, Msg: msg, PublishedAt: time.Now()})
+		b.appendReplay(store, topic, ReplayEntry{ID: id, Msg: msg, PublishedAt: time.Now()})
 	}
 
 	wireMsg := injectSSEID(msg, id)
@@ -112,7 +112,7 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 	j, closed := b.registerLocked(topic, spec)
 	if j == nil {
 		b.mu.Unlock()
-		return rejectedSubscription(closed)
+		return rejectedSubscription(closed, spec.status, topic)
 	}
 	ch := j.ch
 
@@ -185,7 +185,14 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 	// When an external ReplayStore is configured, query it outside the lock.
 	if store != nil {
 		if lastEventID == "" {
-			entries, _ := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
+			entries, err := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
+			if err != nil {
+				rse := &ReplayStoreError{Op: ReplayOpLatest, Topic: topic, Err: err}
+				b.reportReplayStoreError(rse)
+				if cfg.terminateOnReplayError {
+					return b.failReplay(topic, ch, rse)
+				}
+			}
 			for _, e := range entries {
 				if e.ID != "" {
 					replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
@@ -194,7 +201,17 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 				}
 			}
 		} else {
-			entries, found, _ := store.AfterID(context.Background(), topic, lastEventID, 0)
+			entries, found, err := store.AfterID(context.Background(), topic, lastEventID, 0)
+			if err != nil {
+				// Partial entries and found are not trusted once the read
+				// failed, so a failure-aware resume never reports a gap or a
+				// successful reconnect for it.
+				rse := &ReplayStoreError{Op: ReplayOpAfterID, Topic: topic, Err: err}
+				b.reportReplayStoreError(rse)
+				if cfg.terminateOnReplayError {
+					return b.failReplay(topic, ch, rse)
+				}
+			}
 			if !found {
 				gapDetected = true
 				// Re-read gap callbacks under the lock.
@@ -311,6 +328,10 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 //     bounded by the buffer and reported through tavern-replay-truncated;
 //     it never terminates the subscription. Cannot be combined
 //     with [SubWithRate].
+//   - [SubWithTerminateOnReplayError]: a failed [ReplayStore] read ends the
+//     subscription with [TerminationReplayFailure] instead of being treated
+//     as an empty replay or a Last-Event-ID gap.
+//   - [SubWithStatus]: records the terminal cause.
 func (b *SSEBroker) SubscribeFromIDWith(topic, lastEventID string, opts ...SubscribeOption) (msgs <-chan string, unsubscribe func()) {
 	cfg := buildSubscribeConfig(opts)
 	cfg.rejectLossyCombinations()
