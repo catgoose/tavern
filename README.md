@@ -670,6 +670,11 @@ ch, unsub := broker.SubscribeWith("topic",
 defer unsub()
 ```
 
+For invalidation streams, `tavern.SubWithDisconnectOnLoss()` and
+`tavern.SubWithTerminateOnInnerClose()` select the loss-aware contract
+described in
+[Loss-aware invalidation subscriptions](#loss-aware-invalidation-subscriptions-subwithdisconnectonloss).
+
 The same pattern works for multi-topic and glob subscriptions:
 
 ```go
@@ -912,6 +917,64 @@ broker := tavern.NewSSEBroker(
     }),
 )
 ```
+
+### Loss-aware invalidation subscriptions (SubWithDisconnectOnLoss)
+
+Subscriptions are best-effort by default: a full queue drops the message and
+the subscription stays open. When SSE carries invalidations (notify, then
+`GET` the canonical HTML), a dropped key leaves a stale region that a later
+successful delivery cannot reveal. Opt in to make the first live loss close
+the subscription instead:
+
+```go
+func records(w http.ResponseWriter, r *http.Request) {
+    ch, unsub := broker.SubscribeMultiWith(
+        []string{"records:users", "records:groups"},
+        tavern.SubWithScope(userID),
+        tavern.SubWithDisconnectOnLoss(), // also terminates on any inner close
+    )
+    if ch == nil {
+        http.Error(w, "busy", http.StatusServiceUnavailable)
+        return
+    }
+    defer unsub()
+    _ = tavern.StreamSSE(r.Context(), w, ch, func(tm tavern.TopicMessage) string {
+        return tavern.NewSSEMessage(tm.Topic, tm.Data).String()
+    })
+}
+```
+
+When the channel closes, the response ends and `EventSource` reconnects. The
+application owns recovery: on (re)connect, fetch every projection the stream
+covers from its canonical endpoint, then apply live invalidations. Tavern
+reports delivery state only; it promises neither lossless nor exactly-once
+delivery.
+
+- The loss rule is per subscription and ignores `WithSlowSubscriberEviction`
+  thresholds. `WithDropOldest` does not rewrite this subscriber's queue,
+  adaptive backpressure tiers do not apply, and a `PublishBlocking` timeout
+  counts as a loss. Filtered and other-scope messages are not losses.
+- Closure can follow messages that were already queued. Live delivery is
+  covered; subscribe-time replay stays best-effort and is reported through
+  `tavern-replay-truncated`.
+- A handler blocked writing to a slow client sees the closure only after the
+  write returns, so pair it with write deadlines.
+- `SubWithRate` (latest-wins holding) is rejected with a panic, as is
+  `SubscribeGlobWith`. Queue memory stays bounded by the buffer size and
+  publishing stays non-blocking.
+
+`SubscribeMultiWith` keeps its default of staying open until every inner
+subscription ends. `SubWithTerminateOnInnerClose()` makes every topic required
+without the per-message loss rule (for example with broker-wide eviction): any
+inner closure cancels the others and closes the aggregate, even while it is
+full, and a topic refused at admission fails the whole call with `nil`
+channels. `SubscribeMulti` and `SubscribeMultiFromID` always use the default.
+
+Compared with coalescing: `SubscribeWithCoalescing` keeps only the latest
+message for the whole topic, so distinct keys replace one another. It suits an
+invalidation topic only when every surviving signal refreshes everything the
+topic represents. Disconnect-on-loss keeps distinct keys intact by refusing to
+continue after a loss, at the cost of a reconnect and full refetch.
 
 ### Backpressure signaling (OnPublishDrop / PublishBlocking)
 

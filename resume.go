@@ -115,7 +115,9 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		return nil, nil
 	}
 	ch := make(chan string, b.bufferSize)
-	b.chanGuards.Store(ch, &chanGuard{})
+	// Loss policy is attached before the channel is registered so the first
+	// concurrent publish already sees it.
+	b.chanGuards.Store(ch, &chanGuard{lossAware: cfg.disconnectOnLoss})
 
 	// Inject snapshot BEFORE registering so no live publish can race ahead.
 	// Only applies to fresh subscribes; resumes rely on replay instead.
@@ -291,17 +293,10 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		}
 		// For non-silent strategies, send control event and apply the strategy.
 		if gapStrategy != GapSilent {
-			controlMsg := replayGapControlEvent(lastEventID)
-			select {
-			case ch <- controlMsg:
-			default:
-			}
+			b.trySend(ch, replayGapControlEvent(lastEventID))
 			if gapStrategy == GapFallbackToSnapshot && gapSnapshotFn != nil {
 				if snap := gapSnapshotFn(); snap != "" {
-					select {
-					case ch <- snap:
-					default:
-					}
+					b.trySend(ch, snap)
 				}
 			}
 		}
@@ -314,18 +309,16 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		for _, msg := range replayMsgs {
 			bundled.WriteString(msg)
 		}
-		select {
-		case ch <- bundled.String():
+		if b.trySend(ch, bundled.String()) {
 			replayDelivered = len(replayMsgs)
-		default:
+		} else {
 			replayDropped = len(replayMsgs)
 		}
 	} else {
 		for _, msg := range replayMsgs {
-			select {
-			case ch <- msg:
+			if b.trySend(ch, msg) {
 				replayDelivered++
-			default:
+			} else {
 				replayDropped++
 			}
 		}
@@ -337,20 +330,14 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		reconnectInfo.ReplayDropped = replayDropped
 
 		// Send reconnected control event with replay stats.
-		select {
-		case ch <- reconnectedControlEvent(replayDelivered, replayDropped):
-		default:
-		}
+		b.trySend(ch, reconnectedControlEvent(replayDelivered, replayDropped))
 
 		for _, fn := range reconnectCallbacks {
 			go fn(reconnectInfo)
 		}
 		// Emit truncation control event when replay messages were dropped.
 		if replayDropped > 0 {
-			select {
-			case ch <- replayTruncatedControlEvent(replayDelivered, replayDropped):
-			default:
-			}
+			b.trySend(ch, replayTruncatedControlEvent(replayDelivered, replayDropped))
 		}
 	}
 
@@ -425,8 +412,13 @@ func (b *SSEBroker) makeSubscribeFromIDUnsubscribe(topic string, ch chan string,
 //     to unscoped subscribers, so a scoped resume subscriber will only receive
 //     live messages via scope-aware publish paths such as
 //     [SSEBroker.PublishTo].
+//   - [SubWithDisconnectOnLoss]: covers LIVE delivery only. Replay is
+//     bounded by the buffer and reported through tavern-replay-truncated;
+//     it never terminates the subscription. Cannot be combined
+//     with [SubWithRate].
 func (b *SSEBroker) SubscribeFromIDWith(topic, lastEventID string, opts ...SubscribeOption) (msgs <-chan string, unsubscribe func()) {
 	cfg := buildSubscribeConfig(opts)
+	cfg.rejectLossyCombinations()
 	ch, unsub := b.subscribeFromIDInternal(topic, lastEventID, cfg)
 	if ch == nil {
 		return nil, nil
