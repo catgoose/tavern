@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,10 @@ type deadlineWriter struct {
 	flushes   int
 	blocked   bool
 	flushErr  error
+	// deadlineFailFrom, when positive, makes that SetWriteDeadline call and
+	// every later one fail.
+	deadlineFailFrom int
+	calls            int
 
 	writing chan struct{} // receives once per write that blocks
 }
@@ -50,6 +55,10 @@ func (d *deadlineWriter) WriteHeader(int)     {}
 func (d *deadlineWriter) SetWriteDeadline(t time.Time) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.calls++
+	if d.deadlineFailFrom > 0 && d.calls >= d.deadlineFailFrom {
+		return errStoreDown
+	}
 	d.deadline = t
 	d.deadlines = append(d.deadlines, t)
 	close(d.changed)
@@ -316,7 +325,9 @@ func TestSSEHandlerCancelReleasesBlockedWrite(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancellation did not release the blocked write")
 	}
-	assert.ErrorIs(t, errs.only(t), os.ErrDeadlineExceeded)
+	errs.mu.Lock()
+	assert.Empty(t, errs.errs, "a write cut short by cancellation is not reported")
+	errs.mu.Unlock()
 	assert.False(t, b.HasSubscribers("t"))
 }
 
@@ -469,4 +480,187 @@ func TestSSEHandlerRealServerIdle(t *testing.T) {
 	}
 	assert.Equal(t, "data: two\n", line)
 	assert.False(t, errors.Is(err, os.ErrDeadlineExceeded))
+}
+
+// waitExpired blocks until w's deadline has been set to a time that passed.
+func (d *deadlineWriter) waitExpired() {
+	for {
+		d.mu.Lock()
+		deadline, changed := d.deadline, d.changed
+		d.mu.Unlock()
+		if !deadline.IsZero() && !deadline.After(time.Now()) {
+			return
+		}
+		<-changed
+	}
+}
+
+// finishWithin waits for a stream to return. On failure it expires the
+// writer's deadline so the stalled write, and the test, can end.
+func finishWithin(t *testing.T, w *deadlineWriter, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(2 * time.Second):
+		_ = w.SetWriteDeadline(time.Now())
+		<-done
+		t.Fatal("cancelled stream started or rearmed a blocked write")
+		return nil
+	}
+}
+
+func identity(s string) string { return s }
+
+// TestStreamSSECancellationIsNotRearmed cancels the request at each point a
+// frame write can be reached. The stream must end without starting a new
+// blocked write, setting a fresh deadline, or reporting an error.
+func TestStreamSSECancellationIsNotRearmed(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(ctx context.Context, cancel func(), w *deadlineWriter) error
+		body string
+	}{
+		{
+			name: "during snapshot",
+			run: func(ctx context.Context, cancel func(), w *deadlineWriter) error {
+				return StreamSSE(ctx, w, make(chan string), identity, WithStreamWriteTimeout(time.Hour),
+					WithStreamWriteErrors(), WithStreamSnapshot(func() string {
+						cancel()
+						w.waitExpired()
+						return "snap\n\n"
+					}))
+			},
+		},
+		{
+			name: "during encode",
+			run: func(ctx context.Context, cancel func(), w *deadlineWriter) error {
+				ch := make(chan string, 1)
+				ch <- "m"
+				return StreamSSE(ctx, w, ch, func(s string) string {
+					cancel()
+					w.waitExpired()
+					return s
+				}, WithStreamWriteTimeout(time.Hour), WithStreamWriteErrors())
+			},
+		},
+		{
+			name: "between deadline and write",
+			run: func(ctx context.Context, cancel func(), w *deadlineWriter) error {
+				ch := make(chan string, 1)
+				ch <- "m"
+				custom := func(rw http.ResponseWriter, msg string) error {
+					cancel()
+					w.waitExpired()
+					_, err := io.WriteString(rw, msg)
+					return err
+				}
+				return StreamSSE(ctx, w, ch, identity, WithStreamWriter(custom),
+					WithStreamWriteTimeout(time.Hour), WithStreamWriteErrors())
+			},
+		},
+		{
+			name: "after write before clear, with a buffered next frame",
+			run: func(ctx context.Context, cancel func(), w *deadlineWriter) error {
+				ch := make(chan string, 2)
+				ch <- "first"
+				ch <- "second"
+				custom := func(rw http.ResponseWriter, msg string) error {
+					w.mu.Lock()
+					w.blocked = false
+					w.mu.Unlock()
+					if _, err := io.WriteString(rw, msg); err != nil {
+						return err
+					}
+					w.mu.Lock()
+					w.blocked = true
+					w.mu.Unlock()
+					cancel()
+					w.waitExpired()
+					return nil
+				}
+				return StreamSSE(ctx, w, ch, identity, WithStreamWriter(custom),
+					WithStreamWriteTimeout(time.Hour), WithStreamWriteErrors())
+			},
+			body: "first",
+		},
+		{
+			name: "already cancelled",
+			run: func(ctx context.Context, cancel func(), w *deadlineWriter) error {
+				cancel()
+				return StreamSSE(ctx, w, make(chan string), identity, WithStreamWriteTimeout(time.Hour),
+					WithStreamWriteErrors(), WithStreamSnapshot(func() string { return "snap\n\n" }))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newDeadlineWriter()
+			w.blocked = true
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- tc.run(ctx, cancel, w) }()
+			require.NoError(t, finishWithin(t, w, done), "cancellation ends the stream quietly")
+			assert.Equal(t, tc.body, w.String())
+			if n := w.deadlineCount(); n > 0 {
+				last := w.lastDeadline()
+				assert.False(t, last.IsZero() || last.After(time.Now()),
+					"the cancellation deadline is never replaced or cleared")
+			}
+		})
+	}
+}
+
+func TestStreamSSECancelDeadlineFailureReported(t *testing.T) {
+	w := newDeadlineWriter()
+	w.deadlineFailFrom = 2 // the probe succeeds; expiring on cancel fails
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- StreamSSE(ctx, w, make(chan string), identity,
+			WithStreamWriteTimeout(time.Hour), WithStreamWriteErrors())
+	}()
+	cancel()
+	err := <-done
+	var we *WriteError
+	require.ErrorAs(t, err, &we)
+	assert.Equal(t, WriteOpDeadline, we.Op)
+	assert.ErrorIs(t, err, errStoreDown)
+}
+
+func TestHandlersSkipWritesAfterCancel(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+	b.SetReplayPolicy("a", 5)
+	b.PublishWithID("a", "1", "one")
+	b.PublishWithID("a", "2", "two")
+	b.DefineGroup("g", []string{"a"})
+	handlers := map[string]func(opts ...SSEHandlerOption) http.Handler{
+		"SSEHandler":   func(opts ...SSEHandlerOption) http.Handler { return b.SSEHandler("a", opts...) },
+		"GroupHandler": func(opts ...SSEHandlerOption) http.Handler { return b.GroupHandler("g", opts...) },
+	}
+	for name, newHandler := range handlers {
+		t.Run(name, func(t *testing.T) {
+			var errs writeErrors
+			h := newHandler(WithWriteTimeout(time.Hour), WithWriteErrorHandler(errs.record))
+			w := newDeadlineWriter()
+			w.blocked = true
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			req := httptest.NewRequest("GET", "/sse", http.NoBody).WithContext(ctx)
+			req.Header.Set("Last-Event-ID", "1") // replay is pending
+			done := make(chan error, 1)
+			go func() {
+				h.ServeHTTP(w, req)
+				done <- nil
+			}()
+			_ = finishWithin(t, w, done)
+			assert.Empty(t, w.String())
+			errs.mu.Lock()
+			assert.Empty(t, errs.errs)
+			errs.mu.Unlock()
+			assert.False(t, b.HasSubscribers("a"))
+		})
+	}
 }

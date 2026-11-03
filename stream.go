@@ -2,6 +2,7 @@ package tavern
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -66,8 +67,9 @@ func WithStreamWriteTimeout(d time.Duration) StreamSSEOption {
 }
 
 // WithStreamWriteErrors makes StreamSSE return the [WriteError] that ended
-// the stream instead of nil. Context cancellation and channel close still
-// return nil.
+// the stream instead of nil. Context cancellation (including a write it cuts
+// short) and channel close still return nil; a failure to expire the write
+// deadline on cancellation is returned.
 func WithStreamWriteErrors() StreamSSEOption {
 	return func(c *streamSSEConfig) {
 		c.returnErrors = true
@@ -113,7 +115,7 @@ func StreamSSE[T any](
 	ch <-chan T,
 	encode func(T) string,
 	opts ...StreamSSEOption,
-) error {
+) (err error) {
 	if !canFlush(w) {
 		return fmt.Errorf("tavern: StreamSSE requires http.ResponseWriter to implement http.Flusher")
 	}
@@ -129,10 +131,15 @@ func StreamSSE[T any](
 	if err := fw.prepare(); err != nil {
 		return err
 	}
-	defer fw.releaseOnCancel(ctx)()
-	writeFailed := func(err error) error {
-		if cfg.returnErrors {
-			return err
+	stopRelease := fw.releaseOnCancel(ctx)
+	defer func() {
+		if stopErr := stopRelease(); stopErr != nil && cfg.returnErrors && err == nil {
+			err = stopErr
+		}
+	}()
+	writeFailed := func(werr error) error {
+		if cfg.returnErrors && !errors.Is(werr, errWriteCanceled) {
+			return werr
 		}
 		return nil
 	}

@@ -53,8 +53,9 @@ func WithReconnectDelay(delay time.Duration) SSEHandlerOption {
 // [WriteError] whose cause matches [os.ErrDeadlineExceeded]. Each deadline
 // is cleared once its frame is written, so idle time between frames is not
 // limited, and while it is set it replaces the server's WriteTimeout for the
-// connection. Cancelling the request context also expires a pending
-// deadline, releasing a write blocked on a slow client.
+// connection. Cancelling the request context expires the deadline, which
+// releases a write blocked on a slow client, and no further frame is
+// written. A write cut short by cancellation is not reported as an error.
 //
 // Deadlines require a ResponseWriter that supports them through
 // [http.ResponseController], directly or via Unwrap. If it does not, the
@@ -144,8 +145,20 @@ func (c *handlerStream) begin(b *SSEBroker, w http.ResponseWriter) *frameWriter 
 	return fw
 }
 
+// stopRelease stops cancellation handling and reports a failure to expire
+// the write deadline on cancellation.
+func (c *handlerStream) stopRelease(b *SSEBroker, stop func() error) {
+	if err := stop(); err != nil {
+		c.report(b, err)
+	}
+}
+
 // report hands the error that ended a connection to the observer and logger.
+// Cancellation is not reported.
 func (c *handlerStream) report(b *SSEBroker, err error) {
+	if errors.Is(err, errWriteCanceled) {
+		return
+	}
 	var we *WriteError
 	if !errors.As(err, &we) {
 		we = &WriteError{Op: WriteOpWrite, Err: err}
@@ -198,7 +211,7 @@ func (h *sseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unsub()
-	defer fw.releaseOnCancel(r.Context())()
+	defer h.stopRelease(h.broker, fw.releaseOnCancel(r.Context()))
 
 	maxDurC, stopMaxDur := h.maxDuration()
 	defer stopMaxDur()

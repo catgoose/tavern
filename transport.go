@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -54,6 +56,10 @@ func (e *WriteError) Error() string {
 
 func (e *WriteError) Unwrap() error { return e.Err }
 
+// errWriteCanceled ends a protected stream whose request was cancelled. It
+// is never reported: cancellation is a normal way for a stream to end.
+var errWriteCanceled = errors.New("tavern: SSE stream canceled")
+
 // frameWriter performs every write of one SSE response: snapshot, live,
 // heartbeat, replay and closing frames. With a timeout, each write and flush
 // runs under its own write deadline, cleared again once the frame is out so
@@ -63,6 +69,15 @@ type frameWriter struct {
 	rc      *http.ResponseController
 	writer  SSEWriterFunc // nil = default write and flush
 	timeout time.Duration
+
+	// mu serializes every deadline change with cancellation. Once
+	// cancelled is set the deadline stays expired: no frame sets a new one
+	// or clears it, and no new protected write starts. mu is never held
+	// across a write or flush.
+	mu        sync.Mutex
+	ctx       context.Context
+	cancelled bool
+	cancelErr error // failure to expire the deadline on cancellation
 }
 
 func newFrameWriter(w http.ResponseWriter, writer SSEWriterFunc, timeout time.Duration) *frameWriter {
@@ -82,25 +97,69 @@ func (fw *frameWriter) prepare() error {
 }
 
 // releaseOnCancel makes cancellation of ctx expire the write deadline, which
-// unblocks a write stuck on a deadline-capable connection. The returned stop
-// function must be called before the handler returns. Without a timeout it
-// does nothing: writers that cannot take deadlines cannot be interrupted.
-func (fw *frameWriter) releaseOnCancel(ctx context.Context) (stop func()) {
+// unblocks a write stuck on a deadline-capable connection, and stops later
+// frames from writing. The returned stop function must be called before the
+// handler returns; it reports a failure to expire the deadline. Without a
+// timeout it does nothing: writers that cannot take deadlines cannot be
+// interrupted.
+func (fw *frameWriter) releaseOnCancel(ctx context.Context) (stop func() error) {
 	if fw.timeout <= 0 {
-		return func() {}
+		return func() error { return nil }
 	}
+	fw.mu.Lock()
+	fw.ctx = ctx
+	fw.mu.Unlock()
 	fired := make(chan struct{})
 	stopAfter := context.AfterFunc(ctx, func() {
 		defer close(fired)
-		_ = fw.rc.SetWriteDeadline(time.Now())
+		fw.cancel()
 	})
-	return func() {
+	return func() error {
 		// Wait for a running callback so it cannot touch the response after
 		// the handler returns.
 		if !stopAfter() {
 			<-fired
 		}
+		fw.mu.Lock()
+		defer fw.mu.Unlock()
+		if fw.cancelErr != nil {
+			return &WriteError{Op: WriteOpDeadline, Err: fw.cancelErr}
+		}
+		return nil
 	}
+}
+
+func (fw *frameWriter) cancel() {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	if fw.cancelled {
+		return
+	}
+	fw.cancelled = true
+	// A connection that is already closed has nothing left to release.
+	if err := fw.rc.SetWriteDeadline(time.Now()); err != nil && !errors.Is(err, net.ErrClosed) {
+		fw.cancelErr = err
+	}
+}
+
+// setDeadline changes the write deadline unless the stream was cancelled.
+// The caller must not hold fw.mu.
+func (fw *frameWriter) setDeadline(t time.Time) error {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	if fw.cancelled || fw.ctx != nil && fw.ctx.Err() != nil {
+		return errWriteCanceled
+	}
+	if err := fw.rc.SetWriteDeadline(t); err != nil {
+		return &WriteError{Op: WriteOpDeadline, Err: err}
+	}
+	return nil
+}
+
+func (fw *frameWriter) isCancelled() bool {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	return fw.cancelled
 }
 
 // frame writes msg with the configured writer.
@@ -138,16 +197,20 @@ func (fw *frameWriter) protect(write func() error) error {
 	if fw.timeout <= 0 {
 		return write()
 	}
-	if err := fw.rc.SetWriteDeadline(time.Now().Add(fw.timeout)); err != nil {
-		return &WriteError{Op: WriteOpDeadline, Err: err}
-	}
-	if err := write(); err != nil {
+	due := time.Now().Add(fw.timeout)
+	if err := fw.setDeadline(due); err != nil {
 		return err
 	}
-	if err := fw.rc.SetWriteDeadline(time.Time{}); err != nil {
-		return &WriteError{Op: WriteOpDeadline, Err: err}
+	if err := write(); err != nil {
+		// A write that fails before its own deadline after cancellation was
+		// cut short by it. net/http also cancels the request after a write
+		// fails, so a failure at or past the deadline stays a timeout.
+		if fw.isCancelled() && time.Now().Before(due) {
+			return errWriteCanceled
+		}
+		return err
 	}
-	return nil
+	return fw.setDeadline(time.Time{})
 }
 
 // canFlush reports whether w, or a writer it wraps through Unwrap, can flush.

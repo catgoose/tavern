@@ -116,7 +116,7 @@ so middleware that wraps the `ResponseWriter` must implement
 | `WithMaxConnectionDuration(d)` | Ends a stream after `d` plus up to 10% jitter, with a `retry:` hint | Rotates connections across deploys and load balancers; jitter spreads reconnects |
 | `WithReconnectDelay(d)` | The `retry:` value sent at max duration | Browser waits about this long before reconnecting |
 | `SetRetry` / `SetRetryAll` | Queues a `retry:` directive for live subscribers | Use before shutdown so clients back off |
-| Request context | Ends the stream; with `WithWriteTimeout` it also expires a pending write deadline | Only interrupts writes on deadline-capable writers |
+| Request context | Ends the stream; with `WithWriteTimeout` it also expires the write deadline and no further frame is written | Only interrupts writes on deadline-capable writers; a write it cuts short is not reported |
 
 A write that times out, a failed flush and a failed write all end the
 connection. The browser's `EventSource` reconnects and resumes with
@@ -160,7 +160,8 @@ message, `Publish` never blocks, and the drop is counted.
 
 | Data | Policy | Client recovery |
 |---|---|---|
-| Latest value matters, history does not (tickers, gauges) | `SubscribeWithCoalescing` or `SubWithRate` | None needed; the next value replaces the old one |
+| Latest value matters, history does not (tickers, gauges) | `SubscribeWithCoalescing` | None needed; the latest value is kept until the reader takes it |
+| Limit update rate per client | `SubWithRate` / `SubscribeWithRate` | A held value flushed into a full queue is dropped, so the last value can be lost; reconcile if it must be current |
 | A lost message means the view is wrong (invalidations) | `SubWithDisconnectOnLoss` | Stream ends; refetch canonical state, then resubscribe |
 | Small number of important events | `SetReplayPolicy` + `PublishWithID` | Resume with `Last-Event-ID`; refetch on gap |
 | Slow clients should not hold memory | `WithSlowSubscriberEviction` or `WithAdaptiveBackpressure` | Reconnect; refetch if history matters |
@@ -230,19 +231,26 @@ errors or termination reasons; record those from the handlers above.
 // 1. Tell connected browsers to wait before reconnecting.
 broker.SetRetryAll(5 * time.Second)
 
-// 2. Stop accepting new connections and wait for handlers to return.
-//    Closing the broker ends every stream: queued messages (including the
-//    retry directive) are written first if the client keeps up.
-srv.RegisterOnShutdown(broker.Close)
+// 2. Stop producers. Close waits for every RunPublisher function to
+//    return, so cancel the context they were started with first.
+stopPublishers()
+
+// 3. End every stream. Handlers write what is already queued (including
+//    the retry directive, if the client keeps up) and return.
+broker.Close()
+
+// 4. Stop accepting connections and wait for handlers to finish.
 ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 defer cancel()
 _ = srv.Shutdown(ctx)
 ```
 
-`broker.Close` waits for publishers started with `RunPublisher`, then closes
-every subscriber channel; handlers write what is already queued and return.
-A client that is not reading can hold its handler until `WithWriteTimeout`
-expires, which is another reason to set it.
+Call `broker.Close` yourself rather than through `srv.RegisterOnShutdown`:
+`Shutdown` starts those callbacks in their own goroutines and does not wait
+for them. Requests that arrive between `Close` and `Shutdown` get a stream
+that ends immediately, and `EventSource` retries. A client that is not
+reading can hold its handler until `WithWriteTimeout` expires, which is
+another reason to set it.
 
 ---
 

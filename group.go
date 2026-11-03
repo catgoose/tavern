@@ -110,7 +110,7 @@ func (c *handlerStream) serveGroup(w http.ResponseWriter, r *http.Request, broke
 	if fw == nil {
 		return
 	}
-	defer fw.releaseOnCancel(r.Context())()
+	defer c.stopRelease(broker, fw.releaseOnCancel(r.Context()))
 
 	lastID := r.Header.Get("Last-Event-ID")
 
