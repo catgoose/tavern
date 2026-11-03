@@ -52,8 +52,10 @@ func (e *ReplayStoreError) Unwrap() error { return e.Err }
 // also logged when [WithLogger] is set and counted in
 // [BrokerStats].ReplayStoreErrors.
 //
-// A failed Append does not undo live delivery: the message reached current
-// subscribers but was not retained for replay. The broker does not retry.
+// Append runs before the live fan-out. A failed Append does not stop that
+// best-effort delivery attempt, but the message is not retained for replay,
+// and the failure says nothing about which subscribers or browsers received
+// it. The broker does not retry.
 func WithReplayStoreErrorHandler(fn func(*ReplayStoreError)) BrokerOption {
 	return func(b *SSEBroker) {
 		b.onReplayStoreError = fn

@@ -1,9 +1,6 @@
 package tavern
 
-import (
-	"sync"
-	"sync/atomic"
-)
+import "sync"
 
 // TerminationReason says why a subscription ended.
 type TerminationReason uint8
@@ -74,12 +71,11 @@ type SubscriptionStatus struct {
 	attached bool
 	done     chan struct{}
 	end      Termination
-	endSeq   uint64 // orders ends across statuses; see lastEnded
+	// onEnd, set before the status is shared, receives the cause as soon as
+	// it is recorded. It can run under broker and channel locks, so it must
+	// only touch its own leaf state.
+	onEnd func(Termination)
 }
-
-// endCounter numbers terminations so lastEnded can tell which of several
-// subscriptions ended last.
-var endCounter atomic.Uint64
 
 // NewSubscriptionStatus returns a status for a single subscription.
 func NewSubscriptionStatus() *SubscriptionStatus {
@@ -116,26 +112,76 @@ func (s *SubscriptionStatus) finish(t Termination) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.end.Reason != TerminationNone {
+		s.mu.Unlock()
 		return
 	}
 	s.end = t
-	s.endSeq = endCounter.Add(1)
 	close(s.done)
+	onEnd := s.onEnd
+	s.mu.Unlock()
+	if onEnd != nil {
+		onEnd(t)
+	}
 }
 
-// lastEnded returns the termination of the status that ended last, or false
-// if none has ended.
-func lastEnded(statuses []*SubscriptionStatus) (Termination, bool) {
-	var last Termination
-	var lastSeq uint64
-	for _, s := range statuses {
-		s.mu.Lock()
-		if s.endSeq > lastSeq {
-			last, lastSeq = s.end, s.endSeq
-		}
-		s.mu.Unlock()
+// aggregateCause picks a multi-topic subscription's cause from its inner
+// subscriptions at the moment each one ends, so the choice follows the order
+// the inner subscriptions actually ended rather than when fan-in workers run.
+// A required aggregate takes the first inner cause; otherwise it takes the
+// cause of the inner subscription that ends last.
+type aggregateCause struct {
+	status   *SubscriptionStatus
+	required bool
+	mu       sync.Mutex
+	pending  int // inner subscriptions not yet ended, plus one until built
+	last     Termination
+}
+
+func newAggregateCause(status *SubscriptionStatus, required bool) *aggregateCause {
+	return &aggregateCause{status: status, required: required, pending: 1}
+}
+
+// track returns a status for one inner subscription that reports its end to
+// the aggregate.
+func (a *aggregateCause) track() *SubscriptionStatus {
+	a.mu.Lock()
+	a.pending++
+	a.mu.Unlock()
+	st := NewSubscriptionStatus()
+	st.onEnd = a.ended
+	return st
+}
+
+func (a *aggregateCause) ended(t Termination) {
+	if a.required {
+		a.status.finish(t)
+		return
 	}
-	return last, lastSeq > 0
+	a.mu.Lock()
+	a.last = t
+	a.pending--
+	allEnded := a.pending == 0
+	a.mu.Unlock()
+	if allEnded {
+		a.status.finish(t)
+	}
+}
+
+// built marks construction complete. An aggregate whose inner subscriptions
+// all ended during construction ends with the last of them, or as rejected
+// when none was created.
+func (a *aggregateCause) built() {
+	a.mu.Lock()
+	a.pending--
+	allEnded := a.pending == 0
+	last := a.last
+	a.mu.Unlock()
+	if !allEnded {
+		return
+	}
+	if last.Reason == TerminationNone {
+		last = Termination{Reason: TerminationRejected}
+	}
+	a.status.finish(last)
 }

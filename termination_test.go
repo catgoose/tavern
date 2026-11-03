@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -551,4 +552,124 @@ func TestReplayFailureEndsRequiredAggregate(t *testing.T) {
 	assert.ErrorIs(t, got.Err, errStoreDown)
 	drainMultiUntilClosed(t, out)
 	assert.False(t, b.HasSubscribers("a"), "the healthy sibling is cancelled")
+}
+
+// TestMultiCauseFollowsTerminationOrder ends inner subscriptions and then
+// tears the aggregate down before its fan-in workers can run. The aggregate
+// cause must follow the order in which the subscriptions ended.
+func TestMultiCauseFollowsTerminationOrder(t *testing.T) {
+	// A single processor keeps fan-in workers from running between the
+	// steps, so the cause cannot depend on when they run.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	meta := SubWithMeta(SubscribeMeta{ID: "s"})
+	required := SubWithTerminateOnInnerClose()
+	cases := []struct {
+		name string
+		opts []SubscribeOption
+		end  func(b *SSEBroker)
+		want Termination
+	}{
+		{
+			name: "required child before caller unsubscribe",
+			opts: []SubscribeOption{required, meta},
+			end:  func(b *SSEBroker) { b.Disconnect("b", "s") },
+			want: Termination{Reason: TerminationDisconnect, Topic: "b"},
+		},
+		{
+			name: "first of two required children",
+			opts: []SubscribeOption{required, meta},
+			end:  func(b *SSEBroker) { b.Disconnect("b", "s"); b.Disconnect("a", "s") },
+			want: Termination{Reason: TerminationDisconnect, Topic: "b"},
+		},
+		{
+			name: "required child before broker close",
+			opts: []SubscribeOption{required, meta},
+			end:  func(b *SSEBroker) { b.Disconnect("a", "s"); b.Close() },
+			want: Termination{Reason: TerminationDisconnect, Topic: "a"},
+		},
+		{
+			name: "default aggregate completed before caller unsubscribe",
+			opts: []SubscribeOption{meta},
+			end:  func(b *SSEBroker) { b.Disconnect("b", "s"); b.Disconnect("a", "s") },
+			want: Termination{Reason: TerminationDisconnect, Topic: "a"},
+		},
+		{
+			name: "default aggregate with an active child",
+			opts: []SubscribeOption{meta},
+			end:  func(b *SSEBroker) { b.Disconnect("a", "s") },
+			want: Termination{Reason: TerminationUnsubscribe},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for range 20 {
+				b := NewSSEBroker()
+				status := NewSubscriptionStatus()
+				out, unsub := b.SubscribeMultiWith([]string{"a", "b"}, append(tc.opts, SubWithStatus(status))...)
+				tc.end(b)
+				unsub()
+				unsub()
+				b.Close()
+				require.Equal(t, tc.want, waitTermination(t, status))
+				drainMultiUntilClosed(t, out)
+			}
+		})
+	}
+}
+
+// TestMultiConstructionFailureThenRejection fails one required topic's replay
+// while the aggregate is being built and then rejects the next topic. The
+// earlier failure stays the cause and the admitted topic is released.
+func TestMultiConstructionFailureThenRejection(t *testing.T) {
+	b, store, _ := newFaultyBroker(t, WithMaxSubscribersPerTopic(1))
+	store.onlyTopic = "a"
+	store.set(ReplayOpLatest, true)
+	_, unsubC := b.Subscribe("c")
+	defer unsubC()
+
+	status := NewSubscriptionStatus()
+	out, unsub := b.SubscribeMultiWith([]string{"a", "b", "c"}, SubWithTerminateOnInnerClose(),
+		SubWithTerminateOnReplayError(), SubWithStatus(status))
+	assert.Nil(t, out)
+	assert.Nil(t, unsub)
+	got := waitTermination(t, status)
+	assert.Equal(t, TerminationReplayFailure, got.Reason)
+	assert.Equal(t, "a", got.Topic)
+	assert.ErrorIs(t, got.Err, errStoreDown)
+	assert.False(t, b.HasSubscribers("a"))
+	assert.False(t, b.HasSubscribers("b"), "admitted topic is rolled back")
+}
+
+// TestMultiConcurrentTeardownSingleCause races an inner end, the caller's
+// unsubscribe and Close on a required aggregate.
+func TestMultiConcurrentTeardownSingleCause(t *testing.T) {
+	allowed := map[Termination]bool{
+		{Reason: TerminationDisconnect, Topic: "a"}:   true,
+		{Reason: TerminationUnsubscribe}:              true,
+		{Reason: TerminationBrokerClosed, Topic: "a"}: true,
+		{Reason: TerminationBrokerClosed, Topic: "b"}: true,
+	}
+	for range 50 {
+		b := NewSSEBroker()
+		status := NewSubscriptionStatus()
+		out, unsub := b.SubscribeMultiWith([]string{"a", "b"}, SubWithTerminateOnInnerClose(),
+			SubWithMeta(SubscribeMeta{ID: "s"}), SubWithStatus(status))
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for _, fn := range []func(){func() { b.Disconnect("a", "s") }, unsub, b.Close} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				fn()
+			}()
+		}
+		close(start)
+		wg.Wait()
+		got := waitTermination(t, status)
+		require.True(t, allowed[got], "%+v", got)
+		drainMultiUntilClosed(t, out)
+		unsub()
+		assert.Equal(t, got, status.Termination())
+	}
 }

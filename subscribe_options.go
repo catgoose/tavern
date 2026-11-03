@@ -148,7 +148,8 @@ func SubWithStatus(status *SubscriptionStatus) SubscribeOption {
 // [WithReplayStoreErrorHandler].
 //
 // Without this option a failed read is reported but the subscription
-// continues: Latest failures replay nothing and AfterID failures follow the
+// continues with whatever entries the store returned alongside the error
+// (usually none); an AfterID failure that reports found=false follows the
 // Last-Event-ID-not-found gap policy. Subscriptions that do not read the
 // store (filter or snapshot variants, or no ReplayStore) are unaffected.
 // [SSEBroker.SubscribeGlobWith] panics.
@@ -252,28 +253,34 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 		innerOpts = append(innerOpts, SubWithTerminateOnReplayError())
 	}
 	status := cfg.status
-	tracked := terminate || status != nil
+	// Inner subscriptions report their end to cause synchronously, so the
+	// aggregate's cause never waits for, or depends on, fan-in scheduling.
+	var cause *aggregateCause
+	if terminate || status != nil {
+		cause = newAggregateCause(status, terminate)
+	}
 
 	// Subscribe every topic before starting fan-in so the full unsubscribe
 	// set exists before any worker can trigger termination.
 	type inner struct {
 		topic  string
 		ch     <-chan string
-		status *SubscriptionStatus // nil unless tracked
+		status *SubscriptionStatus // nil unless cause is tracked
 	}
 	inners := make([]inner, 0, len(topics))
 	unsubs := make([]func(), 0, len(topics))
 	for _, topic := range topics {
 		in := inner{topic: topic}
 		opts := innerOpts
-		if tracked {
-			in.status = NewSubscriptionStatus()
+		if cause != nil {
+			in.status = cause.track()
 			opts = slices.Concat(innerOpts, []SubscribeOption{SubWithStatus(in.status)})
 		}
 		ch, unsub := b.SubscribeWith(topic, opts...)
 		if ch == nil {
 			if terminate {
-				status.finish(Termination{Reason: TerminationRejected, Topic: topic})
+				// The rejected topic's status already reported to cause,
+				// unless an earlier topic ended the aggregate first.
 				for _, u := range unsubs {
 					u()
 				}
@@ -285,11 +292,8 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 		inners = append(inners, in)
 		unsubs = append(unsubs, unsub)
 	}
-
-	innerEnded := func(in inner) {
-		if terminate {
-			status.finish(in.status.Termination())
-		}
+	if cause != nil {
+		cause.built()
 	}
 	// innerDone is nil (never ready) unless terminate.
 	innerDone := func(in inner) <-chan struct{} {
@@ -323,7 +327,6 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 				select {
 				case msg, ok := <-in.ch:
 					if !ok {
-						innerEnded(in)
 						if terminate {
 							doUnsub()
 						}
@@ -334,7 +337,6 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 					case <-innerDone(in):
 						// The inner subscription ended while the aggregate
 						// was full; terminate without waiting for a reader.
-						innerEnded(in)
 						doUnsub()
 						return
 					case <-done:
@@ -354,22 +356,6 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 
 	go func() {
 		wg.Wait()
-		if status == nil {
-			closeOut()
-			return
-		}
-		// Without terminate the aggregate ends with its last inner
-		// subscription.
-		innerStatuses := make([]*SubscriptionStatus, len(inners))
-		for i, in := range inners {
-			innerStatuses[i] = in.status
-		}
-		if t, ok := lastEnded(innerStatuses); ok {
-			status.finish(t)
-		} else {
-			// No inner subscription was admitted.
-			status.finish(Termination{Reason: TerminationRejected})
-		}
 		closeOut()
 	}()
 

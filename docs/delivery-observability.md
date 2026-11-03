@@ -193,11 +193,13 @@ Guarantees:
 
 For a multi-topic subscription the status describes the aggregate. With
 `SubWithTerminateOnInnerClose` or `SubWithDisconnectOnLoss` it holds the
-cause and `Topic` of the inner subscription that ended the aggregate, and
-cancelling the siblings does not replace it. Without those options the
-aggregate stays open until every inner subscription ends, and the status
-holds the cause of the last one. The aggregate's own unsubscribe records
-`TerminationUnsubscribe` with an empty topic.
+cause and `Topic` of the first inner subscription to end, and cancelling the
+siblings does not replace it. Without those options the aggregate stays open
+until every inner subscription ends, and the status holds the cause of the
+last one. The cause is decided when the inner subscriptions end, not when
+the fan-in reads their channels. The aggregate's own unsubscribe records
+`TerminationUnsubscribe` with an empty topic only if no cause was recorded
+before it.
 
 After a loss or replay failure, refetch canonical state before
 resubscribing; queued messages that were readable before the close are not
@@ -215,16 +217,18 @@ work on it). Reports go to `WithReplayStoreErrorHandler`, to the logger when
 handler runs synchronously on the goroutine that called the store, outside
 broker locks, so it must return quickly.
 
-- **Writes.** A failed `Append` does not undo live delivery: current
-  subscribers received the message, but it is not retained for replay.
-  Nothing is retried.
+- **Writes.** `Append` runs before the live fan-out. A failed `Append` does
+  not stop that best-effort delivery attempt, but the message is not retained
+  for replay, and the failure says nothing about which subscribers or
+  browsers received it. Nothing is retried.
 - **Policy calls.** Failed `SetMaxEntries` and `DeleteTopic` calls from
   `SetReplayPolicy` and `ClearReplay` are reported the same way.
-- **Reads, default.** The subscription continues. A failed `Latest` replays
-  nothing; a failed `AfterID` is handled like a Last-Event-ID that was not
-  found (gap policy and `tavern-replay-gap`), or delivers whatever entries the
-  store returned with `found=true`. Clients cannot tell this from a genuine
-  gap or a successful resume.
+- **Reads, default.** The subscription continues and replays whatever
+  entries the store returned alongside the error (usually none). A failed
+  `AfterID` that reports `found=false` is handled like a Last-Event-ID that
+  was not found (gap policy and `tavern-replay-gap`); one that reports
+  `found=true` resumes with its entries and `tavern-reconnected`. Clients
+  cannot tell this from a genuine gap or a successful resume.
 - **Reads, with `SubWithTerminateOnReplayError`.** The subscription ends with
   `TerminationReplayFailure`. No replay entries, gap event, gap snapshot,
   `tavern-reconnected` event or reconnect callback is produced for the failed
