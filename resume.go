@@ -3,7 +3,6 @@ package tavern
 import (
 	"context"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -93,8 +92,8 @@ func (b *SSEBroker) SubscribeFromID(topic, lastEventID string) (msgs <-chan stri
 // subscribeFromIDInternal is the shared implementation behind
 // [SSEBroker.SubscribeFromID] and [SSEBroker.SubscribeFromIDWith]. It handles
 // registration, replay, reconnect control events, gap fallback, and delivery
-// of replay messages. Rate limiting is applied by callers (never to replay
-// messages).
+// of replay messages. Replay and control events are written directly, so a
+// rate limit in cfg applies to live delivery only.
 func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subscribeConfig) (msgs <-chan string, unsubscribe func()) {
 	// Pre-compute the fresh-subscribe snapshot outside the lock to mirror
 	// SubscribeWith's atomic ordering.
@@ -103,70 +102,19 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		preSnap = cfg.snapshotFn()
 	}
 
+	// The loss policy, filter, metadata and rate limit are attached before
+	// the channel is registered so the first concurrent publish sees them.
+	// The snapshot is queued first; only fresh subscribes have one, resumes
+	// rely on replay instead.
+	spec := cfg.spec()
+	spec.preload = preSnap
 	b.mu.Lock()
-	if b.closed {
+	j, closed := b.registerLocked(topic, spec)
+	if j == nil {
 		b.mu.Unlock()
-		ch := make(chan string)
-		close(ch)
-		return ch, func() {}
+		return rejectedSubscription(closed)
 	}
-	if !b.admitSubscriber(topic) {
-		b.mu.Unlock()
-		return nil, nil
-	}
-	ch := make(chan string, b.bufferSize)
-	// Loss policy is attached before the channel is registered so the first
-	// concurrent publish already sees it.
-	b.chanGuards.Store(ch, &chanGuard{lossAware: cfg.disconnectOnLoss})
-
-	// Inject snapshot BEFORE registering so no live publish can race ahead.
-	// Only applies to fresh subscribes; resumes rely on replay instead.
-	if preSnap != "" {
-		select {
-		case ch <- preSnap:
-		default:
-		}
-	}
-
-	scoped := cfg.scope != ""
-	if scoped {
-		if b.scopedTopics[topic] == nil {
-			b.scopedTopics[topic] = make(map[chan string]scopedSub)
-		}
-		b.scopedTopics[topic][ch] = scopedSub{scope: cfg.scope}
-		b.subscriberMeta[ch] = &SubscriberInfo{Topic: topic, Scope: cfg.scope, ConnectedAt: time.Now()}
-	} else {
-		if b.topics[topic] == nil {
-			b.topics[topic] = make(map[chan string]struct{})
-		}
-		b.topics[topic][ch] = struct{}{}
-		b.subscriberMeta[ch] = &SubscriberInfo{Topic: topic, ConnectedAt: time.Now()}
-	}
-
-	if cfg.meta != nil {
-		if info := b.subscriberMeta[ch]; info != nil {
-			info.ID = cfg.meta.ID
-			info.Meta = cfg.meta.Meta
-		}
-	}
-
-	if cfg.filter != nil {
-		if b.filterPredicates == nil {
-			b.filterPredicates = make(map[chan string]FilterPredicate)
-		}
-		b.filterPredicates[ch] = cfg.filter
-	}
-
-	total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-	var firstHooks []func(string)
-	if total == 1 {
-		firstHooks = b.onFirst[topic]
-	}
-	if b.metrics != nil {
-		if total > b.metrics.peakSubs[topic] {
-			b.metrics.peakSubs[topic] = total
-		}
-	}
+	ch := j.ch
 
 	// Find messages after lastEventID, skipping expired TTL entries.
 	store := b.replayStore
@@ -231,22 +179,8 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		bundle = b.bundleOnReconnect[topic]
 	}
 
-	if b.evictThreshold > 0 {
-		b.dropCountsMu.Lock()
-		b.dropCounts[ch] = &atomic.Int64{}
-		b.dropCountsMu.Unlock()
-	}
-	delete(b.topicEmpty, topic)
-	hasBackend := b.backend != nil
 	b.mu.Unlock()
-
-	for _, fn := range firstHooks {
-		go fn(topic)
-	}
-	if hasBackend && total == 1 {
-		b.backendSubscribe(topic)
-	}
-	b.publishConnectionEvent("subscribe", topic, total)
+	b.finishJoin(topic, j)
 
 	// When an external ReplayStore is configured, query it outside the lock.
 	if store != nil {
@@ -345,54 +279,7 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		}
 	}
 
-	unsub := b.makeSubscribeFromIDUnsubscribe(topic, ch, scoped, hasBackend)
-	return ch, unsub
-}
-
-// makeSubscribeFromIDUnsubscribe builds an unsubscribe closure for
-// subscriptions created via [SSEBroker.subscribeFromIDInternal]. It cleans up
-// topic/scoped maps, subscriber metadata, filter predicates, and drop counts.
-func (b *SSEBroker) makeSubscribeFromIDUnsubscribe(topic string, ch chan string, scoped, hasBackend bool) func() {
-	return func() {
-		b.mu.Lock()
-		var lastHooks []func(string)
-		var removed, isLast bool
-		if scoped {
-			if _, ok := b.scopedTopics[topic][ch]; ok {
-				delete(b.scopedTopics[topic], ch)
-				removed = true
-			}
-		} else {
-			if _, ok := b.topics[topic][ch]; ok {
-				delete(b.topics[topic], ch)
-				removed = true
-			}
-		}
-		if removed {
-			delete(b.subscriberMeta, ch)
-			delete(b.filterPredicates, ch)
-			b.closeChan(ch)
-			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-			if total == 0 {
-				isLast = true
-				lastHooks = b.onLast[topic]
-				b.topicEmpty[topic] = time.Now()
-			}
-		}
-		b.mu.Unlock()
-		if b.evictThreshold > 0 {
-			b.dropCountsMu.Lock()
-			delete(b.dropCounts, ch)
-			b.dropCountsMu.Unlock()
-		}
-		for _, fn := range lastHooks {
-			go fn(topic)
-		}
-		if hasBackend && isLast {
-			b.backendUnsubscribe(topic)
-		}
-		b.publishConnectionEvent("unsubscribe", topic, -1)
-	}
+	return ch, b.unsubscriber(topic, ch)
 }
 
 // SubscribeFromIDWith creates a composable resume-aware subscription. When
@@ -427,27 +314,5 @@ func (b *SSEBroker) makeSubscribeFromIDUnsubscribe(topic string, ch chan string,
 func (b *SSEBroker) SubscribeFromIDWith(topic, lastEventID string, opts ...SubscribeOption) (msgs <-chan string, unsubscribe func()) {
 	cfg := buildSubscribeConfig(opts)
 	cfg.rejectLossyCombinations()
-	ch, unsub := b.subscribeFromIDInternal(topic, lastEventID, cfg)
-	if ch == nil {
-		return nil, nil
-	}
-
-	// Apply rate limiting to LIVE delivery only. Replay has already been
-	// written directly to the channel above and is not affected.
-	if cfg.rate != nil {
-		interval := cfg.rate.interval()
-		if interval > 0 {
-			biCh := b.findBiChanAny(topic, ch)
-			if biCh != nil {
-				b.rateLimit.add(biCh, topic, interval)
-				origUnsub := unsub
-				unsub = func() {
-					b.rateLimit.remove(biCh)
-					origUnsub()
-				}
-			}
-		}
-	}
-
-	return ch, unsub
+	return b.subscribeFromIDInternal(topic, lastEventID, cfg)
 }

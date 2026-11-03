@@ -1,9 +1,7 @@
 package tavern
 
 import (
-	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // coalescingState holds the atomic pointer and signal channel used by a
@@ -39,72 +37,23 @@ func (b *SSEBroker) SubscribeScopedWithCoalescing(topic, scope string) (msgs <-c
 }
 
 func (b *SSEBroker) subscribeCoalescing(topic, scope string) (msgs <-chan string, unsubscribe func()) {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		ch := make(chan string)
-		close(ch)
-		return ch, func() {}
-	}
-	if !b.admitSubscriber(topic) {
-		b.mu.Unlock()
-		return nil, nil
-	}
-
-	// The internal channel participates in the normal fan-out path but is
-	// intercepted by publishToChannels when coalescing is enabled.
-	internalCh := make(chan string, b.bufferSize)
-	b.chanGuards.Store(internalCh, &chanGuard{})
 	cs := &coalescingState{
 		signal: make(chan struct{}, 1),
 	}
-
-	if scope == "" {
-		if b.topics[topic] == nil {
-			b.topics[topic] = make(map[chan string]struct{})
-		}
-		b.topics[topic][internalCh] = struct{}{}
-	} else {
-		if b.scopedTopics[topic] == nil {
-			b.scopedTopics[topic] = make(map[chan string]scopedSub)
-		}
-		b.scopedTopics[topic][internalCh] = scopedSub{scope: scope}
-	}
-
-	b.subscriberMeta[internalCh] = &SubscriberInfo{Topic: topic, Scope: scope, ConnectedAt: time.Now()}
-
-	if b.coalescingChans == nil {
-		b.coalescingChans = make(map[chan string]*coalescingState)
-	}
-	b.coalescingChans[internalCh] = cs
-
-	total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-	var firstHooks []func(string)
-	if total == 1 {
-		firstHooks = b.onFirst[topic]
-	}
-	if b.metrics != nil {
-		if total > b.metrics.peakSubs[topic] {
-			b.metrics.peakSubs[topic] = total
-		}
-	}
-	hasBackend := b.backend != nil
-	delete(b.topicEmpty, topic)
+	// The internal channel participates in the normal fan-out path but is
+	// intercepted by publishToChannels when coalescing is enabled.
+	b.mu.Lock()
+	j, closed := b.registerLocked(topic, subSpec{scope: scope, coalescing: cs})
 	b.mu.Unlock()
-
-	for _, fn := range firstHooks {
-		go fn(topic)
+	if j == nil {
+		return rejectedSubscription(closed)
 	}
-	if hasBackend && total == 1 {
-		b.backendSubscribe(topic)
-	}
-	b.publishConnectionEvent("subscribe", topic, total)
+	b.finishJoin(topic, j)
 
 	// The public channel is fed by a goroutine that reads signals and loads
-	// the latest value from the atomic pointer.
+	// the latest value from the atomic pointer. It stops when the internal
+	// channel closes, whichever removal path closed it.
 	out := make(chan string, 1)
-	done := make(chan struct{})
-
 	go func() {
 		defer close(out)
 		for {
@@ -116,70 +65,16 @@ func (b *SSEBroker) subscribeCoalescing(topic, scope string) (msgs <-chan string
 				}
 				select {
 				case out <- *ptr:
-				case <-done:
+				case <-j.closing:
 					return
 				}
-			case <-done:
+			case <-j.closing:
 				return
 			}
 		}
 	}()
 
-	var once sync.Once
-	connectedAt := time.Now()
-
-	return out, func() {
-		once.Do(func() {
-			close(done)
-
-			b.mu.Lock()
-			var lastHooks []func(string)
-			var isLast bool
-
-			if scope == "" {
-				if _, ok := b.topics[topic][internalCh]; ok {
-					delete(b.topics[topic], internalCh)
-					total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-					if total == 0 {
-						isLast = true
-						lastHooks = b.onLast[topic]
-						b.topicEmpty[topic] = time.Now()
-					}
-				}
-			} else {
-				if _, ok := b.scopedTopics[topic][internalCh]; ok {
-					delete(b.scopedTopics[topic], internalCh)
-					total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-					if total == 0 {
-						isLast = true
-						lastHooks = b.onLast[topic]
-						b.topicEmpty[topic] = time.Now()
-					}
-				}
-			}
-			delete(b.subscriberMeta, internalCh)
-			delete(b.filterPredicates, internalCh)
-			delete(b.coalescingChans, internalCh)
-			b.closeChan(internalCh)
-			b.mu.Unlock()
-
-			if b.evictThreshold > 0 || b.adaptive != nil {
-				b.dropCountsMu.Lock()
-				delete(b.dropCounts, internalCh)
-				b.dropCountsMu.Unlock()
-			}
-			if b.obs != nil {
-				b.obs.recordConnectionDuration(topic, time.Since(connectedAt))
-			}
-			for _, fn := range lastHooks {
-				go fn(topic)
-			}
-			if hasBackend && isLast {
-				b.backendUnsubscribe(topic)
-			}
-			b.publishConnectionEvent("unsubscribe", topic, -1)
-		})
-	}
+	return out, b.unsubscriber(topic, j.ch)
 }
 
 // coalesceStore atomically stores the message for a coalescing channel and

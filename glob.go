@@ -2,7 +2,6 @@ package tavern
 
 import (
 	"strings"
-	"sync"
 )
 
 // globSub pairs a glob pattern with a subscriber channel and optional scope.
@@ -11,6 +10,28 @@ type globSub struct {
 	ch       chan TopicMessage
 	scope    string // empty = unscoped
 	segments []string
+	closed   bool // guarded by SSEBroker.globMu
+}
+
+// closeLocked closes the subscriber channel once. The caller holds globMu
+// for writing, which excludes dispatchToGlobSubscribers' sends.
+func (s *globSub) closeLocked() {
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
+}
+
+// removeGlobLocked unregisters s and closes its channel. The caller holds
+// globMu for writing.
+func (b *SSEBroker) removeGlobLocked(s *globSub) {
+	for i, other := range b.globSubs {
+		if other == s {
+			b.globSubs = append(b.globSubs[:i], b.globSubs[i+1:]...)
+			break
+		}
+	}
+	s.closeLocked()
 }
 
 // SubscribeGlob registers a subscriber for all topics matching the given glob
@@ -41,7 +62,7 @@ func (b *SSEBroker) subscribeGlob(pattern, scope string) (msgs <-chan TopicMessa
 	}
 
 	b.globMu.Lock()
-	if b.closed {
+	if b.globClosed {
 		b.globMu.Unlock()
 		close(ch)
 		return ch, func() {}
@@ -49,19 +70,10 @@ func (b *SSEBroker) subscribeGlob(pattern, scope string) (msgs <-chan TopicMessa
 	b.globSubs = append(b.globSubs, sub)
 	b.globMu.Unlock()
 
-	var once sync.Once
 	return ch, func() {
-		once.Do(func() {
-			b.globMu.Lock()
-			for i, s := range b.globSubs {
-				if s == sub {
-					b.globSubs = append(b.globSubs[:i], b.globSubs[i+1:]...)
-					break
-				}
-			}
-			b.globMu.Unlock()
-			close(ch)
-		})
+		b.globMu.Lock()
+		b.removeGlobLocked(sub)
+		b.globMu.Unlock()
 	}
 }
 
@@ -71,35 +83,31 @@ func (b *SSEBroker) subscribeGlob(pattern, scope string) (msgs <-chan TopicMessa
 // removes the glob subscription associated with ch, closing the channel.
 func (b *SSEBroker) UnsubscribeGlob(ch <-chan TopicMessage) {
 	b.globMu.Lock()
-	for i, s := range b.globSubs {
+	defer b.globMu.Unlock()
+	for _, s := range b.globSubs {
 		if s.ch == ch {
-			b.globSubs = append(b.globSubs[:i], b.globSubs[i+1:]...)
-			b.globMu.Unlock()
-			close(s.ch)
+			b.removeGlobLocked(s)
 			return
 		}
 	}
-	b.globMu.Unlock()
 }
 
 // dispatchToGlobSubscribers sends msg (published to topic) to all glob
 // subscribers whose pattern matches the topic. For scoped subscribers, the
 // scope parameter must match; pass an empty string for unscoped publishes.
 func (b *SSEBroker) dispatchToGlobSubscribers(topic, scope, msg string) {
+	// Sends are non-blocking and happen under the read lock, so a glob
+	// subscriber cannot be closed mid-send.
 	b.globMu.RLock()
+	defer b.globMu.RUnlock()
 	if len(b.globSubs) == 0 {
-		b.globMu.RUnlock()
 		return
 	}
-	// Snapshot under lock.
-	subs := make([]*globSub, len(b.globSubs))
-	copy(subs, b.globSubs)
-	b.globMu.RUnlock()
 
 	topicSegments := strings.Split(topic, "/")
 	tm := TopicMessage{Topic: topic, Data: msg}
 
-	for _, sub := range subs {
+	for _, sub := range b.globSubs {
 		// Scope filtering: unscoped glob subs receive unscoped publishes;
 		// scoped glob subs only receive matching scoped publishes.
 		if sub.scope != "" && sub.scope != scope {
@@ -112,14 +120,11 @@ func (b *SSEBroker) dispatchToGlobSubscribers(topic, scope, msg string) {
 		if !matchGlob(sub.segments, topicSegments) {
 			continue
 		}
-		func() {
-			defer func() { _ = recover() }()
-			select {
-			case sub.ch <- tm:
-			default:
-				b.drops.Add(1)
-			}
-		}()
+		select {
+		case sub.ch <- tm:
+		default:
+			b.drops.Add(1)
+		}
 	}
 }
 

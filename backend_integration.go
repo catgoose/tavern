@@ -39,56 +39,59 @@ func (b *SSEBroker) initBackend() {
 // has at least one local subscriber. This is called after a backend reconnect.
 func (b *SSEBroker) resubscribeAll() {
 	b.mu.RLock()
-	var topics []string
-	seen := make(map[string]struct{})
+	seen := make(map[string]struct{}, len(b.topics)+len(b.scopedTopics))
 	for topic, subs := range b.topics {
 		if len(subs) > 0 {
-			if _, ok := seen[topic]; !ok {
-				topics = append(topics, topic)
-				seen[topic] = struct{}{}
-			}
+			seen[topic] = struct{}{}
 		}
 	}
 	for topic, subs := range b.scopedTopics {
 		if len(subs) > 0 {
-			if _, ok := seen[topic]; !ok {
-				topics = append(topics, topic)
-				seen[topic] = struct{}{}
-			}
+			seen[topic] = struct{}{}
 		}
 	}
 	b.mu.RUnlock()
 
-	for _, topic := range topics {
-		b.backendSubscribe(topic)
+	for topic := range seen {
+		b.resubscribeBackend(topic)
+	}
+}
+
+// resubscribeBackend renews the backend subscription for topic if it still
+// has local subscribers, serialized with first/last transitions.
+func (b *SSEBroker) resubscribeBackend(topic string) {
+	st := b.acquireBackendTopic(topic)
+	defer b.releaseBackendTopic(topic, st)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if b.localSubscribers(topic) {
+		st.active = b.backendSubscribe(topic, st)
 	}
 }
 
 // backendSubscribe registers the broker with the backend for the given topic
-// and starts a goroutine that forwards incoming envelopes to local
-// subscribers. It is called when the first local subscriber joins a topic
-// and a backend is configured.
-func (b *SSEBroker) backendSubscribe(topic string) {
-	if b.backend == nil {
-		return
-	}
+// and reports whether it succeeded. A fan-in goroutine forwarding envelopes
+// to local subscribers starts unless the backend returned the channel that
+// is already being fanned in. The caller holds st.mu.
+func (b *SSEBroker) backendSubscribe(topic string, st *backendTopic) bool {
 	ch, err := b.backend.Subscribe(context.Background(), topic)
 	if err != nil {
 		if b.logger != nil {
 			b.logger.Error("backend subscribe failed", "topic", topic, "err", err)
 		}
-		return
+		return false
 	}
-	go b.backendFanIn(topic, ch)
+	if ch != st.ch {
+		st.ch = ch
+		go b.backendFanIn(topic, ch)
+	}
+	return true
 }
 
 // backendUnsubscribe removes the broker's subscription from the backend for
-// the given topic. It is called when the last local subscriber leaves a topic
-// and a backend is configured.
+// the given topic. It is called from syncBackend once the topic has no local
+// subscribers.
 func (b *SSEBroker) backendUnsubscribe(topic string) {
-	if b.backend == nil {
-		return
-	}
 	if err := b.backend.Unsubscribe(topic); err != nil {
 		if b.logger != nil {
 			b.logger.Error("backend unsubscribe failed", "topic", topic, "err", err)

@@ -34,26 +34,7 @@ type SubscribeMeta struct {
 // Behaves like [SSEBroker.Subscribe] but attaches metadata queryable
 // via [SSEBroker.Subscribers].
 func (b *SSEBroker) SubscribeWithMeta(topic string, meta SubscribeMeta) (msgs <-chan string, unsubscribe func()) {
-	ch, unsub := b.Subscribe(topic)
-	// Enrich the stored info. We need the bidirectional channel to look it up.
-	// Since Subscribe just created it and stored it in topics[topic], we can
-	// find it by iterating the topic map for the entry whose info has no ID yet
-	// and whose ConnectedAt is closest to now. However, the simplest correct
-	// approach: iterate topics[topic] looking for the channel whose SubscriberInfo
-	// matches the read-only channel we got back.
-	b.mu.Lock()
-	for c := range b.topics[topic] {
-		// A read-only channel derived from a bidirectional channel compares
-		// equal when converted. We use a type-safe comparison via the info pointer.
-		readOnly := (<-chan string)(c) //nolint:gocritic // parens required for channel type conversion
-		if info, ok := b.subscriberMeta[c]; ok && info.ID == "" && readOnly == ch {
-			info.ID = meta.ID
-			info.Meta = meta.Meta
-			break
-		}
-	}
-	b.mu.Unlock()
-	return ch, unsub
+	return b.subscribeLive(topic, subSpec{meta: &meta}, false)
 }
 
 // Subscribers returns a snapshot of all active subscribers for the given
@@ -94,64 +75,30 @@ func (b *SSEBroker) Subscribers(topic string) []SubscriberInfo {
 // given topic. Returns true if the subscriber was found and disconnected.
 func (b *SSEBroker) Disconnect(topic, subscriberID string) bool {
 	b.mu.Lock()
-	// Search unscoped subscribers.
+	var target chan string
 	for ch := range b.topics[topic] {
-		info, ok := b.subscriberMeta[ch]
-		if !ok || info.ID != subscriberID {
-			continue
+		if info, ok := b.subscriberMeta[ch]; ok && info.ID == subscriberID {
+			target = ch
+			break
 		}
-		delete(b.topics[topic], ch)
-		delete(b.subscriberMeta, ch)
-		delete(b.filterPredicates, ch)
-		b.closeChan(ch)
-		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-		var lastHooks []func(string)
-		if total == 0 {
-			lastHooks = b.onLast[topic]
-			b.topicEmpty[topic] = time.Now()
-		}
-		b.mu.Unlock()
-		if b.evictThreshold > 0 {
-			b.dropCountsMu.Lock()
-			delete(b.dropCounts, ch)
-			b.dropCountsMu.Unlock()
-		}
-		for _, fn := range lastHooks {
-			go fn(topic)
-		}
-		b.publishConnectionEvent("disconnect", topic, -1)
-		return true
 	}
-	// Search scoped subscribers.
-	for ch := range b.scopedTopics[topic] {
-		info, ok := b.subscriberMeta[ch]
-		if !ok || info.ID != subscriberID {
-			continue
+	if target == nil {
+		for ch := range b.scopedTopics[topic] {
+			if info, ok := b.subscriberMeta[ch]; ok && info.ID == subscriberID {
+				target = ch
+				break
+			}
 		}
-		delete(b.scopedTopics[topic], ch)
-		delete(b.subscriberMeta, ch)
-		delete(b.filterPredicates, ch)
-		b.closeChan(ch)
-		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-		var lastHooks []func(string)
-		if total == 0 {
-			lastHooks = b.onLast[topic]
-			b.topicEmpty[topic] = time.Now()
-		}
-		b.mu.Unlock()
-		if b.evictThreshold > 0 {
-			b.dropCountsMu.Lock()
-			delete(b.dropCounts, ch)
-			b.dropCountsMu.Unlock()
-		}
-		for _, fn := range lastHooks {
-			go fn(topic)
-		}
-		b.publishConnectionEvent("disconnect", topic, -1)
-		return true
 	}
+	if target == nil {
+		b.mu.Unlock()
+		return false
+	}
+	l := b.removeLocked(topic, target)
 	b.mu.Unlock()
-	return false
+	b.finishLeave(topic, target, l)
+	b.publishConnectionEvent("disconnect", topic, -1)
+	return true
 }
 
 // publishConnectionEvent publishes a JSON event to the meta topic.

@@ -74,7 +74,8 @@ type SSEBroker struct {
 	obs               *observabilityState              // nil when observability disabled
 	multiSubs         map[string]*multiSub             // subscriberID → managed multi-subscription
 	globSubs          []*globSub                       // glob/wildcard subscriptions
-	globMu            sync.RWMutex                     // protects globSubs
+	globMu            sync.RWMutex                     // protects globSubs and globClosed
+	globClosed        bool                             // set by Close; no new glob subscriptions
 	backend           backend.Backend                  // nil = no cross-process fan-out
 	afterHookSem      chan struct{}                     // semaphore limiting concurrent After hook goroutines
 	coalescingChans   map[chan string]*coalescingState  // channel → coalescing state (nil = normal delivery)
@@ -85,6 +86,8 @@ type SSEBroker struct {
 	onPublishDropFn   func(topic string, droppedForCount int) // nil = no drop callback
 	replayStore       ReplayStore                        // nil = use internal maps
 	chanGuards        sync.Map                                // chan string → *chanGuard
+	backendMu         sync.Mutex                              // protects backendTopics
+	backendTopics     map[string]*backendTopic                // topic → backend subscription state
 }
 
 // Topic name constants are conventions for common real-time use cases.
@@ -129,7 +132,7 @@ func (g *chanGuard) signal() chan struct{} {
 // without draining ro first. If the subscription is already gone the
 // returned channel is closed.
 func (b *SSEBroker) closeSignal(topic string, ro <-chan string) <-chan struct{} {
-	if ch := b.findBiChanAny(topic, ro); ch != nil {
+	if ch := b.readToBidir(topic, ro); ch != nil {
 		if v, ok := b.chanGuards.Load(ch); ok {
 			g := v.(*chanGuard)
 			g.mu.Lock()
@@ -361,7 +364,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	initGroupFields(b)
 	b.debounce.timers = make(map[string]*debounceEntry)
 	b.throttle.state = make(map[string]*throttleEntry)
-	b.rateLimit = newRateLimiter()
+	b.rateLimit = newRateLimiter(b.trySend)
 	if b.evictThreshold > 0 || b.adaptive != nil {
 		b.dropCounts = make(map[chan string]*atomic.Int64)
 	}
@@ -385,106 +388,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 // [WithBufferSize]). If the subscriber does not drain the channel fast enough,
 // messages will be dropped by [SSEBroker.Publish].
 func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe func()) {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		ch := make(chan string)
-		close(ch)
-		return ch, func() {}
-	}
-	if !b.admitSubscriber(topic) {
-		b.mu.Unlock()
-		return nil, nil
-	}
-	ch := make(chan string, b.bufferSize)
-	b.chanGuards.Store(ch, &chanGuard{})
-	if b.topics[topic] == nil {
-		b.topics[topic] = make(map[chan string]struct{})
-	}
-	b.topics[topic][ch] = struct{}{}
-	b.subscriberMeta[ch] = &SubscriberInfo{Topic: topic, ConnectedAt: time.Now()}
-	total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-	var firstHooks []func(string)
-	if total == 1 {
-		firstHooks = b.onFirst[topic]
-	}
-	if b.metrics != nil {
-		if total > b.metrics.peakSubs[topic] {
-			b.metrics.peakSubs[topic] = total
-		}
-	}
-	if b.evictThreshold > 0 || b.adaptive != nil {
-		b.dropCountsMu.Lock()
-		b.dropCounts[ch] = &atomic.Int64{}
-		b.dropCountsMu.Unlock()
-	}
-	if b.adaptive != nil {
-		b.adaptive.getState(ch) // pre-create state
-	}
-	store := b.replayStore
-	var replayMsgs []string
-	if store == nil {
-		replayMsgs = append([]string(nil), b.replayCache[topic]...)
-	}
-	delete(b.topicEmpty, topic)
-	hasBackend := b.backend != nil
-	b.mu.Unlock()
-	if store != nil {
-		entries, _ := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
-		for _, e := range entries {
-			replayMsgs = append(replayMsgs, e.Msg)
-		}
-	}
-	for _, fn := range firstHooks {
-		go fn(topic)
-	}
-	if hasBackend && total == 1 {
-		b.backendSubscribe(topic)
-	}
-	b.publishConnectionEvent("subscribe", topic, total)
-	for _, msg := range replayMsgs {
-		select {
-		case ch <- msg:
-		default:
-		}
-	}
-	connectedAt := time.Now()
-	return ch, func() {
-		b.mu.Lock()
-		var lastHooks []func(string)
-		var isLast bool
-		if _, ok := b.topics[topic][ch]; ok {
-			delete(b.topics[topic], ch)
-			delete(b.subscriberMeta, ch)
-			delete(b.filterPredicates, ch)
-			b.closeChan(ch)
-			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-			if total == 0 {
-				isLast = true
-				lastHooks = b.onLast[topic]
-				b.topicEmpty[topic] = time.Now()
-			}
-		}
-		b.mu.Unlock()
-		if b.evictThreshold > 0 || b.adaptive != nil {
-			b.dropCountsMu.Lock()
-			delete(b.dropCounts, ch)
-			b.dropCountsMu.Unlock()
-		}
-		if b.adaptive != nil {
-			b.adaptive.removeState(ch)
-		}
-		if b.obs != nil {
-			b.obs.recordConnectionDuration(topic, time.Since(connectedAt))
-		}
-		for _, fn := range lastHooks {
-			go fn(topic)
-		}
-		if hasBackend && isLast {
-			b.backendUnsubscribe(topic)
-		}
-		b.publishConnectionEvent("unsubscribe", topic, -1)
-	}
+	return b.subscribeLive(topic, subSpec{}, false)
 }
 
 // SubscribeScoped registers a subscriber with a scope key for the given topic.
@@ -492,106 +396,49 @@ func (b *SSEBroker) Subscribe(topic string) (msgs <-chan string, unsubscribe fun
 // be delivered. The returned unsubscribe function releases resources and closes
 // the channel; it is safe to call more than once.
 func (b *SSEBroker) SubscribeScoped(topic, scope string) (msgs <-chan string, unsubscribe func()) {
+	return b.subscribeLive(topic, subSpec{scope: scope}, false)
+}
+
+// subscribeLive registers a subscription that does not resume from an event
+// ID. A non-empty spec.preload is delivered first. Replay after registration
+// keeps each variant's established contract:
+//   - with a filter: the in-memory replay cache, filtered by the predicate
+//     (a [ReplayStore] is not consulted);
+//   - with a snapshot (withSnapshot) and no filter: no replay;
+//   - otherwise: the [ReplayStore]'s latest entries, or the in-memory cache.
+func (b *SSEBroker) subscribeLive(topic string, spec subSpec, withSnapshot bool) (msgs <-chan string, unsubscribe func()) {
 	b.mu.Lock()
-	if b.closed {
+	j, closed := b.registerLocked(topic, spec)
+	if j == nil {
 		b.mu.Unlock()
-		ch := make(chan string)
-		close(ch)
-		return ch, func() {}
+		return rejectedSubscription(closed)
 	}
-	if !b.admitSubscriber(topic) {
-		b.mu.Unlock()
-		return nil, nil
-	}
-	ch := make(chan string, b.bufferSize)
-	b.chanGuards.Store(ch, &chanGuard{})
-	if b.scopedTopics[topic] == nil {
-		b.scopedTopics[topic] = make(map[chan string]scopedSub)
-	}
-	b.scopedTopics[topic][ch] = scopedSub{scope: scope}
-	b.subscriberMeta[ch] = &SubscriberInfo{Topic: topic, Scope: scope, ConnectedAt: time.Now()}
-	total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-	var firstHooks []func(string)
-	if total == 1 {
-		firstHooks = b.onFirst[topic]
-	}
-	if b.metrics != nil {
-		if total > b.metrics.peakSubs[topic] {
-			b.metrics.peakSubs[topic] = total
-		}
-	}
-	if b.evictThreshold > 0 || b.adaptive != nil {
-		b.dropCountsMu.Lock()
-		b.dropCounts[ch] = &atomic.Int64{}
-		b.dropCountsMu.Unlock()
-	}
-	if b.adaptive != nil {
-		b.adaptive.getState(ch) // pre-create state
-	}
-	storeScoped := b.replayStore
 	var replayMsgs []string
-	if storeScoped == nil {
+	var store ReplayStore
+	switch {
+	case spec.filter != nil:
+		replayMsgs = append([]string(nil), b.replayCache[topic]...)
+	case withSnapshot:
+	case b.replayStore != nil:
+		store = b.replayStore
+	default:
 		replayMsgs = append([]string(nil), b.replayCache[topic]...)
 	}
-	hasBackendScoped := b.backend != nil
-	delete(b.topicEmpty, topic)
 	b.mu.Unlock()
-	if storeScoped != nil {
-		entries, _ := storeScoped.Latest(context.Background(), topic, b.replayStoreLimit(topic))
+	if store != nil {
+		entries, _ := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
 		for _, e := range entries {
 			replayMsgs = append(replayMsgs, e.Msg)
 		}
 	}
-	for _, fn := range firstHooks {
-		go fn(topic)
-	}
-	if hasBackendScoped && total == 1 {
-		b.backendSubscribe(topic)
-	}
-	b.publishConnectionEvent("subscribe", topic, total)
+	b.finishJoin(topic, j)
 	for _, msg := range replayMsgs {
-		select {
-		case ch <- msg:
-		default:
+		if spec.filter != nil && !spec.filter(msg) {
+			continue
 		}
+		b.trySend(j.ch, msg)
 	}
-	scopedConnectedAt := time.Now()
-	return ch, func() {
-		b.mu.Lock()
-		var lastHooks []func(string)
-		var isLastScoped bool
-		if _, ok := b.scopedTopics[topic][ch]; ok {
-			delete(b.scopedTopics[topic], ch)
-			delete(b.subscriberMeta, ch)
-			delete(b.filterPredicates, ch)
-			b.closeChan(ch)
-			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-			if total == 0 {
-				isLastScoped = true
-				lastHooks = b.onLast[topic]
-				b.topicEmpty[topic] = time.Now()
-			}
-		}
-		b.mu.Unlock()
-		if b.evictThreshold > 0 || b.adaptive != nil {
-			b.dropCountsMu.Lock()
-			delete(b.dropCounts, ch)
-			b.dropCountsMu.Unlock()
-		}
-		if b.adaptive != nil {
-			b.adaptive.removeState(ch)
-		}
-		if b.obs != nil {
-			b.obs.recordConnectionDuration(topic, time.Since(scopedConnectedAt))
-		}
-		for _, fn := range lastHooks {
-			go fn(topic)
-		}
-		if hasBackendScoped && isLastScoped {
-			b.backendUnsubscribe(topic)
-		}
-		b.publishConnectionEvent("unsubscribe", topic, -1)
-	}
+	return j.ch, b.unsubscriber(topic, j.ch)
 }
 
 // OnFirstSubscriber registers a callback that fires when the given topic goes
@@ -868,10 +715,7 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 						// Use non-blocking send — the channel may be full (that's why
 						// we're in backpressure). If it can't be delivered, that's OK.
 						ctrl := backpressureControlEvent(newTier.String(), oldTier.String(), topic)
-						select {
-						case ch <- ctrl:
-						default:
-						}
+						b.trySend(ch, ctrl)
 						b.fireTierChange(ch, oldTier, newTier)
 					}
 					if newTier == TierDisconnect {
@@ -931,49 +775,14 @@ func (b *SSEBroker) incrementDropCount(ch chan string) int64 {
 }
 
 func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
-	b.mu.Lock()
-	_, unscoped := b.topics[topic][ch]
-	_, scoped := b.scopedTopics[topic][ch]
-	removed := unscoped || scoped
-	var lastHooks []func(string)
-	var isLast bool
-	if removed {
-		delete(b.topics[topic], ch)
-		delete(b.scopedTopics[topic], ch)
-		delete(b.subscriberMeta, ch)
-		delete(b.filterPredicates, ch)
-		b.closeChan(ch)
-		if len(b.topics[topic])+len(b.scopedTopics[topic]) == 0 {
-			isLast = true
-			lastHooks = b.onLast[topic]
-			b.topicEmpty[topic] = time.Now()
-		}
-	}
-	hasBackend := b.backend != nil
-	b.mu.Unlock()
-	for _, fn := range lastHooks {
-		go fn(topic)
-	}
-	if hasBackend && isLast {
-		b.backendUnsubscribe(topic)
-	}
-	// Clean up drop counter.
-	b.dropCountsMu.Lock()
-	delete(b.dropCounts, ch)
-	b.dropCountsMu.Unlock()
-	// Clean up adaptive state.
-	if b.adaptive != nil {
-		b.adaptive.removeState(ch)
-	}
 	// A concurrent unsubscribe or eviction already removed the subscriber;
 	// do not report a second eviction.
-	if !removed {
+	if !b.removeSubscriber(topic, ch) {
 		return
 	}
 	if b.obs != nil {
 		b.obs.recordEviction(topic)
 	}
-	// Fire callback.
 	if b.evictCallback != nil {
 		go b.evictCallback(topic)
 	}
@@ -1318,18 +1127,12 @@ func (b *SSEBroker) sendKeepalive() {
 	defer b.mu.RUnlock()
 	for _, subs := range b.topics {
 		for ch := range subs {
-			select {
-			case ch <- msg:
-			default:
-			}
+			b.trySend(ch, msg)
 		}
 	}
 	for _, subs := range b.scopedTopics {
 		for ch := range subs {
-			select {
-			case ch <- msg:
-			default:
-			}
+			b.trySend(ch, msg)
 		}
 	}
 }
@@ -1344,16 +1147,10 @@ func (b *SSEBroker) SetRetry(topic string, d time.Duration) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	for ch := range b.topics[topic] {
-		select {
-		case ch <- msg:
-		default:
-		}
+		b.trySend(ch, msg)
 	}
 	for ch := range b.scopedTopics[topic] {
-		select {
-		case ch <- msg:
-		default:
-		}
+		b.trySend(ch, msg)
 	}
 }
 
@@ -1367,18 +1164,12 @@ func (b *SSEBroker) SetRetryAll(d time.Duration) {
 	defer b.mu.RUnlock()
 	for _, subs := range b.topics {
 		for ch := range subs {
-			select {
-			case ch <- msg:
-			default:
-			}
+			b.trySend(ch, msg)
 		}
 	}
 	for _, subs := range b.scopedTopics {
 		for ch := range subs {
-			select {
-			case ch <- msg:
-			default:
-			}
+			b.trySend(ch, msg)
 		}
 	}
 }
@@ -1437,8 +1228,9 @@ func (b *SSEBroker) Close() {
 	}
 	b.mu.Unlock()
 	b.globMu.Lock()
+	b.globClosed = true
 	for _, gs := range b.globSubs {
-		close(gs.ch)
+		gs.closeLocked()
 	}
 	b.globSubs = nil
 	b.globMu.Unlock()
@@ -1458,6 +1250,15 @@ func (b *SSEBroker) Close() {
 	b.throttle.mu.Unlock()
 	b.rateLimit.stop()
 	if b.backend != nil {
+		b.backendMu.Lock()
+		topics := make([]string, 0, len(b.backendTopics))
+		for topic := range b.backendTopics {
+			topics = append(topics, topic)
+		}
+		b.backendMu.Unlock()
+		for _, topic := range topics {
+			b.syncBackend(topic)
+		}
 		b.backend.Close() //nolint:errcheck // best-effort cleanup
 	}
 }

@@ -227,7 +227,7 @@ func TestPublishBlocking_ConcurrentLossEvictionNoRace(t *testing.T) {
 // subscriber channel behind ro.
 func waitForBlockedSender(t *testing.T, b *SSEBroker, topic string, ro <-chan string) {
 	t.Helper()
-	ch := b.findBiChanAny(topic, ro)
+	ch := b.readToBidir(topic, ro)
 	require.NotNil(t, ch)
 	v, ok := b.chanGuards.Load(ch)
 	require.True(t, ok)
