@@ -41,14 +41,15 @@ The existing commit_policy: ask is satisfied by the user's explicit commit/PR/me
   - Review: https://github.com/catgoose/tavern/pull/232 (merged).
     - Reviewed commit: `c77f4c1e0edf9fd2b8a18e546513272fa44bf2b6`
 
-- [ ] Pass 004: Public API guidance and option validation.
+- [x] Pass 004: Public API guidance and option validation.
   - Requirements: Document recommended latest-representation, invalidation/reconciliation, and ID/replay patterns with a verified subscription compatibility table. Provide an additive way to validate configurations and handle invalid combinations without runtime surprises. Converge implementation differences where compatible, preserve existing contracts, and explicitly explain remaining replay/snapshot/filter differences.
   - Plan: .agents/.local/plans/handoff-010-subscription-api-guidance-and-option-validation.md
-  - Review:
+  - Review: https://github.com/catgoose/tavern/pull/233 (merged).
+    - Reviewed commit: `e78acc040dc194707519a5469730accaaff387db`
 
 - [ ] Pass 005: Reproducible CI, dependency updates, and releases.
   - Requirements: Dependency and Go baseline changes are reviewed and tested before reaching main. Exercise root and adapter modules against the local source; pin tooling and make supported Go versions explicit. Separate dependency maintenance from release decisions and keep release checks tied to the exact tested revision. Preserve practical release automation without silently raising consumer requirements or publishing unvalidated code.
-  - Plan:
+  - Plan: .agents/.local/plans/handoff-011-reproducible-ci-and-reviewed-dependency-releases.md
   - Review:
 
 - [ ] Pass 006: Reference deployment and capacity validation.

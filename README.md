@@ -1490,6 +1490,11 @@ unordered), batch flush, scoped publish, and content-based dedup.
 
 ---
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks, the Go baseline,
+dependency updates and how releases are made.
+
 ## License
 
 [MIT](LICENSE)

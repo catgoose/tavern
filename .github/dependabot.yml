@@ -1,0 +1,26 @@
+# Dependency updates arrive as pull requests and pass the same PR checks as
+# any change before a maintainer merges them. Nothing is merged automatically.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories:
+      - /
+      - /tavernprom
+      - /tavernotel
+    schedule:
+      interval: weekly
+    ignore:
+      # The adapters build against the core in this repository; their core
+      # requirement is raised by hand when an adapter needs a newer release.
+      - dependency-name: github.com/catgoose/tavern
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

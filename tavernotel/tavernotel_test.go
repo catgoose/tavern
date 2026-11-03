@@ -19,7 +19,7 @@ func newBroker(opts ...tavern.BrokerOption) *tavern.SSEBroker {
 
 // collectMetrics creates an in-memory reader, registers the broker, triggers
 // a collection, and returns the collected resource metrics.
-func collectMetrics(t *testing.T, broker *tavern.SSEBroker, opts ...tavernotel.Option) (metricdata.ResourceMetrics, func()) {
+func collectMetrics(t *testing.T, broker *tavern.SSEBroker, opts ...tavernotel.Option) (rm metricdata.ResourceMetrics, cleanup func()) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -29,7 +29,6 @@ func collectMetrics(t *testing.T, broker *tavern.SSEBroker, opts ...tavernotel.O
 		t.Fatalf("Register: %v", err)
 	}
 
-	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
@@ -53,7 +52,10 @@ func TestRegister(t *testing.T) {
 	broker := newBroker(tavern.WithMetrics())
 	ch, unsub := broker.Subscribe("chat")
 	defer unsub()
-	go func() { for range ch { } }()
+	go func() {
+		for range ch {
+		}
+	}()
 	broker.Publish("chat", "hello")
 
 	rm, stop := collectMetrics(t, broker, tavernotel.WithMeterName("test"))
@@ -107,7 +109,10 @@ func TestObservabilityMetrics(t *testing.T) {
 
 		ch, unsub := broker.Subscribe("latency-topic")
 		defer unsub()
-		go func() { for range ch { } }()
+		go func() {
+			for range ch {
+			}
+		}()
 
 		for range 5 {
 			broker.Publish("latency-topic", "d")
@@ -135,7 +140,10 @@ func TestCardinalityLimit(t *testing.T) {
 	for _, topic := range []string{"a", "b", "c", "d", "e"} {
 		ch, unsub := broker.Subscribe(topic)
 		unsubs = append(unsubs, unsub)
-		go func() { for range ch {} }()
+		go func() {
+			for range ch {
+			}
+		}()
 		broker.Publish(topic, "x")
 	}
 	defer func() {
