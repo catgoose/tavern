@@ -53,10 +53,11 @@ The existing commit_policy: ask is satisfied by the user's explicit commit/PR/me
   - Review: https://github.com/catgoose/tavern/pull/234 (merged).
     - Reviewed commit: `427ae22cb21baf4c5836e319a0ab53254eb7c4f0`
 
-- [ ] Pass 006: Reference deployment and capacity validation.
+- [x] Pass 006: Reference deployment and capacity validation.
   - Requirements: A runnable server-owned UI reference demonstrates snapshot, updates, distinct invalidations, loss/reconnect, canonical refetch, and shutdown. Test real HTTP streaming and a reproducible proxy deployment. Supply a repeatable load/capacity exercise covering fanout, payload sizes, retained bytes, slow consumers and reconnect bursts, with measured limits and assumptions instead of universal capacity claims. Reconcile #128 and #187 with delivered evidence; the user's current authorization includes building this example.
   - Plan: .agents/.local/plans/handoff-012-reference-deployment-and-repeatable-capacity-validation.md
-  - Review:
+  - Review: https://github.com/catgoose/tavern/pull/236 (merged).
+    - Reviewed commit: `90c7079bec65561ed74db41a8a11cc39f33258f7`
 
 ## Review Risks
 
@@ -74,6 +75,6 @@ The existing commit_policy: ask is satisfied by the user's explicit commit/PR/me
 - Additional backend implementations, hard byte-budget APIs, and distributed delivery-gap propagation remain candidates if the capacity/deployment work demonstrates a concrete need; they are not implicit additions to this lane.
 - Preserve the current declared Go minimum initially; pass 005 establishes a documented baseline from verified code/dependency requirements instead of guessing an older supported version.
 
-## Suggested First Plan
+## Status
 
-Pass 001: centralize subscription lifecycle mechanics and verify registration, backend, shutdown and send/close invariants. Start with the coalescing shutdown omission, rate flush sends, and lifecycle differences in filter/snapshot/resume paths.
+All six passes are reviewed and merged into main. No further passes are scheduled in this lane. Issue #128 retains the broader example scope listed in PR #236; distributed presence and tenant controls in #187 remain outside this roadmap.
