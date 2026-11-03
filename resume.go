@@ -237,10 +237,14 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		b.dropCountsMu.Unlock()
 	}
 	delete(b.topicEmpty, topic)
+	hasBackend := b.backend != nil
 	b.mu.Unlock()
 
 	for _, fn := range firstHooks {
 		go fn(topic)
+	}
+	if hasBackend && total == 1 {
+		b.backendSubscribe(topic)
 	}
 	b.publishConnectionEvent("subscribe", topic, total)
 
@@ -341,18 +345,18 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 		}
 	}
 
-	unsub := b.makeSubscribeFromIDUnsubscribe(topic, ch, scoped)
+	unsub := b.makeSubscribeFromIDUnsubscribe(topic, ch, scoped, hasBackend)
 	return ch, unsub
 }
 
 // makeSubscribeFromIDUnsubscribe builds an unsubscribe closure for
 // subscriptions created via [SSEBroker.subscribeFromIDInternal]. It cleans up
 // topic/scoped maps, subscriber metadata, filter predicates, and drop counts.
-func (b *SSEBroker) makeSubscribeFromIDUnsubscribe(topic string, ch chan string, scoped bool) func() {
+func (b *SSEBroker) makeSubscribeFromIDUnsubscribe(topic string, ch chan string, scoped, hasBackend bool) func() {
 	return func() {
 		b.mu.Lock()
 		var lastHooks []func(string)
-		var removed bool
+		var removed, isLast bool
 		if scoped {
 			if _, ok := b.scopedTopics[topic][ch]; ok {
 				delete(b.scopedTopics[topic], ch)
@@ -370,6 +374,7 @@ func (b *SSEBroker) makeSubscribeFromIDUnsubscribe(topic string, ch chan string,
 			b.closeChan(ch)
 			total := len(b.topics[topic]) + len(b.scopedTopics[topic])
 			if total == 0 {
+				isLast = true
 				lastHooks = b.onLast[topic]
 				b.topicEmpty[topic] = time.Now()
 			}
@@ -382,6 +387,9 @@ func (b *SSEBroker) makeSubscribeFromIDUnsubscribe(topic string, ch chan string,
 		}
 		for _, fn := range lastHooks {
 			go fn(topic)
+		}
+		if hasBackend && isLast {
+			b.backendUnsubscribe(topic)
 		}
 		b.publishConnectionEvent("unsubscribe", topic, -1)
 	}

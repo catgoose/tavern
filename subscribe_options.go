@@ -80,7 +80,11 @@ func SubWithSnapshot(fn func() string) SubscribeOption {
 //     channel until it is closed. No lossless or exactly-once delivery is
 //     promised: termination is the recovery signal.
 //   - Only live delivery is covered. Replay and control events written at
-//     subscribe time stay best-effort (see [SSEBroker.SubscribeFromIDWith]).
+//     subscribe time stay best-effort.
+//   - [SSEBroker.SubscribeWith] registers the subscription the way
+//     [SSEBroker.SubscribeFromIDWith] does with an empty Last-Event-ID:
+//     replayed entries published with an ID carry their SSE id line, and a
+//     snapshot is followed by the replay cache.
 //   - A consumer blocked writing to a slow HTTP client observes closure only
 //     after that write returns or times out.
 //   - Cannot be combined with [SubWithRate], whose latest-wins holding

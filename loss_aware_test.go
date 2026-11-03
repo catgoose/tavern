@@ -498,3 +498,26 @@ func TestDisconnectOnLoss_ConcurrentLifecycle(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestDisconnectOnLoss_FreshReplayFollowsFromIDContract(t *testing.T) {
+	b := NewSSEBroker()
+	defer b.Close()
+	b.SetReplayPolicy("t", 5)
+	b.PublishWithID("t", "1", "one")
+
+	snapshot := SubWithSnapshot(func() string { return "snap" })
+
+	lossAware, unsubLoss := b.SubscribeWith("t", snapshot, SubWithDisconnectOnLoss())
+	defer unsubLoss()
+	fromID, unsubFromID := b.SubscribeFromIDWith("t", "", snapshot)
+	defer unsubFromID()
+	ordinary, unsubOrdinary := b.SubscribeWith("t", snapshot)
+	defer unsubOrdinary()
+
+	want := []string{"snap", injectSSEID("one", "1")}
+	assert.Equal(t, want, []string{<-lossAware, <-lossAware})
+	assert.Equal(t, want, []string{<-fromID, <-fromID})
+	// The ordinary snapshot path delivers the snapshot without replay.
+	assert.Equal(t, "snap", <-ordinary)
+	assert.Empty(t, ordinary)
+}

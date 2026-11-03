@@ -1,9 +1,12 @@
 package tavern
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/catgoose/tavern/backend"
 	"github.com/catgoose/tavern/backend/memory"
 	"github.com/stretchr/testify/require"
 )
@@ -277,4 +280,91 @@ func TestBackendFanIn_NoRaceOnUnsubscribe(t *testing.T) {
 		unsub()
 		_ = ch
 	}
+}
+
+// countingBackend records how many backend subscriptions are active per topic.
+type countingBackend struct {
+	*memory.Backend
+	mu     sync.Mutex
+	active map[string]int
+}
+
+func newCountingBackend(mem *memory.Backend) *countingBackend {
+	return &countingBackend{Backend: mem, active: make(map[string]int)}
+}
+
+func (c *countingBackend) Subscribe(ctx context.Context, topic string) (<-chan backend.MessageEnvelope, error) {
+	c.mu.Lock()
+	c.active[topic]++
+	c.mu.Unlock()
+	return c.Backend.Subscribe(ctx, topic)
+}
+
+func (c *countingBackend) Unsubscribe(topic string) error {
+	c.mu.Lock()
+	c.active[topic]--
+	c.mu.Unlock()
+	return c.Backend.Unsubscribe(topic)
+}
+
+func (c *countingBackend) activeFor(topic string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.active[topic]
+}
+
+func TestBackendDisconnectOnLossCrossInstance(t *testing.T) {
+	mem := memory.New()
+	defer mem.Close()
+	remote := newCountingBackend(mem.Fork())
+
+	b1 := NewSSEBroker(WithBackend(mem))
+	b2 := NewSSEBroker(WithBackend(remote))
+	defer b1.Close()
+	defer b2.Close()
+
+	ch, unsub := b2.SubscribeWith("orders", SubWithScope("u1"), SubWithDisconnectOnLoss())
+	require.Equal(t, 1, remote.activeFor("orders"))
+
+	b1.PublishTo("orders", "u1", "order-1")
+	select {
+	case got := <-ch:
+		require.Equal(t, "order-1", got)
+	case <-time.After(time.Second):
+		t.Fatal("loss-aware subscriber did not receive cross-instance message")
+	}
+
+	unsub()
+	require.Equal(t, 0, remote.activeFor("orders"))
+}
+
+func TestBackendDisconnectOnLossAggregateCleanup(t *testing.T) {
+	mem := memory.New()
+	defer mem.Close()
+	counting := newCountingBackend(mem)
+
+	b := NewSSEBroker(WithBufferSize(1), WithBackend(counting))
+	defer b.Close()
+
+	ch, unsub := b.SubscribeMultiWith([]string{"a", "b"}, SubWithDisconnectOnLoss())
+	defer unsub()
+	require.Equal(t, 1, counting.activeFor("a"))
+	require.Equal(t, 1, counting.activeFor("b"))
+
+	// Nobody reads the aggregate, so "a" eventually overflows and is evicted;
+	// termination then cancels "b".
+	for i := 0; b.HasSubscribers("a"); i++ {
+		require.Less(t, i, 1000, "inner subscription never overflowed")
+		b.Publish("a", "msg")
+	}
+	require.Eventually(t, func() bool { return !b.HasSubscribers("b") }, 2*time.Second, time.Millisecond)
+	drainMultiUntilClosed(t, ch)
+
+	require.Equal(t, 0, counting.activeFor("a"), "eviction releases the backend subscription")
+	require.Equal(t, 0, counting.activeFor("b"), "sibling cancellation releases the backend subscription")
+
+	// A new subscriber registers the topic exactly once again.
+	_, unsubAgain := b.SubscribeWith("a", SubWithDisconnectOnLoss())
+	defer unsubAgain()
+	require.Equal(t, 1, counting.activeFor("a"))
 }

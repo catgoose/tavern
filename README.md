@@ -956,7 +956,9 @@ delivery.
   counts as a loss. Filtered and other-scope messages are not losses.
 - Closure can follow messages that were already queued. Live delivery is
   covered; subscribe-time replay stays best-effort and is reported through
-  `tavern-replay-truncated`.
+  `tavern-replay-truncated`. Registration follows `SubscribeFromIDWith` with
+  an empty Last-Event-ID, so replayed entries keep their SSE ids and a
+  snapshot is followed by replay.
 - A handler blocked writing to a slow client sees the closure only after the
   write returns, so pair it with write deadlines.
 - `SubWithRate` (latest-wins holding) is rejected with a panic, as is

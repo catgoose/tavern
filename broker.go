@@ -108,9 +108,20 @@ type chanGuard struct {
 	// It is set before the channel becomes visible to publishers and never
 	// changes afterwards.
 	lossAware bool
-	// closedSig is created on demand by closeSignal and closed together with
-	// the subscriber channel.
+	// closedSig is created on demand and closed as soon as the channel starts
+	// closing, releasing blocked senders and close watchers.
 	closedSig chan struct{}
+	// blocked counts senders waiting in sendBlocking without holding mu;
+	// closeChan waits for them before closing the channel.
+	blocked sync.WaitGroup
+}
+
+// signal returns closedSig, creating it if needed. The caller holds g.mu.
+func (g *chanGuard) signal() chan struct{} {
+	if g.closedSig == nil {
+		g.closedSig = make(chan struct{})
+	}
+	return g.closedSig
 }
 
 // closeSignal returns a channel that is closed when the subscriber channel
@@ -124,16 +135,44 @@ func (b *SSEBroker) closeSignal(topic string, ro <-chan string) <-chan struct{} 
 			g.mu.Lock()
 			defer g.mu.Unlock()
 			if !g.closed {
-				if g.closedSig == nil {
-					g.closedSig = make(chan struct{})
-				}
-				return g.closedSig
+				return g.signal()
 			}
 		}
 	}
 	sig := make(chan struct{})
 	close(sig)
 	return sig
+}
+
+// sendBlocking waits up to timeout for room on ch. It does not hold the
+// guard while waiting, so ordinary sends proceed, and closeChan releases it
+// immediately. timedOut is false when the channel closed instead.
+func (b *SSEBroker) sendBlocking(ch chan string, msg string, timeout time.Duration) (sent, timedOut bool) {
+	v, ok := b.chanGuards.Load(ch)
+	if !ok {
+		return false, false
+	}
+	g := v.(*chanGuard)
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return false, false
+	}
+	closing := g.signal()
+	g.blocked.Add(1)
+	g.mu.Unlock()
+	defer g.blocked.Done()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case ch <- msg:
+		return true, false
+	case <-closing:
+		return false, false
+	case <-timer.C:
+		return false, true
+	}
 }
 
 func (b *SSEBroker) isLossAware(ch chan string) bool {
@@ -169,14 +208,19 @@ func (b *SSEBroker) closeChan(ch chan string) {
 	if v, ok := b.chanGuards.Load(ch); ok {
 		g := v.(*chanGuard)
 		g.mu.Lock()
-		if !g.closed {
+		if g.closed {
+			g.mu.Unlock()
+		} else {
 			g.closed = true
-			close(ch)
 			if g.closedSig != nil {
 				close(g.closedSig)
 			}
+			g.mu.Unlock()
+			// No new sender can start once closed is set; wait for blocked
+			// senders, which return promptly on closedSig.
+			g.blocked.Wait()
+			close(ch)
 		}
-		g.mu.Unlock()
 		b.chanGuards.Delete(ch)
 	}
 }
@@ -888,40 +932,30 @@ func (b *SSEBroker) incrementDropCount(ch chan string) int64 {
 
 func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 	b.mu.Lock()
-	removed := true
-	if _, ok := b.topics[topic][ch]; ok {
+	_, unscoped := b.topics[topic][ch]
+	_, scoped := b.scopedTopics[topic][ch]
+	removed := unscoped || scoped
+	var lastHooks []func(string)
+	var isLast bool
+	if removed {
 		delete(b.topics[topic], ch)
-		delete(b.subscriberMeta, ch)
-		delete(b.filterPredicates, ch)
-		b.closeChan(ch)
-		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-		var lastHooks []func(string)
-		if total == 0 {
-			lastHooks = b.onLast[topic]
-			b.topicEmpty[topic] = time.Now()
-		}
-		b.mu.Unlock()
-		for _, fn := range lastHooks {
-			go fn(topic)
-		}
-	} else if _, ok := b.scopedTopics[topic][ch]; ok {
 		delete(b.scopedTopics[topic], ch)
 		delete(b.subscriberMeta, ch)
 		delete(b.filterPredicates, ch)
 		b.closeChan(ch)
-		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-		var lastHooks []func(string)
-		if total == 0 {
+		if len(b.topics[topic])+len(b.scopedTopics[topic]) == 0 {
+			isLast = true
 			lastHooks = b.onLast[topic]
 			b.topicEmpty[topic] = time.Now()
 		}
-		b.mu.Unlock()
-		for _, fn := range lastHooks {
-			go fn(topic)
-		}
-	} else {
-		removed = false
-		b.mu.Unlock()
+	}
+	hasBackend := b.backend != nil
+	b.mu.Unlock()
+	for _, fn := range lastHooks {
+		go fn(topic)
+	}
+	if hasBackend && isLast {
+		b.backendUnsubscribe(topic)
 	}
 	// Clean up drop counter.
 	b.dropCountsMu.Lock()

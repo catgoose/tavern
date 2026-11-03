@@ -1,6 +1,7 @@
 package tavern
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -149,4 +150,90 @@ func TestOnPublishDrop_NotCalledWhenNoDrops(t *testing.T) {
 	}
 
 	assert.False(t, called.Load(), "callback should not fire when no drops occur")
+}
+
+func TestPublishBlocking_ReleasedByUnsubscribe(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1))
+	defer b.Close()
+
+	ch, unsub := b.Subscribe("t")
+	b.Publish("t", "fill")
+
+	result := make(chan error, 1)
+	go func() { result <- b.PublishBlocking("t", "waiting", time.Minute) }()
+	waitForBlockedSender(t, b, "t", ch)
+
+	// Ordinary publishing is not held up by the blocked publisher.
+	b.Publish("t", "nonblocking")
+	assert.Equal(t, int64(1), b.PublishDrops())
+
+	unsub()
+	select {
+	case err := <-result:
+		assert.NoError(t, err, "a closed subscriber is not a timeout")
+	case <-time.After(time.Second):
+		t.Fatal("unsubscribe did not release the blocked publisher")
+	}
+	_, ok := <-ch
+	assert.True(t, ok, "buffered message stays readable")
+	_, ok = <-ch
+	assert.False(t, ok)
+}
+
+func TestPublishBlocking_ReleasedByClose(t *testing.T) {
+	b := NewSSEBroker(WithBufferSize(1))
+
+	ch, unsub := b.Subscribe("t")
+	defer unsub()
+	b.Publish("t", "fill")
+
+	result := make(chan error, 1)
+	go func() { result <- b.PublishBlocking("t", "waiting", time.Minute) }()
+	waitForBlockedSender(t, b, "t", ch)
+
+	b.Close()
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not release the blocked publisher")
+	}
+}
+
+func TestPublishBlocking_ConcurrentLossEvictionNoRace(t *testing.T) {
+	for range 20 {
+		b := NewSSEBroker(WithBufferSize(1))
+		_, unsubLoss := b.SubscribeWith("t", SubWithDisconnectOnLoss())
+		ordinary, unsubOrdinary := b.Subscribe("t")
+		b.Publish("t", "fill")
+
+		var wg sync.WaitGroup
+		for range 10 {
+			wg.Go(func() { _ = b.PublishBlocking("t", "lost", time.Millisecond) })
+			wg.Go(func() { b.Publish("t", "nonblocking") })
+		}
+		wg.Go(func() {
+			for range ordinary {
+			}
+		})
+		wg.Go(unsubOrdinary)
+		wg.Go(unsubLoss)
+		wg.Go(b.Close)
+		wg.Wait()
+	}
+}
+
+// waitForBlockedSender waits until a PublishBlocking call is parked on the
+// subscriber channel behind ro.
+func waitForBlockedSender(t *testing.T, b *SSEBroker, topic string, ro <-chan string) {
+	t.Helper()
+	ch := b.findBiChanAny(topic, ro)
+	require.NotNil(t, ch)
+	v, ok := b.chanGuards.Load(ch)
+	require.True(t, ok)
+	g := v.(*chanGuard)
+	require.Eventually(t, func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.closedSig != nil
+	}, time.Second, time.Millisecond)
 }
