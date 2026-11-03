@@ -1,0 +1,62 @@
+name: Validate
+
+# Shared by PR Check and Pipeline so both run the same checks on every module.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  module:
+    name: module (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: tavern
+            dir: .
+          - name: tavernprom
+            dir: tavernprom
+          - name: tavernotel
+            dir: tavernotel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: ${{ matrix.dir }}/go.sum
+
+      - name: Tidy, vet, test and lint
+        run: make check-module MODULE=${{ matrix.dir }}
+
+  automation:
+    name: workflows and scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Lint workflows and test release script
+        run: make lint-workflows test-scripts

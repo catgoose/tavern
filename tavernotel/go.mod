@@ -1,9 +1,9 @@
 module github.com/catgoose/tavern/tavernotel
 
-go 1.26.2
+go 1.27.3
 
 require (
-	github.com/catgoose/tavern v0.0.0
+	github.com/catgoose/tavern v0.4.105
 	go.opentelemetry.io/otel v1.35.0
 	go.opentelemetry.io/otel/metric v1.35.0
 	go.opentelemetry.io/otel/sdk/metric v1.35.0
