@@ -43,7 +43,7 @@ type left struct {
 // rejectedSubscription is returned when registration does not happen: a
 // closed channel and a no-op unsubscribe after Close, or nil, nil when
 // admission control rejects the subscriber.
-func rejectedSubscription(closed bool) (<-chan string, func()) {
+func rejectedSubscription(closed bool) (msgs <-chan string, unsubscribe func()) {
 	if !closed {
 		return nil, nil
 	}
