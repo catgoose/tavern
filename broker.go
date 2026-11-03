@@ -104,6 +104,102 @@ type scopedSub struct {
 type chanGuard struct {
 	mu     sync.Mutex
 	closed bool
+	// lossAware marks a subscription created with [SubWithDisconnectOnLoss].
+	// It is set before the channel becomes visible to publishers and never
+	// changes afterwards.
+	lossAware bool
+	// closedSig is created on demand and closed as soon as the channel starts
+	// closing, releasing blocked senders and close watchers.
+	closedSig chan struct{}
+	// blocked counts senders waiting in sendBlocking without holding mu;
+	// closeChan waits for them before closing the channel.
+	blocked sync.WaitGroup
+}
+
+// signal returns closedSig, creating it if needed. The caller holds g.mu.
+func (g *chanGuard) signal() chan struct{} {
+	if g.closedSig == nil {
+		g.closedSig = make(chan struct{})
+	}
+	return g.closedSig
+}
+
+// closeSignal returns a channel that is closed when the subscriber channel
+// behind ro closes. It lets a reader blocked elsewhere notice the closure
+// without draining ro first. If the subscription is already gone the
+// returned channel is closed.
+func (b *SSEBroker) closeSignal(topic string, ro <-chan string) <-chan struct{} {
+	if ch := b.findBiChanAny(topic, ro); ch != nil {
+		if v, ok := b.chanGuards.Load(ch); ok {
+			g := v.(*chanGuard)
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if !g.closed {
+				return g.signal()
+			}
+		}
+	}
+	sig := make(chan struct{})
+	close(sig)
+	return sig
+}
+
+// sendBlocking waits up to timeout for room on ch. It does not hold the
+// guard while waiting, so ordinary sends proceed, and closeChan releases it
+// immediately. timedOut is false when the channel closed instead.
+func (b *SSEBroker) sendBlocking(ch chan string, msg string, timeout time.Duration) (sent, timedOut bool) {
+	v, ok := b.chanGuards.Load(ch)
+	if !ok {
+		return false, false
+	}
+	g := v.(*chanGuard)
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return false, false
+	}
+	closing := g.signal()
+	g.blocked.Add(1)
+	g.mu.Unlock()
+	defer g.blocked.Done()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case ch <- msg:
+		return true, false
+	case <-closing:
+		return false, false
+	case <-timer.C:
+		return false, true
+	}
+}
+
+func (b *SSEBroker) isLossAware(ch chan string) bool {
+	v, ok := b.chanGuards.Load(ch)
+	return ok && v.(*chanGuard).lossAware
+}
+
+// trySend performs a guarded non-blocking send for messages delivered
+// outside the publish fan-out (replay and control events). It returns false
+// if the channel is full or already closed.
+func (b *SSEBroker) trySend(ch chan string, msg string) bool {
+	v, ok := b.chanGuards.Load(ch)
+	if !ok {
+		return false
+	}
+	g := v.(*chanGuard)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
+	}
 }
 
 // closeChan safely closes a subscriber channel via its guard, preventing
@@ -112,11 +208,19 @@ func (b *SSEBroker) closeChan(ch chan string) {
 	if v, ok := b.chanGuards.Load(ch); ok {
 		g := v.(*chanGuard)
 		g.mu.Lock()
-		if !g.closed {
+		if g.closed {
+			g.mu.Unlock()
+		} else {
 			g.closed = true
+			if g.closedSig != nil {
+				close(g.closedSig)
+			}
+			g.mu.Unlock()
+			// No new sender can start once closed is set; wait for blocked
+			// senders, which return promptly on closedSig.
+			g.blocked.Wait()
 			close(ch)
 		}
-		g.mu.Unlock()
 		b.chanGuards.Delete(ch)
 	}
 }
@@ -622,12 +726,6 @@ func (b *SSEBroker) Stats() BrokerStats {
 	}
 }
 
-// send attempts to send msg on ch. If the channel is full and dropOldest is
-// enabled, it drains the oldest message first. Returns true if sent, false if
-// dropped.
-// send attempts to send msg on ch. If the channel is full and dropOldest is
-// enabled, it drains the oldest message first and counts the drop. Returns
-// true if the new message was sent, false if it was dropped entirely.
 // filterPredicate returns the filter predicate for the given channel, or nil
 // if no filter is set. The caller must not hold b.mu.
 func (b *SSEBroker) filterPredicate(ch chan string) FilterPredicate {
@@ -637,6 +735,11 @@ func (b *SSEBroker) filterPredicate(ch chan string) FilterPredicate {
 	return pred
 }
 
+// send attempts to send msg on ch. If the channel is full and dropOldest is
+// enabled, it drains the oldest message first and counts the drop. Returns
+// true if the new message was sent, false if it was dropped entirely.
+// Disconnect-on-loss subscriptions never drain buffered messages; a full
+// queue drops the new message so the caller can terminate the subscription.
 func (b *SSEBroker) send(ch chan string, msg string) bool {
 	v, ok := b.chanGuards.Load(ch)
 	if !ok {
@@ -648,7 +751,7 @@ func (b *SSEBroker) send(ch chan string, msg string) bool {
 	if g.closed {
 		return false
 	}
-	if b.dropOldest {
+	if b.dropOldest && !g.lossAware {
 		select {
 		case ch <- msg:
 			return true
@@ -699,6 +802,20 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 			// reader goroutine. Replaced messages do not count as drops.
 			if b.coalesceStore(ch, msg) {
 				sent++
+				return
+			}
+
+			// Disconnect-on-loss: the first message that cannot be queued
+			// terminates the subscription, independent of eviction
+			// thresholds and adaptive tiers.
+			if b.isLossAware(ch) {
+				if b.send(ch, msg) {
+					sent++
+					return
+				}
+				b.drops.Add(1)
+				dropped++
+				b.evictSubscriber(topic, ch)
 				return
 			}
 
@@ -815,38 +932,30 @@ func (b *SSEBroker) incrementDropCount(ch chan string) int64 {
 
 func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 	b.mu.Lock()
-	if _, ok := b.topics[topic][ch]; ok {
+	_, unscoped := b.topics[topic][ch]
+	_, scoped := b.scopedTopics[topic][ch]
+	removed := unscoped || scoped
+	var lastHooks []func(string)
+	var isLast bool
+	if removed {
 		delete(b.topics[topic], ch)
-		delete(b.subscriberMeta, ch)
-		delete(b.filterPredicates, ch)
-		b.closeChan(ch)
-		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-		var lastHooks []func(string)
-		if total == 0 {
-			lastHooks = b.onLast[topic]
-			b.topicEmpty[topic] = time.Now()
-		}
-		b.mu.Unlock()
-		for _, fn := range lastHooks {
-			go fn(topic)
-		}
-	} else if _, ok := b.scopedTopics[topic][ch]; ok {
 		delete(b.scopedTopics[topic], ch)
 		delete(b.subscriberMeta, ch)
 		delete(b.filterPredicates, ch)
 		b.closeChan(ch)
-		total := len(b.topics[topic]) + len(b.scopedTopics[topic])
-		var lastHooks []func(string)
-		if total == 0 {
+		if len(b.topics[topic])+len(b.scopedTopics[topic]) == 0 {
+			isLast = true
 			lastHooks = b.onLast[topic]
 			b.topicEmpty[topic] = time.Now()
 		}
-		b.mu.Unlock()
-		for _, fn := range lastHooks {
-			go fn(topic)
-		}
-	} else {
-		b.mu.Unlock()
+	}
+	hasBackend := b.backend != nil
+	b.mu.Unlock()
+	for _, fn := range lastHooks {
+		go fn(topic)
+	}
+	if hasBackend && isLast {
+		b.backendUnsubscribe(topic)
 	}
 	// Clean up drop counter.
 	b.dropCountsMu.Lock()
@@ -855,6 +964,11 @@ func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
 	// Clean up adaptive state.
 	if b.adaptive != nil {
 		b.adaptive.removeState(ch)
+	}
+	// A concurrent unsubscribe or eviction already removed the subscriber;
+	// do not report a second eviction.
+	if !removed {
+		return
 	}
 	if b.obs != nil {
 		b.obs.recordEviction(topic)

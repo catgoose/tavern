@@ -94,10 +94,7 @@ func (b *SSEBroker) buildReconnectInfo(topic, lastEventID string, ch chan string
 		Topic:       topic,
 		LastEventID: lastEventID,
 		SendToSubscriber: func(msg string) {
-			select {
-			case ch <- msg:
-			default:
-			}
+			b.trySend(ch, msg)
 		},
 	}
 
