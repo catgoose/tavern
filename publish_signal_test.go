@@ -193,7 +193,8 @@ func TestPublishBlocking_ReleasedByClose(t *testing.T) {
 
 	b.Close()
 	select {
-	case <-result:
+	case err := <-result:
+		assert.NoError(t, err, "a closed subscriber is not a timeout")
 	case <-time.After(time.Second):
 		t.Fatal("Close did not release the blocked publisher")
 	}
