@@ -504,8 +504,8 @@ func finishWithin(t *testing.T, w *deadlineWriter, done <-chan error) error {
 		return err
 	case <-time.After(2 * time.Second):
 		_ = w.SetWriteDeadline(time.Now())
-		<-done
-		t.Fatal("cancelled stream started or rearmed a blocked write")
+		err := <-done
+		t.Fatalf("cancelled stream started or rearmed a blocked write (returned %v)", err)
 		return nil
 	}
 }
