@@ -13,8 +13,10 @@ type subscribeConfig struct {
 	meta       *SubscribeMeta
 	snapshotFn func() string
 
-	disconnectOnLoss      bool
-	terminateOnInnerClose bool
+	disconnectOnLoss       bool
+	terminateOnInnerClose  bool
+	terminateOnReplayError bool
+	status                 *SubscriptionStatus
 }
 
 // SubscribeOption configures a composable subscription created via
@@ -119,6 +121,42 @@ func SubWithTerminateOnInnerClose() SubscribeOption {
 	}
 }
 
+// SubWithStatus records how the subscription ends in status. See
+// [SubscriptionStatus] for its guarantees. A status belongs to one
+// subscription; attaching it twice panics.
+//
+// Supported by [SSEBroker.SubscribeWith], [SSEBroker.SubscribeFromIDWith]
+// and [SSEBroker.SubscribeMultiWith]. For a multi-topic subscription status
+// describes the aggregate: with [SubWithTerminateOnInnerClose] or
+// [SubWithDisconnectOnLoss] it holds the cause and topic of the inner
+// subscription that ended the aggregate; otherwise it holds the cause of the
+// last inner subscription to end. [SSEBroker.SubscribeGlobWith] panics.
+func SubWithStatus(status *SubscriptionStatus) SubscribeOption {
+	return func(c *subscribeConfig) {
+		c.status = status
+	}
+}
+
+// SubWithTerminateOnReplayError ends the subscription with
+// [TerminationReplayFailure] when a [ReplayStore] read for its replay
+// fails, instead of continuing as if replay had succeeded (or, for a
+// resume, as if the Last-Event-ID were not found). Nothing from the failed
+// replay and no tavern-reconnected event is delivered; a snapshot already
+// queued stays readable before the channel closes. The error is in the
+// Termination recorded by [SubWithStatus] and is also reported to
+// [WithReplayStoreErrorHandler].
+//
+// Without this option a failed read is reported but the subscription
+// continues: Latest failures replay nothing and AfterID failures follow the
+// Last-Event-ID-not-found gap policy. Subscriptions that do not read the
+// store (filter or snapshot variants, or no ReplayStore) are unaffected.
+// [SSEBroker.SubscribeGlobWith] panics.
+func SubWithTerminateOnReplayError() SubscribeOption {
+	return func(c *subscribeConfig) {
+		c.terminateOnReplayError = true
+	}
+}
+
 // rejectLossyCombinations panics for option combinations that cannot honor
 // disconnect-on-loss.
 func (c subscribeConfig) rejectLossyCombinations() {
@@ -131,6 +169,9 @@ func buildSubscribeConfig(opts []SubscribeOption) subscribeConfig {
 	var cfg subscribeConfig
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if cfg.status != nil {
+		cfg.status.attach()
 	}
 	return cfg
 }
@@ -165,6 +206,9 @@ func (c subscribeConfig) spec() subSpec {
 		filter:    c.filter,
 		meta:      c.meta,
 		lossAware: c.disconnectOnLoss,
+		status:    c.status,
+
+		terminateOnReplayError: c.terminateOnReplayError,
 	}
 	if c.rate != nil {
 		spec.rate = c.rate.interval()
@@ -203,20 +247,32 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 	if cfg.disconnectOnLoss {
 		innerOpts = append(innerOpts, SubWithDisconnectOnLoss())
 	}
+	if cfg.terminateOnReplayError {
+		innerOpts = append(innerOpts, SubWithTerminateOnReplayError())
+	}
+	status := cfg.status
+	tracked := terminate || status != nil
 
 	// Subscribe every topic before starting fan-in so the full unsubscribe
 	// set exists before any worker can trigger termination.
 	type inner struct {
 		topic  string
 		ch     <-chan string
-		closed <-chan struct{} // nil unless terminate
+		status *SubscriptionStatus // nil unless tracked
 	}
 	inners := make([]inner, 0, len(topics))
 	unsubs := make([]func(), 0, len(topics))
 	for _, topic := range topics {
-		ch, unsub := b.SubscribeWith(topic, innerOpts...)
+		in := inner{topic: topic}
+		opts := innerOpts
+		if tracked {
+			in.status = NewSubscriptionStatus()
+			opts = append(innerOpts[:len(innerOpts):len(innerOpts)], SubWithStatus(in.status))
+		}
+		ch, unsub := b.SubscribeWith(topic, opts...)
 		if ch == nil {
 			if terminate {
+				status.finish(Termination{Reason: TerminationRejected, Topic: topic})
 				for _, u := range unsubs {
 					u()
 				}
@@ -224,12 +280,22 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 			}
 			continue
 		}
-		in := inner{topic: topic, ch: ch}
-		if terminate {
-			in.closed = b.closeSignal(topic, ch)
-		}
+		in.ch = ch
 		inners = append(inners, in)
 		unsubs = append(unsubs, unsub)
+	}
+
+	innerEnded := func(in inner) {
+		if terminate {
+			status.finish(in.status.Termination())
+		}
+	}
+	// innerDone is nil (never ready) unless terminate.
+	innerDone := func(in inner) <-chan struct{} {
+		if terminate {
+			return in.status.Done()
+		}
+		return nil
 	}
 
 	out := make(chan TopicMessage, b.bufferSize)
@@ -256,6 +322,7 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 				select {
 				case msg, ok := <-in.ch:
 					if !ok {
+						innerEnded(in)
 						if terminate {
 							doUnsub()
 						}
@@ -263,9 +330,10 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 					}
 					select {
 					case out <- TopicMessage{Topic: in.topic, Data: msg}:
-					case <-in.closed:
+					case <-innerDone(in):
 						// The inner subscription ended while the aggregate
 						// was full; terminate without waiting for a reader.
+						innerEnded(in)
 						doUnsub()
 						return
 					case <-done:
@@ -285,10 +353,27 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 
 	go func() {
 		wg.Wait()
+		if status == nil {
+			closeOut()
+			return
+		}
+		// Without terminate the aggregate ends with its last inner
+		// subscription.
+		innerStatuses := make([]*SubscriptionStatus, len(inners))
+		for i, in := range inners {
+			innerStatuses[i] = in.status
+		}
+		if t, ok := lastEnded(innerStatuses); ok {
+			status.finish(t)
+		} else {
+			// No inner subscription was admitted.
+			status.finish(Termination{Reason: TerminationRejected})
+		}
 		closeOut()
 	}()
 
 	return out, func() {
+		status.finish(Termination{Reason: TerminationUnsubscribe})
 		doUnsub()
 		wg.Wait()
 		closeOut()
@@ -296,12 +381,19 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 }
 
 // SubscribeGlobWith subscribes to a glob pattern with composable options.
-// [SubWithDisconnectOnLoss] is not supported and panics;
+// [SubWithDisconnectOnLoss], [SubWithStatus] and
+// [SubWithTerminateOnReplayError] are not supported and panic;
 // [SubWithTerminateOnInnerClose] has no effect.
 func (b *SSEBroker) SubscribeGlobWith(pattern string, opts ...SubscribeOption) (msgs <-chan TopicMessage, unsubscribe func()) {
 	cfg := buildSubscribeConfig(opts)
 	if cfg.disconnectOnLoss {
 		panic("tavern: SubscribeGlobWith does not support SubWithDisconnectOnLoss")
+	}
+	if cfg.status != nil {
+		panic("tavern: SubscribeGlobWith does not support SubWithStatus")
+	}
+	if cfg.terminateOnReplayError {
+		panic("tavern: SubscribeGlobWith does not support SubWithTerminateOnReplayError")
 	}
 
 	var rawCh <-chan TopicMessage

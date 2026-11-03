@@ -94,7 +94,7 @@ func (b *SSEBroker) Disconnect(topic, subscriberID string) bool {
 		b.mu.Unlock()
 		return false
 	}
-	l := b.removeLocked(topic, target)
+	l := b.removeLocked(topic, target, Termination{Reason: TerminationDisconnect, Topic: topic})
 	b.mu.Unlock()
 	b.finishLeave(topic, target, l)
 	b.publishConnectionEvent("disconnect", topic, -1)

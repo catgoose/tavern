@@ -86,6 +86,8 @@ type SSEBroker struct {
 	onPublishDropFn   func(topic string, droppedForCount int) // nil = no drop callback
 	replayStore       ReplayStore                        // nil = use internal maps
 	chanGuards        sync.Map                                // chan string → *chanGuard
+	onReplayStoreError func(*ReplayStoreError)                // nil = no handler
+	replayStoreErrs   atomic.Int64                            // failed ReplayStore operations
 	backendMu         sync.Mutex                              // protects backendTopics
 	backendTopics     map[string]*backendTopic                // topic → backend subscription state
 }
@@ -117,6 +119,9 @@ type chanGuard struct {
 	// blocked counts senders waiting in sendBlocking without holding mu;
 	// closeChan waits for them before closing the channel.
 	blocked sync.WaitGroup
+	// status, when set, receives the terminal cause before the channel
+	// closes. Set before the channel is registered and never changed.
+	status *SubscriptionStatus
 }
 
 // signal returns closedSig, creating it if needed. The caller holds g.mu.
@@ -125,26 +130,6 @@ func (g *chanGuard) signal() chan struct{} {
 		g.closedSig = make(chan struct{})
 	}
 	return g.closedSig
-}
-
-// closeSignal returns a channel that is closed when the subscriber channel
-// behind ro closes. It lets a reader blocked elsewhere notice the closure
-// without draining ro first. If the subscription is already gone the
-// returned channel is closed.
-func (b *SSEBroker) closeSignal(topic string, ro <-chan string) <-chan struct{} {
-	if ch := b.readToBidir(topic, ro); ch != nil {
-		if v, ok := b.chanGuards.Load(ch); ok {
-			g := v.(*chanGuard)
-			g.mu.Lock()
-			defer g.mu.Unlock()
-			if !g.closed {
-				return g.signal()
-			}
-		}
-	}
-	sig := make(chan struct{})
-	close(sig)
-	return sig
 }
 
 // sendBlocking waits up to timeout for room on ch. It does not hold the
@@ -206,8 +191,9 @@ func (b *SSEBroker) trySend(ch chan string, msg string) bool {
 }
 
 // closeChan safely closes a subscriber channel via its guard, preventing
-// double-close and racing with concurrent sends.
-func (b *SSEBroker) closeChan(ch chan string) {
+// double-close and racing with concurrent sends. The first close records t
+// on the subscription's status.
+func (b *SSEBroker) closeChan(ch chan string, t Termination) {
 	if v, ok := b.chanGuards.Load(ch); ok {
 		g := v.(*chanGuard)
 		g.mu.Lock()
@@ -215,6 +201,7 @@ func (b *SSEBroker) closeChan(ch chan string) {
 			g.mu.Unlock()
 		} else {
 			g.closed = true
+			g.status.finish(t)
 			if g.closedSig != nil {
 				close(g.closedSig)
 			}
@@ -411,7 +398,7 @@ func (b *SSEBroker) subscribeLive(topic string, spec subSpec, withSnapshot bool)
 	j, closed := b.registerLocked(topic, spec)
 	if j == nil {
 		b.mu.Unlock()
-		return rejectedSubscription(closed)
+		return rejectedSubscription(closed, spec.status, topic)
 	}
 	var replayMsgs []string
 	var store ReplayStore
@@ -425,13 +412,19 @@ func (b *SSEBroker) subscribeLive(topic string, spec subSpec, withSnapshot bool)
 		replayMsgs = append([]string(nil), b.replayCache[topic]...)
 	}
 	b.mu.Unlock()
+	b.finishJoin(topic, j)
 	if store != nil {
-		entries, _ := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
+		entries, err := store.Latest(context.Background(), topic, b.replayStoreLimit(topic))
+		if err != nil {
+			rse := b.replayStoreFailed(ReplayOpLatest, topic, err)
+			if spec.terminateOnReplayError {
+				return b.failReplay(topic, j.ch, rse)
+			}
+		}
 		for _, e := range entries {
 			replayMsgs = append(replayMsgs, e.Msg)
 		}
 	}
-	b.finishJoin(topic, j)
 	for _, msg := range replayMsgs {
 		if spec.filter != nil && !spec.filter(msg) {
 			continue
@@ -547,6 +540,9 @@ type BrokerStats struct {
 	Subscribers int
 	// PublishDrops is the cumulative number of dropped messages.
 	PublishDrops int64
+	// ReplayStoreErrors is the cumulative number of failed [ReplayStore]
+	// operations.
+	ReplayStoreErrors int64
 }
 
 // Stats returns a point-in-time [BrokerStats] snapshot. It is a convenience
@@ -569,7 +565,8 @@ func (b *SSEBroker) Stats() BrokerStats {
 	return BrokerStats{
 		Topics:       topics,
 		Subscribers:  subs,
-		PublishDrops: b.drops.Load(),
+		PublishDrops:      b.drops.Load(),
+		ReplayStoreErrors: b.replayStoreErrs.Load(),
 	}
 }
 
@@ -662,7 +659,7 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 				}
 				b.drops.Add(1)
 				dropped++
-				b.evictSubscriber(topic, ch)
+				b.evictSubscriber(topic, ch, TerminationQueueLoss)
 				return
 			}
 
@@ -704,7 +701,7 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 				dropped++
 				if b.evictThreshold > 0 {
 					if b.incrementDropCount(ch) >= int64(b.evictThreshold) {
-						b.evictSubscriber(topic, ch)
+						b.evictSubscriber(topic, ch, TerminationEvicted)
 					}
 				}
 				if b.adaptive != nil {
@@ -719,7 +716,7 @@ func (b *SSEBroker) publishToChannels(topic string, channels []chan string, msg 
 						b.fireTierChange(ch, oldTier, newTier)
 					}
 					if newTier == TierDisconnect {
-						b.evictSubscriber(topic, ch)
+						b.evictSubscriber(topic, ch, TerminationEvicted)
 					}
 				}
 			}
@@ -774,10 +771,10 @@ func (b *SSEBroker) incrementDropCount(ch chan string) int64 {
 	return counter.Add(1)
 }
 
-func (b *SSEBroker) evictSubscriber(topic string, ch chan string) {
+func (b *SSEBroker) evictSubscriber(topic string, ch chan string, reason TerminationReason) {
 	// A concurrent unsubscribe or eviction already removed the subscriber;
 	// do not report a second eviction.
-	if !b.removeSubscriber(topic, ch) {
+	if !b.removeSubscriber(topic, ch, Termination{Reason: reason, Topic: topic}) {
 		return
 	}
 	if b.obs != nil {
@@ -877,7 +874,7 @@ func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
 	b.mu.Unlock()
 
 	if store != nil {
-		_ = store.Append(context.Background(), topic, ReplayEntry{Msg: msg, PublishedAt: time.Now()})
+		b.appendReplay(store, topic, ReplayEntry{Msg: msg, PublishedAt: time.Now()})
 	}
 
 	if len(channels) > 0 {
@@ -913,7 +910,9 @@ func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 		delete(b.bundleOnReconnect, topic)
 		b.mu.Unlock()
 		if store != nil {
-			_ = store.DeleteTopic(context.Background(), topic)
+			if err := store.DeleteTopic(context.Background(), topic); err != nil {
+				b.replayStoreFailed(ReplayOpDeleteTopic, topic, err)
+			}
 		}
 		return
 	}
@@ -928,7 +927,9 @@ func (b *SSEBroker) SetReplayPolicy(topic string, n int) {
 	}
 	b.mu.Unlock()
 	if store != nil {
-		_ = store.SetMaxEntries(context.Background(), topic, n)
+		if err := store.SetMaxEntries(context.Background(), topic, n); err != nil {
+			b.replayStoreFailed(ReplayOpSetMaxEntries, topic, err)
+		}
 	}
 }
 
@@ -945,7 +946,9 @@ func (b *SSEBroker) ClearReplay(topic string) {
 	delete(b.bundleOnReconnect, topic)
 	b.mu.Unlock()
 	if store != nil {
-		_ = store.DeleteTopic(context.Background(), topic)
+		if err := store.DeleteTopic(context.Background(), topic); err != nil {
+			b.replayStoreFailed(ReplayOpDeleteTopic, topic, err)
+		}
 	}
 }
 
@@ -1215,14 +1218,14 @@ func (b *SSEBroker) Close() {
 	for topic, subs := range b.topics {
 		for ch := range subs {
 			delete(subs, ch)
-			b.closeChan(ch)
+			b.closeChan(ch, Termination{Reason: TerminationBrokerClosed, Topic: topic})
 		}
 		delete(b.topics, topic)
 	}
 	for topic, subs := range b.scopedTopics {
 		for ch := range subs {
 			delete(subs, ch)
-			b.closeChan(ch)
+			b.closeChan(ch, Termination{Reason: TerminationBrokerClosed, Topic: topic})
 		}
 		delete(b.scopedTopics, topic)
 	}

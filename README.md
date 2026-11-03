@@ -1009,6 +1009,32 @@ if errors.Is(err, tavern.ErrPublishTimeout) {
 Also available: `PublishBlockingTo` for scoped subscribers. A zero timeout
 falls back to non-blocking behavior.
 
+### Why a subscription ended (SubWithStatus)
+
+Attach a `SubscriptionStatus` to learn why a subscription ended without
+relying on a message in its (possibly full) queue:
+
+```go
+status := tavern.NewSubscriptionStatus()
+ch, unsub := broker.SubscribeFromIDWith("orders", lastEventID,
+    tavern.SubWithDisconnectOnLoss(),
+    tavern.SubWithTerminateOnReplayError(),
+    tavern.SubWithStatus(status),
+)
+defer unsub()
+// ... stream ch until it closes ...
+switch end := status.Termination(); end.Reason {
+case tavern.TerminationQueueLoss, tavern.TerminationReplayFailure:
+    // refetch canonical state, then resubscribe
+}
+```
+
+The cause is recorded before the channel closes and the first cause wins.
+`SubWithTerminateOnReplayError` ends the subscription when a `ReplayStore`
+read fails rather than treating it as an empty replay or a replay gap. See
+[docs/delivery-observability.md](docs/delivery-observability.md#subscription-termination)
+for every cause, multi-topic behavior and replay store failures.
+
 ### App-shell lifeline architecture
 
 For apps that go beyond page-local SSE, Tavern supports a **lifeline + scoped
@@ -1327,6 +1353,7 @@ broker2 := tavern.NewSSEBroker(tavern.WithBackend(fork))
 | `WithConnectionEvents(topic)` | disabled | Publish subscribe/unsubscribe events |
 | `WithMessageTTLSweep(d)` | 1s | Interval for expired TTL entry cleanup |
 | `WithReplayStore(store)` | nil | Pluggable replay persistence backend |
+| `WithReplayStoreErrorHandler(fn)` | nil | Receive every failed `ReplayStore` operation |
 | `WithLogger(l)` | nil | Log panics and errors via slog |
 | `WithBackend(b)` | nil | Cross-process fan-out backend |
 

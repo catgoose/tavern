@@ -23,14 +23,15 @@ The existing commit_policy: ask is satisfied by the user's explicit commit/PR/me
 
 ## Passes
 
-- [ ] Pass 001: Consistent subscription lifecycle.
+- [x] Pass 001: Consistent subscription lifecycle.
   - Requirements: Shared internal lifecycle ownership where it prevents divergence; safe registration, unsubscribe, administrative disconnect, eviction, broker shutdown, backend first/last transitions, and worker cancellation across normal, scoped, filtered, snapshot, replay, rate and coalescing subscriptions. Fix demonstrated shutdown/send races. Preserve public signatures and documented delivery differences. Establish reusable lifecycle contract tests.
   - Plan: .agents/.local/plans/handoff-005-consistent-subscription-lifecycle.md
-  - Review:
+  - Review: https://github.com/catgoose/tavern/pull/230 (merged).
+    - Reviewed commit: `9d00ba25172980e84f7a10fe7338bd87b4142416`
 
 - [ ] Pass 002: Observable subscription and storage failures.
   - Requirements: Applications can observe useful structured termination reasons without depending on a full message queue. Replay-store errors become explicit, observable failures with defined recovery behavior rather than looking like successful empty replay. Metrics/docs distinguish queued delivery from transport writes and application processing. Prefer additive compatibility and bounded observability state.
-  - Plan:
+  - Plan: .agents/.local/plans/handoff-006-observable-subscription-and-replay-storage-failures.md
   - Review:
 
 - [ ] Pass 003: HTTP streaming deadlines and production operations.
