@@ -3,8 +3,12 @@
 A starting point for running Tavern-backed SSE in production: which settings
 interact, what the signals mean, and how clients are expected to recover. It
 describes Tavern's current delivery semantics. Proxy and platform settings are
-suggestions to verify in your environment, not tested recipes; the sections
-say which behavior is covered by Tavern's own tests.
+suggestions to verify in your environment; the sections say which behavior
+is covered by Tavern's own tests. The
+[task board reference](../examples/taskboard/README.md) applies this guide
+end to end, including a tested nginx configuration, and the
+[capacity exercise](../examples/capacity/README.md) measures queue and
+memory behavior for a workload you describe.
 
 Related references:
 
@@ -100,10 +104,12 @@ so middleware that wraps the `ResponseWriter` must implement
   stream without a bound that was asked for.
 - A custom `WithSSEWriter` runs under the deadline, but only writes to the
   connection are interrupted by it. A writer that blocks elsewhere is not.
-- Tavern's tests cover deadlines over net/http HTTP/1.1 connections
-  (including a client that stops reading) and over writers that expose
-  `SetWriteDeadline` directly or through `Unwrap`. HTTP/2 deadline behavior
-  comes from net/http and is not separately tested here.
+- Tavern's tests cover deadlines over net/http HTTP/1.1 and HTTP/2 (TLS)
+  connections, and over writers that expose `SetWriteDeadline` directly or
+  through `Unwrap`. On both protocols an idle stream is not cut, a client
+  that stops reading ends the stream with a timeout matching
+  `os.ErrDeadlineExceeded`, and a client that cancels ends it without a
+  reported error.
 
 ---
 
@@ -235,8 +241,8 @@ broker.SetRetryAll(5 * time.Second)
 //    return, so cancel the context they were started with first.
 stopPublishers()
 
-// 3. End every stream. Handlers write what is already queued (including
-//    the retry directive, if the client keeps up) and return.
+// 3. End every stream. Single-topic handlers write what is already queued
+//    (including the retry directive, if the client keeps up) and return.
 broker.Close()
 
 // 4. Stop accepting connections and wait for handlers to finish.
@@ -244,6 +250,13 @@ ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 defer cancel()
 _ = srv.Shutdown(ctx)
 ```
+
+A multi-topic subscription with required topics (`SubscribeMultiWith` with
+`SubWithTerminateOnInnerClose` or `SubWithDisconnectOnLoss`) ends as soon as
+one topic closes and may discard messages still queued on the others,
+including the retry directive. Put the events of a stream that must see the
+retry on one topic, distinguishing them by SSE event name, as the task board
+does.
 
 Call `broker.Close` yourself rather than through `srv.RegisterOnShutdown`:
 `Shutdown` starts those callbacks in their own goroutines and does not wait

@@ -156,10 +156,13 @@ func (fw *frameWriter) setDeadline(t time.Time) error {
 	return nil
 }
 
+// isCancelled reports whether the request was cancelled. It checks the
+// context too: over HTTP/2 a client cancel resets the stream, and the write
+// can fail before the cancellation callback runs.
 func (fw *frameWriter) isCancelled() bool {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
-	return fw.cancelled
+	return fw.cancelled || fw.ctx != nil && fw.ctx.Err() != nil
 }
 
 // frame writes msg with the configured writer.

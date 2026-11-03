@@ -14,7 +14,7 @@ export GOTOOLCHAIN := local
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 ACTIONLINT := go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 
-.PHONY: ci check check-module tidy-check vet test lint lint-workflows test-scripts
+.PHONY: ci check check-module tidy-check vet test lint lint-workflows test-scripts proxy-smoke capacity
 
 # ci checks every module, the workflows and the release script.
 ci: check lint-workflows test-scripts
@@ -41,8 +41,18 @@ lint:
 
 # actionlint also checks workflow shell steps; both need shellcheck on PATH.
 lint-workflows:
-	shellcheck .github/scripts/*.sh
+	shellcheck .github/scripts/*.sh examples/taskboard/deploy/*.sh
 	$(ACTIONLINT)
 
 test-scripts:
 	.github/scripts/release_test.sh
+	examples/taskboard/deploy/smoke_test.sh
+
+# proxy-smoke runs the task board behind a pinned nginx and checks streaming
+# through it. Needs Docker and Linux host networking.
+proxy-smoke:
+	examples/taskboard/deploy/smoke.sh
+
+# capacity runs every load preset; see examples/capacity/README.md.
+capacity:
+	go run ./examples/capacity -preset all

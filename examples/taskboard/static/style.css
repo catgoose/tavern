@@ -1,0 +1,19 @@
+body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 64rem; padding: 0 1rem; color: #222; }
+header { display: flex; align-items: baseline; justify-content: space-between; }
+#status span { display: none; font-weight: 600; }
+#status[data-state="live"] .live { display: inline; color: #1a7f37; }
+#status[data-state="down"] .down { display: inline; color: #b35900; }
+#status[data-state="connecting"] .connecting { display: inline; color: #666; }
+.add { display: flex; gap: .5rem; }
+.add input { flex: 1; padding: .4rem; }
+.viewer, .note { display: block; margin: .5rem 0; color: #555; font-size: .9rem; }
+.board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin: 1rem 0; }
+.column { background: #f4f5f7; border-radius: 6px; padding: .5rem 1rem; }
+.column ul { list-style: none; padding: 0; }
+.task { background: #fff; border-radius: 4px; margin: .5rem 0; padding: .5rem; box-shadow: 0 1px 2px #0002; }
+.task small { color: #666; display: block; }
+.moves button { font-size: .8rem; margin: .25rem .25rem 0 0; }
+.count { color: #666; font-weight: normal; }
+.empty { color: #888; }
+.activity { font-size: .9rem; color: #444; }
+.demo { margin-top: 2rem; border-top: 1px solid #ddd; padding-top: 1rem; }
