@@ -6,8 +6,8 @@
 
 - for each module (`.`, `tavernprom`, `tavernotel`): `go mod tidy -diff`,
   `go vet`, `go test -race` and golangci-lint;
-- actionlint and shellcheck on the workflows and scripts, and the release
-  script's dry-run tests.
+- actionlint and shellcheck on the workflows and scripts, the release
+  script's dry-run tests and the proxy smoke script's failure-path tests.
 
 `make check-module MODULE=tavernprom` checks one module. The examples under
 `examples/` belong to the root module, so these checks cover them.

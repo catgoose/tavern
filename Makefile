@@ -46,6 +46,7 @@ lint-workflows:
 
 test-scripts:
 	.github/scripts/release_test.sh
+	examples/taskboard/deploy/smoke_test.sh
 
 # proxy-smoke runs the task board behind a pinned nginx and checks streaming
 # through it. Needs Docker and Linux host networking.

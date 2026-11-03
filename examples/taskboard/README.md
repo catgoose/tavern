@@ -65,14 +65,18 @@ make proxy-smoke   # Docker and Linux host networking required
 ```
 
 `deploy/smoke.sh` builds the app, runs it on 127.0.0.1:18081 behind
-`nginx:1.30.6-alpine` (pinned by digest) on 127.0.0.1:18080, and runs
+`nginx:1.30.6-alpine` (pinned by digest) on 127.0.0.1:18080 (override with
+`SMOKE_APP_PORT` / `SMOKE_PROXY_PORT`), and runs
 `TestThroughProxy` against the proxy. The test checks that the first frame
 arrives while the connection stays open, a change reaches the stream, the
 stream survives 4.5s of idle time against a 3s proxy read timeout, a paused
 window's stream ends on overflow and a reconnect reloads the full board, and
 SIGTERM delivers the `retry:` hint and ends the stream through the proxy.
-The script removes only the container and process it started. CI runs it on
-every pull request.
+It refuses to start if either port is already in use. Cleanup removes only
+the container and process this run created, tracked by container ID and
+PID, even when building or starting fails. `deploy/smoke_test.sh` checks
+those failure paths with stub `docker`, `go` and `curl` commands. CI runs
+both on every pull request.
 
 ## Tests
 

@@ -100,21 +100,16 @@ func cpuModel() string {
 	return ""
 }
 
-// ReconnectBurstSubscriptions is the number of extra subscriptions the
-// reconnect burst creates.
-func (s Scenario) ReconnectBurstSubscriptions() int {
-	if s.Replay > 0 {
-		return s.ReconnectBurst
-	}
-	return 0
-}
-
 func (s Scenario) validate() error {
 	switch {
 	case s.Transport != "broker" && s.Transport != "http":
 		return fmt.Errorf("transport must be broker or http")
 	case s.Subscribers < 1 || s.Topics < 1 || s.Messages < 1 || s.Buffer < 1:
 		return fmt.Errorf("subscribers, topics, messages and buffer must be positive")
+	case s.Replay < 0 || s.Slow < 0 || s.ReconnectBurst < 0:
+		return fmt.Errorf("replay, slow and reconnect burst cannot be negative")
+	case s.ReconnectBurst > 0 && s.Replay == 0:
+		return fmt.Errorf("a reconnect burst needs replay (set -replay)")
 	case s.PayloadBytes < 24:
 		return fmt.Errorf("payload must be at least 24 bytes to carry a timestamp")
 	case s.ReconnectBurst > s.Subscribers:
@@ -232,17 +227,21 @@ func publishAll(s Scenario, b *tavern.SSEBroker, frame func(string) string) int6
 	return attempts
 }
 
-func newBroker(s Scenario, gaps *atomic.Int64) *tavern.SSEBroker {
+// newBroker configures replay so that a resume whose ID has left the log
+// receives a tavern-replay-gap event, which the reconnecting clients count.
+func newBroker(s Scenario) *tavern.SSEBroker {
 	b := tavern.NewSSEBroker(tavern.WithBufferSize(s.Buffer))
 	for t := 0; t < s.Topics; t++ {
 		topic := topicName(t)
 		if s.Replay > 0 {
 			b.SetReplayPolicy(topic, s.Replay)
+			b.SetReplayGapPolicy(topic, tavern.GapFallbackToSnapshot, nil)
 		}
-		b.OnReplayGap(topic, func(*tavern.SubscriberInfo, string) { gaps.Add(1) })
 	}
 	return b
 }
+
+const gapEvent = "tavern-replay-gap"
 
 func subscribeOpts(s Scenario, st *tavern.SubscriptionStatus) []tavern.SubscribeOption {
 	opts := []tavern.SubscribeOption{tavern.SubWithStatus(st)}
@@ -254,7 +253,7 @@ func subscribeOpts(s Scenario, st *tavern.SubscriptionStatus) []tavern.Subscribe
 
 func runBroker(s Scenario, r *Report) error {
 	var gaps atomic.Int64
-	b := newBroker(s, &gaps)
+	b := newBroker(s)
 	type sub struct {
 		topic  string
 		ch     <-chan string
@@ -308,7 +307,7 @@ func runBroker(s Scenario, r *Report) error {
 		return true
 	})
 
-	if s.ReconnectBurst > 0 && s.Replay > 0 {
+	if s.ReconnectBurst > 0 {
 		var burst sync.WaitGroup
 		var replayed atomic.Int64
 		statuses := make([]*tavern.SubscriptionStatus, s.ReconnectBurst)
@@ -323,10 +322,12 @@ func runBroker(s Scenario, r *Report) error {
 				for {
 					select {
 					case msg := <-ch:
-						if msg == "" || strings.Contains(msg, "tavern-reconnected") {
+						switch {
+						case msg == "" || strings.Contains(msg, "tavern-reconnected"):
 							return
-						}
-						if !strings.HasPrefix(msg, "event: tavern-") {
+						case strings.HasPrefix(msg, "event: "+gapEvent):
+							gaps.Add(1)
+						case !strings.HasPrefix(msg, "event: tavern-"):
 							replayed.Add(1)
 						}
 					case <-time.After(s.Timeout):
@@ -378,11 +379,42 @@ func waitDrained(received *atomic.Int64, expected int64, timeout time.Duration, 
 	}
 }
 
+// Seams for the failure tests.
+var (
+	dialSlowClient = func(ctx context.Context, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}
+	wrapHandler   = func(h http.Handler) http.Handler { return h }
+	maxFrameBytes = 16 << 20
+)
+
+// firstError keeps the first operational error reported by any reader.
+type firstError struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (f *firstError) set(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err == nil {
+		f.err = err
+	}
+}
+
+func (f *firstError) get() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err
+}
+
 // runHTTP serves each topic over SSE and connects real clients over
-// loopback. Slow clients connect with raw TCP and never read.
-func runHTTP(s Scenario, r *Report) error {
+// loopback. Slow clients connect with raw TCP and never read. Every
+// resource is released before it returns, on failure as well as success.
+func runHTTP(s Scenario, r *Report) (err error) {
 	var gaps atomic.Int64
-	b := newBroker(s, &gaps)
+	b := newBroker(s)
 	var statusMu sync.Mutex
 	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		st := tavern.NewSubscriptionStatus()
@@ -406,19 +438,49 @@ func runHTTP(s Scenario, r *Report) error {
 		r.Terminations[st.Termination().Reason.String()]++
 		statusMu.Unlock()
 	})
-	srv := httptest.NewServer(handler)
-	client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: s.Subscribers + s.ReconnectBurst}}
+	srv := httptest.NewServer(wrapHandler(handler))
+	dialer := &net.Dialer{Timeout: s.Timeout}
+	client := &http.Client{Transport: &http.Transport{
+		DialContext:           dialer.DialContext,
+		ResponseHeaderTimeout: s.Timeout,
+		MaxIdleConnsPerHost:   s.Subscribers + s.ReconnectBurst,
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var readers, burst sync.WaitGroup
+	var slowConns []net.Conn
+	var readErr firstError
+	graceful := false
+	// Teardown order: stop the clients and wait for their goroutines, then
+	// end the streams (broker), then the server and idle connections.
+	defer func() {
+		cancel()
+		for _, c := range slowConns {
+			_ = c.Close()
+		}
+		readers.Wait()
+		burst.Wait()
+		if graceful {
+			// Let handlers see their clients leave, so their subscriptions
+			// end as unsubscribes rather than broker-closed.
+			_ = waitSubscribers(b, 0, s.Timeout)
+		}
+		b.Close()
+		srv.Close()
+		client.CloseIdleConnections()
+	}()
 
 	var lat latencies
 	var received atomic.Int64
-	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
 	open := make(chan error, s.Subscribers)
 	for i := 0; i < s.Subscribers; i++ {
-		wg.Add(1)
+		readers.Add(1)
 		go func() {
-			defer wg.Done()
-			readStream(ctx, client, srv.URL+"/"+topicName(i%s.Topics), "", open, func(data string) {
+			defer readers.Done()
+			readStream(ctx, client, srv.URL+"/"+topicName(i%s.Topics), "", open, &readErr, func(event, data string) {
+				if event != "" {
+					return
+				}
 				if d, ok := latencyOf(data, time.Now()); ok {
 					lat.add(d)
 				}
@@ -426,23 +488,19 @@ func runHTTP(s Scenario, r *Report) error {
 			})
 		}()
 	}
-	var slowConns []net.Conn
 	for i := 0; i < s.Slow; i++ {
-		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		conn, err := openSlowClient(ctx, srv.Listener.Addr().String(), topicName(i%s.Topics), s.Timeout)
 		if err != nil {
-			cancel()
 			return err
 		}
-		fmt.Fprintf(conn, "GET /%s HTTP/1.1\r\nHost: capacity\r\n\r\n", topicName(i%s.Topics))
 		slowConns = append(slowConns, conn)
 	}
-	for i := 0; i < s.Subscribers; i++ {
-		if err := <-open; err != nil {
-			cancel()
-			return err
-		}
+	if err := awaitOpen(open, s.Subscribers, s.Timeout, "clients"); err != nil {
+		return err
 	}
-	waitSubscribers(b, s.Subscribers+s.Slow, s.Timeout)
+	if err := waitSubscribers(b, s.Subscribers+s.Slow, s.Timeout); err != nil {
+		return fmt.Errorf("before publishing: %w", err)
+	}
 
 	t0 := time.Now()
 	r.FanoutAttempts = publishAll(s, b, func(m string) string { return "data: " + m + "\n\n" })
@@ -453,29 +511,27 @@ func runHTTP(s Scenario, r *Report) error {
 	// up as the count settling below the expected total.
 	waitDrained(&received, int64(s.Subscribers)*int64(s.Messages), s.Timeout, func() bool { return true })
 
-	if s.ReconnectBurst > 0 && s.Replay > 0 {
+	if s.ReconnectBurst > 0 {
 		var replayed atomic.Int64
-		var burst sync.WaitGroup
 		burstOpen := make(chan error, s.ReconnectBurst)
-		burstCtx, burstCancel := context.WithTimeout(context.Background(), s.Timeout)
+		burstCtx, burstCancel := context.WithTimeout(ctx, s.Timeout)
+		defer burstCancel()
 		for i := 0; i < s.ReconnectBurst; i++ {
 			burst.Add(1)
 			go func() {
 				defer burst.Done()
-				readStream(burstCtx, client, srv.URL+"/"+topicName(i%s.Topics), "1", burstOpen, func(string) {
-					replayed.Add(1)
+				readStream(burstCtx, client, srv.URL+"/"+topicName(i%s.Topics), "1", burstOpen, &readErr, func(event, _ string) {
+					switch event {
+					case "":
+						replayed.Add(1)
+					case gapEvent:
+						gaps.Add(1)
+					}
 				})
 			}()
 		}
-		// The burst connections replay what the log still holds; stop
-		// once that has had time to arrive.
-		for i := 0; i < s.ReconnectBurst; i++ {
-			if err := <-burstOpen; err != nil {
-				burstCancel()
-				burst.Wait()
-				cancel()
-				return err
-			}
+		if err := awaitOpen(burstOpen, s.ReconnectBurst, s.Timeout, "reconnecting clients"); err != nil {
+			return err
 		}
 		// Resuming after ID 1 replays the rest of the log, up to the queue
 		// length, or nothing if ID 1 has rolled out of the log (a gap).
@@ -483,7 +539,11 @@ func runHTTP(s Scenario, r *Report) error {
 		if s.Replay >= s.Messages {
 			want = int64(s.ReconnectBurst) * int64(min(s.Messages-1, s.Buffer))
 		}
-		for replayed.Load() < want && burstCtx.Err() == nil {
+		wantGaps := int64(0)
+		if s.Replay < s.Messages {
+			wantGaps = int64(s.ReconnectBurst)
+		}
+		for (replayed.Load() < want || gaps.Load() < wantGaps) && burstCtx.Err() == nil {
 			time.Sleep(5 * time.Millisecond)
 		}
 		burstCancel()
@@ -491,37 +551,72 @@ func runHTTP(s Scenario, r *Report) error {
 		r.ReconnectReplayed = replayed.Load()
 	}
 
-	r.QueueDrops = b.PublishDrops()
-	cancel()
-	for _, c := range slowConns {
-		_ = c.Close()
+	if err := readErr.get(); err != nil {
+		return err
 	}
-	wg.Wait()
-	// Let handlers see their clients leave before closing the broker, so
-	// their subscriptions end as unsubscribes.
-	waitSubscribers(b, 0, s.Timeout)
-	b.Close()
-	srv.Close()
-	client.CloseIdleConnections()
+	r.QueueDrops = b.PublishDrops()
 	r.Received = received.Load()
 	r.ReconnectGaps = gaps.Load()
 	lat.fill(r)
+	graceful = true
+	return nil
+}
+
+// openSlowClient connects a client that sends a request and never reads.
+func openSlowClient(ctx context.Context, addr, topic string, timeout time.Duration) (net.Conn, error) {
+	dctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := dialSlowClient(dctx, addr)
+	if err != nil {
+		return nil, fmt.Errorf("connecting a slow client: %w", err)
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+	if _, err := fmt.Fprintf(conn, "GET /%s HTTP/1.1\r\nHost: capacity\r\n\r\n", topic); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("sending a slow client's request: %w", err)
+	}
+	return conn, nil
+}
+
+// awaitOpen waits for n clients to report whether their stream opened.
+func awaitOpen(open <-chan error, n int, timeout time.Duration, what string) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for i := 0; i < n; i++ {
+		select {
+		case err := <-open:
+			if err != nil {
+				return fmt.Errorf("opening %s: %w", what, err)
+			}
+		case <-deadline.C:
+			return fmt.Errorf("only %d of %d %s connected within %s", i, n, what, timeout)
+		}
+	}
 	return nil
 }
 
 // waitSubscribers waits until exactly n subscriptions are registered.
-func waitSubscribers(b *tavern.SSEBroker, n int, timeout time.Duration) {
+func waitSubscribers(b *tavern.SSEBroker, n int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	for b.SubscriberCount() != n && time.Now().Before(deadline) {
+	for {
+		got := b.SubscriberCount()
+		if got == n {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%d subscriptions registered within %s, want %d", got, timeout, n)
+		}
 		time.Sleep(time.Millisecond)
 	}
 }
 
 // readStream reads one SSE stream until ctx ends or the stream closes. It
-// reports on open once response headers arrive (the server sends an
-// ": open" comment first), and calls onData for every data frame that is not
-// a named control event.
-func readStream(ctx context.Context, client *http.Client, url, lastID string, open chan<- error, onData func(data string)) {
+// sends exactly one value on open: nil once the response headers arrive
+// with status 200, or the error that prevented it. It calls onFrame for
+// every frame with data; event is empty for plain messages. A read error that
+// is not caused by ctx is recorded in errs; a stream the server ends is
+// normal.
+func readStream(ctx context.Context, client *http.Client, url, lastID string, open chan<- error, errs *firstError, onFrame func(event, data string)) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		open <- err
@@ -536,16 +631,21 @@ func readStream(ctx context.Context, client *http.Client, url, lastID string, op
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		open <- fmt.Errorf("GET %s: %s", url, resp.Status)
+		return
+	}
 	open <- nil
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64<<10), 16<<20)
+	// The token limit is the larger of the buffer's capacity and the max.
+	scanner.Buffer(make([]byte, 0, min(64<<10, maxFrameBytes)), maxFrameBytes)
 	var event, data string
 	for scanner.Scan() {
 		line := scanner.Text()
 		switch {
 		case line == "":
-			if data != "" && event == "" {
-				onData(data)
+			if data != "" {
+				onFrame(event, data)
 			}
 			event, data = "", ""
 		case strings.HasPrefix(line, "data: "):
@@ -553,5 +653,8 @@ func readStream(ctx context.Context, client *http.Client, url, lastID string, op
 		case strings.HasPrefix(line, "event: "):
 			event = strings.TrimPrefix(line, "event: ")
 		}
+	}
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		errs.set(fmt.Errorf("reading %s: %w", url, err))
 	}
 }
