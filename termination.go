@@ -106,6 +106,12 @@ func (s *SubscriptionStatus) attach() {
 	s.attached = true
 }
 
+func (s *SubscriptionStatus) isAttached() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attached
+}
+
 // finish records t unless a cause is already recorded.
 func (s *SubscriptionStatus) finish(t Termination) {
 	if s == nil {

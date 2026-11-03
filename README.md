@@ -252,6 +252,12 @@ mux.Handle("/sse", broker.SSEHandler("events",
 
 The server speaks; the client listens. This is the natural order.
 
+> **Which subscription should I use?** See
+> [docs/subscription-guide.md](docs/subscription-guide.md) for the three
+> recommended patterns (latest representation, distinct invalidations,
+> ID-backed replay), the option compatibility table and
+> `ValidateSubscribeOptions`.
+
 ### Subscribe / Publish / Unsubscribe / Close
 
 ```go
@@ -700,6 +706,10 @@ ch, unsub := broker.SubscribeGlobWith("monitoring/**",
     tavern.SubWithScope("region:us-east"),
 )
 ```
+
+Not every option applies to every method. `ValidateSubscribeOptions` reports
+conflicting, unsupported and no-effect options before you subscribe; see the
+[compatibility table](docs/subscription-guide.md#option-compatibility).
 
 ---
 

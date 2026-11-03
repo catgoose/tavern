@@ -18,17 +18,21 @@ type subscribeConfig struct {
 	terminateOnInnerClose  bool
 	terminateOnReplayError bool
 	status                 *SubscriptionStatus
+
+	given optionSet // options passed, even with no-op values
 }
 
 // SubscribeOption configures a composable subscription created via
-// [SSEBroker.SubscribeWith], [SSEBroker.SubscribeMultiWith], or
-// [SSEBroker.SubscribeGlobWith].
+// [SSEBroker.SubscribeWith], [SSEBroker.SubscribeFromIDWith],
+// [SSEBroker.SubscribeMultiWith], or [SSEBroker.SubscribeGlobWith]. Use
+// [ValidateSubscribeOptions] to check a set of options for a method.
 type SubscribeOption func(*subscribeConfig)
 
 // SubWithScope sets the subscription scope. Only messages published via
 // [SSEBroker.PublishTo] with a matching scope will be delivered.
 func SubWithScope(scope string) SubscribeOption {
 	return func(c *subscribeConfig) {
+		c.given |= optScope
 		c.scope = scope
 	}
 }
@@ -37,6 +41,7 @@ func SubWithScope(scope string) SubscribeOption {
 // predicate returns true are delivered.
 func SubWithFilter(fn FilterPredicate) SubscribeOption {
 	return func(c *subscribeConfig) {
+		c.given |= optFilter
 		c.filter = fn
 	}
 }
@@ -44,6 +49,7 @@ func SubWithFilter(fn FilterPredicate) SubscribeOption {
 // SubWithRate enables per-subscriber rate limiting.
 func SubWithRate(r Rate) SubscribeOption {
 	return func(c *subscribeConfig) {
+		c.given |= optRate
 		c.rate = &r
 	}
 }
@@ -52,6 +58,7 @@ func SubWithRate(r Rate) SubscribeOption {
 // [SSEBroker.Subscribers].
 func SubWithMeta(m SubscribeMeta) SubscribeOption {
 	return func(c *subscribeConfig) {
+		c.given |= optMeta
 		c.meta = &m
 	}
 }
@@ -60,6 +67,7 @@ func SubWithMeta(m SubscribeMeta) SubscribeOption {
 // the first message before any live publishes.
 func SubWithSnapshot(fn func() string) SubscribeOption {
 	return func(c *subscribeConfig) {
+		c.given |= optSnapshot
 		c.snapshotFn = fn
 	}
 }
@@ -99,6 +107,7 @@ func SubWithSnapshot(fn func() string) SubscribeOption {
 // aggregate channel.
 func SubWithDisconnectOnLoss() SubscribeOption {
 	return func(c *subscribeConfig) {
+		c.given |= optDisconnectOnLoss
 		c.disconnectOnLoss = true
 	}
 }
@@ -118,6 +127,7 @@ func SubWithDisconnectOnLoss() SubscribeOption {
 // subscriptions.
 func SubWithTerminateOnInnerClose() SubscribeOption {
 	return func(c *subscribeConfig) {
+		c.given |= optTerminateOnInnerClose
 		c.terminateOnInnerClose = true
 	}
 }
@@ -134,6 +144,7 @@ func SubWithTerminateOnInnerClose() SubscribeOption {
 // last inner subscription to end. [SSEBroker.SubscribeGlobWith] panics.
 func SubWithStatus(status *SubscriptionStatus) SubscribeOption {
 	return func(c *subscribeConfig) {
+		c.given |= optStatus
 		c.status = status
 	}
 }
@@ -155,6 +166,7 @@ func SubWithStatus(status *SubscriptionStatus) SubscribeOption {
 // [SSEBroker.SubscribeGlobWith] panics.
 func SubWithTerminateOnReplayError() SubscribeOption {
 	return func(c *subscribeConfig) {
+		c.given |= optTerminateOnReplayError
 		c.terminateOnReplayError = true
 	}
 }
@@ -162,20 +174,33 @@ func SubWithTerminateOnReplayError() SubscribeOption {
 // rejectLossyCombinations panics for option combinations that cannot honor
 // disconnect-on-loss.
 func (c subscribeConfig) rejectLossyCombinations() {
-	if c.disconnectOnLoss && c.rate != nil {
+	if c.lossWithRate() {
 		panic("tavern: SubWithDisconnectOnLoss cannot be combined with SubWithRate")
 	}
 }
 
+// lossWithRate reports the combination rejectLossyCombinations panics on.
+// Any SubWithRate counts, even one with a zero interval.
+func (c subscribeConfig) lossWithRate() bool {
+	return c.disconnectOnLoss && c.rate != nil
+}
+
+// buildSubscribeConfig applies opts without side effects. The subscribe
+// functions call attachStatus once the configuration is accepted.
 func buildSubscribeConfig(opts []SubscribeOption) subscribeConfig {
 	var cfg subscribeConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.status != nil {
-		cfg.status.attach()
-	}
 	return cfg
+}
+
+// attachStatus claims the configured status for this subscription. It
+// panics if the status is already attached.
+func (c subscribeConfig) attachStatus() {
+	if c.status != nil {
+		c.status.attach()
+	}
 }
 
 // SubscribeWith creates a subscription using composable options. It combines
@@ -185,6 +210,7 @@ func buildSubscribeConfig(opts []SubscribeOption) subscribeConfig {
 func (b *SSEBroker) SubscribeWith(topic string, opts ...SubscribeOption) (msgs <-chan string, unsubscribe func()) {
 	cfg := buildSubscribeConfig(opts)
 	cfg.rejectLossyCombinations()
+	cfg.attachStatus()
 
 	// Loss-aware subscriptions replay like SubscribeFromIDWith with an empty
 	// Last-Event-ID; see SubWithDisconnectOnLoss.
@@ -228,6 +254,7 @@ func (c subscribeConfig) spec() subSpec {
 func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption) (msgs <-chan TopicMessage, unsubscribe func()) {
 	cfg := buildSubscribeConfig(opts)
 	cfg.rejectLossyCombinations()
+	cfg.attachStatus()
 	terminate := cfg.terminateOnInnerClose || cfg.disconnectOnLoss
 
 	var innerOpts []SubscribeOption
@@ -373,14 +400,10 @@ func (b *SSEBroker) SubscribeMultiWith(topics []string, opts ...SubscribeOption)
 // [SubWithTerminateOnInnerClose] has no effect.
 func (b *SSEBroker) SubscribeGlobWith(pattern string, opts ...SubscribeOption) (msgs <-chan TopicMessage, unsubscribe func()) {
 	cfg := buildSubscribeConfig(opts)
-	if cfg.disconnectOnLoss {
-		panic("tavern: SubscribeGlobWith does not support SubWithDisconnectOnLoss")
-	}
-	if cfg.status != nil {
-		panic("tavern: SubscribeGlobWith does not support SubWithStatus")
-	}
-	if cfg.terminateOnReplayError {
-		panic("tavern: SubscribeGlobWith does not support SubWithTerminateOnReplayError")
+	for _, u := range globUnsupported {
+		if u.set(cfg) {
+			panic("tavern: SubscribeGlobWith does not support " + u.opt.String())
+		}
 	}
 
 	var rawCh <-chan TopicMessage

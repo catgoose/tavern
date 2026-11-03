@@ -35,14 +35,15 @@ The existing commit_policy: ask is satisfied by the user's explicit commit/PR/me
   - Review: https://github.com/catgoose/tavern/pull/231 (merged).
     - Reviewed commit: `22398ab2385479bc51db29ef5314a87ed68c3b0e`
 
-- [ ] Pass 003: HTTP streaming deadlines and production operations.
+- [x] Pass 003: HTTP streaming deadlines and production operations.
   - Requirements: Configurable per-write deadlines, observable write/flush failures, and predictable cancellation for supported standard HTTP writers and wrappers. Document unsupported capabilities and keep custom writers usable. Complete an operator guide covering proxy buffering, heartbeats, replay retention, reconnect bursts, slow clients, monitoring, and graceful shutdown. Validate issue #223 against the result.
   - Plan: .agents/.local/plans/handoff-008-http-streaming-deadlines-and-production-operations.md
-  - Review:
+  - Review: https://github.com/catgoose/tavern/pull/232 (merged).
+    - Reviewed commit: `c77f4c1e0edf9fd2b8a18e546513272fa44bf2b6`
 
 - [ ] Pass 004: Public API guidance and option validation.
   - Requirements: Document recommended latest-representation, invalidation/reconciliation, and ID/replay patterns with a verified subscription compatibility table. Provide an additive way to validate configurations and handle invalid combinations without runtime surprises. Converge implementation differences where compatible, preserve existing contracts, and explicitly explain remaining replay/snapshot/filter differences.
-  - Plan:
+  - Plan: .agents/.local/plans/handoff-010-subscription-api-guidance-and-option-validation.md
   - Review:
 
 - [ ] Pass 005: Reproducible CI, dependency updates, and releases.

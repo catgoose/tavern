@@ -335,5 +335,6 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 func (b *SSEBroker) SubscribeFromIDWith(topic, lastEventID string, opts ...SubscribeOption) (msgs <-chan string, unsubscribe func()) {
 	cfg := buildSubscribeConfig(opts)
 	cfg.rejectLossyCombinations()
+	cfg.attachStatus()
 	return b.subscribeFromIDInternal(topic, lastEventID, cfg)
 }
