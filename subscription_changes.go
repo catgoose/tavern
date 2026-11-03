@@ -48,17 +48,7 @@ func (b *SSEBroker) AddTopic(subscriberID, topic string, sendControl bool) bool 
 	}
 	ms.mu.Unlock()
 
-	ch, unsub := b.Subscribe(topic)
-
-	// Attach subscriber metadata (ID) to the new channel.
-	b.mu.Lock()
-	bidir := b.findBidirChan(topic, ch)
-	if bidir != nil {
-		if info, ok := b.subscriberMeta[bidir]; ok {
-			info.ID = subscriberID
-		}
-	}
-	b.mu.Unlock()
+	ch, unsub := b.SubscribeWithMeta(topic, SubscribeMeta{ID: subscriberID})
 
 	ms.mu.Lock()
 	// Double-check after re-acquiring lock.
@@ -184,20 +174,8 @@ func (b *SSEBroker) SubscribeMultiWithMeta(meta SubscribeMeta, topics ...string)
 	}
 
 	for _, topic := range topics {
-		ch, unsub := b.Subscribe(topic)
-		bidir := b.readToBidir(topic, ch)
-
-		// Attach subscriber metadata.
-		b.mu.Lock()
-		if bidir != nil {
-			if info, ok := b.subscriberMeta[bidir]; ok {
-				info.ID = meta.ID
-				info.Meta = meta.Meta
-			}
-		}
-		b.mu.Unlock()
-
-		ms.topics[topic] = bidir
+		ch, unsub := b.SubscribeWithMeta(topic, meta)
+		ms.topics[topic] = b.readToBidir(topic, ch)
 		ms.unsubs[topic] = unsub
 
 		t := topic

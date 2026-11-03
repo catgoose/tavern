@@ -40,10 +40,13 @@ type rateLimitedSub struct {
 
 // rateLimiter manages per-subscriber rate limiting with a single shared ticker.
 type rateLimiter struct {
+	// send delivers a flushed message. It is the broker's guarded send, so a
+	// flush racing removal finds the channel closed instead of sending on it.
+	send    func(ch chan string, msg string) bool
 	mu      sync.Mutex
 	subs    map[chan string]*rateLimitedSub
 	ticker  *time.Ticker
-	done    chan struct{}
+	halt    chan struct{} // closed to stop the current loop goroutine
 	running bool
 }
 
@@ -51,18 +54,21 @@ const rateTickInterval = 10 * time.Millisecond
 
 // newRateLimiter creates an idle rate limiter. The shared ticker is started
 // lazily when the first rate-limited subscriber is added.
-func newRateLimiter() *rateLimiter {
+func newRateLimiter(send func(ch chan string, msg string) bool) *rateLimiter {
 	return &rateLimiter{
+		send: send,
 		subs: make(map[chan string]*rateLimitedSub),
-		done: make(chan struct{}),
 	}
 }
 
 // add registers a rate-limited subscriber. Starts the shared ticker if this
-// is the first subscriber.
+// is the first subscriber. It does nothing after stop.
 func (rl *rateLimiter) add(ch chan string, topic string, interval time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	if rl.subs == nil {
+		return
+	}
 	rl.subs[ch] = &rateLimitedSub{
 		ch:          ch,
 		topic:       topic,
@@ -71,7 +77,8 @@ func (rl *rateLimiter) add(ch chan string, topic string, interval time.Duration)
 	if !rl.running {
 		rl.running = true
 		rl.ticker = time.NewTicker(rateTickInterval)
-		go rl.loop()
+		rl.halt = make(chan struct{})
+		go rl.loop(rl.ticker, rl.halt)
 	}
 }
 
@@ -81,9 +88,8 @@ func (rl *rateLimiter) remove(ch chan string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	delete(rl.subs, ch)
-	if len(rl.subs) == 0 && rl.running {
-		rl.ticker.Stop()
-		rl.running = false
+	if len(rl.subs) == 0 {
+		rl.stopTickerLocked()
 	}
 }
 
@@ -109,14 +115,25 @@ func (rl *rateLimiter) hold(ch chan string, msg string) bool {
 	return true
 }
 
+// stopTickerLocked stops the shared ticker and its loop goroutine, if
+// running. The caller holds rl.mu.
+func (rl *rateLimiter) stopTickerLocked() {
+	if rl.running {
+		rl.ticker.Stop()
+		close(rl.halt)
+		rl.running = false
+	}
+}
+
 // loop is the shared ticker goroutine. It checks all rate-limited subscribers
-// and flushes pending messages whose interval has elapsed.
-func (rl *rateLimiter) loop() {
+// and flushes pending messages whose interval has elapsed. Each run owns its
+// ticker, so a restart after the last subscriber left never shares one.
+func (rl *rateLimiter) loop(ticker *time.Ticker, halt <-chan struct{}) {
 	for {
 		select {
-		case <-rl.done:
+		case <-halt:
 			return
-		case now := <-rl.ticker.C:
+		case now := <-ticker.C:
 			rl.flush(now)
 		}
 	}
@@ -145,24 +162,15 @@ func (rl *rateLimiter) flush(now time.Time) {
 
 	// Send outside the lock to avoid blocking.
 	for _, p := range toSend {
-		func() {
-			defer func() { _ = recover() }()
-			select {
-			case p.ch <- p.msg:
-			default:
-			}
-		}()
+		rl.send(p.ch, p.msg)
 	}
 }
 
-// stop shuts down the shared ticker goroutine and clears all state.
+// stop shuts down the shared ticker goroutine and clears all state. Later
+// adds are ignored.
 func (rl *rateLimiter) stop() {
-	close(rl.done)
 	rl.mu.Lock()
-	if rl.running {
-		rl.ticker.Stop()
-		rl.running = false
-	}
+	rl.stopTickerLocked()
 	rl.subs = nil
 	rl.mu.Unlock()
 }
@@ -173,68 +181,11 @@ func (rl *rateLimiter) stop() {
 // Rate limiting is per-subscriber and does not affect the publisher or other
 // subscribers.
 func (b *SSEBroker) SubscribeWithRate(topic string, rate Rate) (msgs <-chan string, unsubscribe func()) {
-	ch, unsub := b.Subscribe(topic)
-	interval := rate.interval()
-	if interval <= 0 {
-		return ch, unsub
-	}
-
-	// The bidirectional channel is stored in topics[topic]; we need it to
-	// register with the rate limiter. Recover it via the read-only channel.
-	biCh := b.findBiChan(topic, ch)
-	if biCh == nil {
-		return ch, unsub
-	}
-
-	b.rateLimit.add(biCh, topic, interval)
-	return ch, func() {
-		b.rateLimit.remove(biCh)
-		unsub()
-	}
+	return b.subscribeLive(topic, subSpec{rate: rate.interval()}, false)
 }
 
 // SubscribeScopedWithRate registers a scoped subscriber with per-subscriber
 // rate limiting. See [SSEBroker.SubscribeWithRate] for rate-limiting semantics.
 func (b *SSEBroker) SubscribeScopedWithRate(topic, scope string, rate Rate) (msgs <-chan string, unsubscribe func()) {
-	ch, unsub := b.SubscribeScoped(topic, scope)
-	interval := rate.interval()
-	if interval <= 0 {
-		return ch, unsub
-	}
-
-	biCh := b.findBiScopedChan(topic, ch)
-	if biCh == nil {
-		return ch, unsub
-	}
-
-	b.rateLimit.add(biCh, topic, interval)
-	return ch, func() {
-		b.rateLimit.remove(biCh)
-		unsub()
-	}
-}
-
-// findBiChan recovers the bidirectional channel from the topics map by
-// comparing it to the read-only channel returned by Subscribe.
-func (b *SSEBroker) findBiChan(topic string, readOnly <-chan string) chan string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for c := range b.topics[topic] {
-		if (<-chan string)(c) == readOnly { //nolint:gocritic // parens required for channel type conversion
-			return c
-		}
-	}
-	return nil
-}
-
-// findBiScopedChan recovers the bidirectional channel from the scopedTopics map.
-func (b *SSEBroker) findBiScopedChan(topic string, readOnly <-chan string) chan string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for c := range b.scopedTopics[topic] {
-		if (<-chan string)(c) == readOnly { //nolint:gocritic // parens required for channel type conversion
-			return c
-		}
-	}
-	return nil
+	return b.subscribeLive(topic, subSpec{scope: scope, rate: rate.interval()}, false)
 }

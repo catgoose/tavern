@@ -143,83 +143,33 @@ func (b *SSEBroker) SubscribeWith(topic string, opts ...SubscribeOption) (msgs <
 	cfg := buildSubscribeConfig(opts)
 	cfg.rejectLossyCombinations()
 
-	// Disconnect-on-loss needs the policy registered in the same critical
-	// section as the subscriber, which the unified resume path provides.
+	// Loss-aware subscriptions replay like SubscribeFromIDWith with an empty
+	// Last-Event-ID; see SubWithDisconnectOnLoss.
 	if cfg.disconnectOnLoss {
 		return b.subscribeFromIDInternal(topic, "", cfg)
 	}
 
-	// Pre-compute snapshot outside lock when needed for atomic ordering.
-	var preSnap string
+	spec := cfg.spec()
 	if cfg.snapshotFn != nil {
-		preSnap = cfg.snapshotFn()
+		// Computed outside the broker lock in case snapshotFn uses the broker.
+		spec.preload = cfg.snapshotFn()
 	}
-
-	var ch <-chan string
-	var unsub func()
-
-	switch {
-	case cfg.scope != "" && cfg.filter != nil && cfg.snapshotFn != nil:
-		ch, unsub = b.subscribeScopedWithFilterAndSnapshot(topic, cfg.scope, cfg.filter, preSnap)
-	case cfg.scope != "" && cfg.filter != nil:
-		ch, unsub = b.SubscribeScopedWithFilter(topic, cfg.scope, cfg.filter)
-	case cfg.scope != "" && cfg.snapshotFn != nil:
-		ch, unsub = b.subscribeScopedWithSnapshot(topic, cfg.scope, preSnap)
-	case cfg.scope != "":
-		ch, unsub = b.SubscribeScoped(topic, cfg.scope)
-	case cfg.filter != nil && cfg.snapshotFn != nil:
-		ch, unsub = b.subscribeWithFilterAndSnapshot(topic, cfg.filter, preSnap)
-	case cfg.filter != nil:
-		ch, unsub = b.SubscribeWithFilter(topic, cfg.filter)
-	case cfg.snapshotFn != nil:
-		ch, unsub = b.SubscribeWithSnapshot(topic, cfg.snapshotFn)
-	default:
-		ch, unsub = b.Subscribe(topic)
-	}
-
-	if ch == nil {
-		return nil, nil
-	}
-
-	// Apply meta.
-	if cfg.meta != nil {
-		biCh := b.findBiChanAny(topic, ch)
-		if biCh != nil {
-			b.mu.Lock()
-			if info, ok := b.subscriberMeta[biCh]; ok {
-				info.ID = cfg.meta.ID
-				info.Meta = cfg.meta.Meta
-			}
-			b.mu.Unlock()
-		}
-	}
-
-	// Apply rate limiting.
-	if cfg.rate != nil {
-		interval := cfg.rate.interval()
-		if interval > 0 {
-			biCh := b.findBiChanAny(topic, ch)
-			if biCh != nil {
-				b.rateLimit.add(biCh, topic, interval)
-				origUnsub := unsub
-				unsub = func() {
-					b.rateLimit.remove(biCh)
-					origUnsub()
-				}
-			}
-		}
-	}
-
-	return ch, unsub
+	return b.subscribeLive(topic, spec, cfg.snapshotFn != nil)
 }
 
-// findBiChanAny searches both topics and scopedTopics for the bidirectional
-// channel matching the read-only channel.
-func (b *SSEBroker) findBiChanAny(topic string, readOnly <-chan string) chan string {
-	if ch := b.findBiChan(topic, readOnly); ch != nil {
-		return ch
+// spec converts the single-topic options into the registration policy.
+// The snapshot is left to the caller, which decides when to compute it.
+func (c subscribeConfig) spec() subSpec {
+	spec := subSpec{
+		scope:     c.scope,
+		filter:    c.filter,
+		meta:      c.meta,
+		lossAware: c.disconnectOnLoss,
 	}
-	return b.findBiScopedChan(topic, readOnly)
+	if c.rate != nil {
+		spec.rate = c.rate.interval()
+	}
+	return spec
 }
 
 // SubscribeMultiWith subscribes to multiple topics with composable options.
@@ -402,9 +352,12 @@ func (b *SSEBroker) SubscribeGlobWith(pattern string, opts ...SubscribeOption) (
 		}
 	}()
 
+	var once sync.Once
 	return out, func() {
-		close(done)
-		rawUnsub()
+		once.Do(func() {
+			close(done)
+			rawUnsub()
+		})
 	}
 }
 

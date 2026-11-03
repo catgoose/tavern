@@ -265,6 +265,13 @@ broker.Close() // closes all channels, removes all topics
 `Publish` fans out to every subscriber. Non-blocking -- if a subscriber's buffer
 is full, the message is silently dropped for that subscriber.
 
+Every subscription variant has the same lifecycle. Its channel closes when you
+call unsubscribe, when `Disconnect` or slow-subscriber eviction removes it, or
+when the broker closes. Calling unsubscribe after that, or twice, does nothing.
+When a topic's last local subscriber leaves, `OnLastUnsubscribe` hooks run
+(`Close` does not run them) and the broker releases the topic's backend
+subscription.
+
 ### Scoped subscriptions (PublishTo)
 
 Per-user, per-tenant, or per-resource message delivery:
