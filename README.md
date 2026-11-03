@@ -488,6 +488,11 @@ Pair with `WithStreamSnapshot` to deliver initial state, `WithStreamHeartbeat`
 to keep per-connection keepalives flowing, or `WithStreamWriter` to plug in a
 custom frame writer (e.g. htmx-go).
 
+`WithStreamWriteTimeout` bounds each write and flush, and
+`WithStreamWriteErrors` makes `StreamSSE` return the `WriteError` that ended
+the stream (it returns nil by default). `SSEHandler` and the group handlers
+take `WithWriteTimeout` and `WithWriteErrorHandler` for the same purpose.
+
 ### Topic groups (GroupHandler / DynamicGroupHandler)
 
 Serve multiple topics on a single SSE connection:
@@ -1127,6 +1132,9 @@ the broker's WaitGroup so `Close()` waits for all publishers to return.
 
 ## Observability
 
+For deployment settings, signal interpretation, graceful shutdown and
+troubleshooting, see [docs/production-operations.md](docs/production-operations.md).
+
 ### Basic stats
 
 ```go
@@ -1363,6 +1371,9 @@ Handler options (passed to `SSEHandler` / `GroupHandler` / `DynamicGroupHandler`
 |--------|---------|-------------|
 | `WithSSEWriter(fn)` | default writer | Custom write function for SSE messages |
 | `WithMaxConnectionDuration(d)` | disabled | Graceful connection recycling with jitter |
+| `WithReconnectDelay(d)` | 1000ms | `retry:` value sent when max duration closes a stream |
+| `WithWriteTimeout(d)` | disabled | Bound each frame write and flush; 500 if the writer cannot take deadlines |
+| `WithWriteErrorHandler(fn)` | nil | Receive the `WriteError` that ended a connection |
 
 ### Connection admission control
 

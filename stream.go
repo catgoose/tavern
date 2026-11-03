@@ -2,6 +2,7 @@ package tavern
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -11,15 +12,17 @@ import (
 type StreamSSEOption func(*streamSSEConfig)
 
 type streamSSEConfig struct {
-	writer    SSEWriterFunc
-	snapshot  func() string
-	heartbeat time.Duration
+	writer       SSEWriterFunc // nil = default writer
+	snapshot     func() string
+	heartbeat    time.Duration
+	writeTimeout time.Duration
+	returnErrors bool
 }
 
 // WithStreamWriter overrides the default SSE frame writer used by [StreamSSE].
-// The default writer calls fmt.Fprint followed by http.Flusher.Flush for each
-// frame. Override to integrate with libraries like htmx-go or to add custom
-// SSE formatting.
+// The default writer writes each frame and flushes it. Override to integrate
+// with libraries like htmx-go or to add custom SSE formatting. A nil function
+// selects the default writer.
 func WithStreamWriter(fn SSEWriterFunc) StreamSSEOption {
 	return func(c *streamSSEConfig) {
 		c.writer = fn
@@ -52,6 +55,27 @@ func WithStreamHeartbeat(interval time.Duration) StreamSSEOption {
 	}
 }
 
+// WithStreamWriteTimeout bounds each frame write (snapshot, value and
+// heartbeat), including its flush, to d. See [WithWriteTimeout] for how the
+// deadline behaves. If the ResponseWriter cannot take deadlines, StreamSSE
+// returns a [WriteError] matching [http.ErrNotSupported] before writing
+// anything. A zero or negative duration disables the bound (the default).
+func WithStreamWriteTimeout(d time.Duration) StreamSSEOption {
+	return func(c *streamSSEConfig) {
+		c.writeTimeout = d
+	}
+}
+
+// WithStreamWriteErrors makes StreamSSE return the [WriteError] that ended
+// the stream instead of nil. Context cancellation (including a write it cuts
+// short) and channel close still return nil; a failure to expire the write
+// deadline on cancellation is returned.
+func WithStreamWriteErrors() StreamSSEOption {
+	return func(c *streamSSEConfig) {
+		c.returnErrors = true
+	}
+}
+
 // StreamSSE prepares an SSE response on w and streams frames from ch until
 // ctx is cancelled or ch is closed. encode converts each channel value into
 // the SSE frame to write; returning an empty string skips the value without
@@ -81,29 +105,43 @@ func WithStreamHeartbeat(interval time.Duration) StreamSSEOption {
 //	    return tavern.NewSSEMessage(tm.Topic, tm.Data).String()
 //	})
 //
-// StreamSSE returns an error if w does not implement [http.Flusher] or if
-// encode is nil. On normal termination — context cancellation, channel close,
-// or write failure — it returns nil.
+// StreamSSE returns an error if w cannot flush (directly or through Unwrap),
+// if encode is nil, or if a configured write timeout cannot be honored. On
+// normal termination — context cancellation, channel close, or write failure
+// — it returns nil; [WithStreamWriteErrors] reports write failures instead.
 func StreamSSE[T any](
 	ctx context.Context,
 	w http.ResponseWriter,
 	ch <-chan T,
 	encode func(T) string,
 	opts ...StreamSSEOption,
-) error {
-	if _, ok := w.(http.Flusher); !ok {
+) (err error) {
+	if !canFlush(w) {
 		return fmt.Errorf("tavern: StreamSSE requires http.ResponseWriter to implement http.Flusher")
 	}
 	if encode == nil {
 		return fmt.Errorf("tavern: StreamSSE requires a non-nil encode function")
 	}
 
-	cfg := streamSSEConfig{writer: defaultSSEWriter}
+	var cfg streamSSEConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.writer == nil {
-		cfg.writer = defaultSSEWriter
+	fw := newFrameWriter(w, cfg.writer, cfg.writeTimeout)
+	if err := fw.prepare(); err != nil {
+		return err
+	}
+	stopRelease := fw.releaseOnCancel(ctx)
+	defer func() {
+		if stopErr := stopRelease(); stopErr != nil && cfg.returnErrors && err == nil {
+			err = stopErr
+		}
+	}()
+	writeFailed := func(werr error) error {
+		if cfg.returnErrors && !errors.Is(werr, errWriteCanceled) {
+			return werr
+		}
+		return nil
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -112,8 +150,8 @@ func StreamSSE[T any](
 
 	if cfg.snapshot != nil {
 		if frame := cfg.snapshot(); frame != "" {
-			if err := cfg.writer(w, frame); err != nil {
-				return nil
+			if err := fw.frame(frame); err != nil {
+				return writeFailed(err)
 			}
 		}
 	}
@@ -137,12 +175,12 @@ func StreamSSE[T any](
 			if frame == "" {
 				continue
 			}
-			if err := cfg.writer(w, frame); err != nil {
-				return nil
+			if err := fw.frame(frame); err != nil {
+				return writeFailed(err)
 			}
 		case <-heartbeatC:
-			if err := cfg.writer(w, ": keepalive\n\n"); err != nil {
-				return nil
+			if err := fw.frame(": keepalive\n\n"); err != nil {
+				return writeFailed(err)
 			}
 		}
 	}

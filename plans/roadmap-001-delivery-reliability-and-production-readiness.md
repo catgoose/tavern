@@ -29,14 +29,15 @@ The existing commit_policy: ask is satisfied by the user's explicit commit/PR/me
   - Review: https://github.com/catgoose/tavern/pull/230 (merged).
     - Reviewed commit: `9d00ba25172980e84f7a10fe7338bd87b4142416`
 
-- [ ] Pass 002: Observable subscription and storage failures.
+- [x] Pass 002: Observable subscription and storage failures.
   - Requirements: Applications can observe useful structured termination reasons without depending on a full message queue. Replay-store errors become explicit, observable failures with defined recovery behavior rather than looking like successful empty replay. Metrics/docs distinguish queued delivery from transport writes and application processing. Prefer additive compatibility and bounded observability state.
   - Plan: .agents/.local/plans/handoff-006-observable-subscription-and-replay-storage-failures.md
-  - Review:
+  - Review: https://github.com/catgoose/tavern/pull/231 (merged).
+    - Reviewed commit: `22398ab2385479bc51db29ef5314a87ed68c3b0e`
 
 - [ ] Pass 003: HTTP streaming deadlines and production operations.
   - Requirements: Configurable per-write deadlines, observable write/flush failures, and predictable cancellation for supported standard HTTP writers and wrappers. Document unsupported capabilities and keep custom writers usable. Complete an operator guide covering proxy buffering, heartbeats, replay retention, reconnect bursts, slow clients, monitoring, and graceful shutdown. Validate issue #223 against the result.
-  - Plan:
+  - Plan: .agents/.local/plans/handoff-008-http-streaming-deadlines-and-production-operations.md
   - Review:
 
 - [ ] Pass 004: Public API guidance and option validation.
