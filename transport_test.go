@@ -76,21 +76,30 @@ func (d *deadlineWriter) Write(p []byte) (int, error) {
 		d.mu.Lock()
 		deadline, changed := d.deadline, d.changed
 		d.mu.Unlock()
-		var expired <-chan time.Time
-		if !deadline.IsZero() {
-			wait := time.Until(deadline)
-			if wait <= 0 {
-				return 0, os.ErrDeadlineExceeded
-			}
-			timer := time.NewTimer(wait)
-			defer timer.Stop()
-			expired = timer.C
-		}
-		select {
-		case <-expired:
+		if d.waitDeadline(deadline, changed) {
 			return 0, os.ErrDeadlineExceeded
-		case <-changed:
 		}
+	}
+}
+
+// waitDeadline waits until deadline passes (true) or it changes (false). A
+// zero deadline waits only for a change.
+func (d *deadlineWriter) waitDeadline(deadline time.Time, changed <-chan struct{}) bool {
+	var expired <-chan time.Time
+	if !deadline.IsZero() {
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			return true
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	select {
+	case <-expired:
+		return true
+	case <-changed:
+		return false
 	}
 }
 

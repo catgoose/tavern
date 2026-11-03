@@ -164,7 +164,7 @@ func (c *handlerStream) report(b *SSEBroker, err error) {
 
 // maxDuration returns a channel that fires when the connection reaches its
 // maximum duration, or nil when there is no limit.
-func (c *handlerStream) maxDuration() (<-chan time.Time, func()) {
+func (c *handlerStream) maxDuration() (expired <-chan time.Time, stop func()) {
 	if c.maxConnDuration <= 0 {
 		return nil, func() {}
 	}
