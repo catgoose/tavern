@@ -7,12 +7,18 @@
 - for each module (`.`, `tavernprom`, `tavernotel`): `go mod tidy -diff`,
   `go vet`, `go test -race` and golangci-lint;
 - actionlint and shellcheck on the workflows and scripts, the release
-  script's dry-run tests and the proxy smoke script's failure-path tests.
+  script's dry-run tests and the proxy smoke script's failure-path tests;
+- the task board's vendored browser files against their recorded digests
+  and the pinned tavern-js release (`make verify-assets`, needs network).
 
 `make check-module MODULE=tavernprom` checks one module. The examples under
 `examples/` belong to the root module, so these checks cover them.
 `make proxy-smoke` runs the task board behind nginx (Docker required; CI
-runs it on every pull request), and `make capacity` runs the load presets. Lint and actionlint
+runs it on every pull request), and `make capacity` runs the load presets.
+`make browser-install browser-test` runs the task board and showcase in
+headless Chromium; it needs Node 20 or later and is described in
+[examples/taskboard/README.md](examples/taskboard/README.md#browser-tests).
+CI runs it on every pull request. Lint and actionlint
 run through `go run` at the versions pinned in the Makefile, so no separate
 install is needed; shellcheck must be on `PATH`.
 
@@ -31,7 +37,13 @@ is a deliberate change in a reviewed pull request; CI never rewrites it.
   `ACTIONLINT_VERSION` in the Makefile.
 - GitHub Actions: pinned to commit SHAs with the release tag in a comment.
 
-Dependabot proposes Go module and GitHub Actions updates as weekly pull
+- Browser tests: `@playwright/test` in
+  `examples/taskboard/browser/package-lock.json`, and the Chromium build that
+  version installs.
+- Browser assets: `examples/taskboard/vendor.sha256` and the tavern-js pins
+  in `examples/taskboard/vendor.sh`.
+
+Dependabot proposes Go module, npm (browser tests) and GitHub Actions updates as weekly pull
 requests (`.github/dependabot.yml`). They run the same checks as any change
 and are merged by a maintainer; nothing merges automatically. Refresh the
 Makefile tool pins by hand in a pull request.

@@ -55,6 +55,7 @@ type App struct {
 
 	done    chan struct{} // closed by Shutdown
 	pausers sync.Map      // connection id → *pauser (demo slow connection)
+	counter counterScenario
 }
 
 func NewApp(cfg Config, logger *slog.Logger) *App {
@@ -80,6 +81,7 @@ func NewApp(cfg Config, logger *slog.Logger) *App {
 	a.mux.HandleFunc("POST /demo/pause", a.pause)
 	a.mux.HandleFunc("POST /demo/resume", a.resume)
 	a.mux.HandleFunc("POST /demo/sample", a.sample)
+	a.registerShowcase()
 	return a
 }
 

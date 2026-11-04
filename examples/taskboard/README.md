@@ -9,9 +9,9 @@ go run ./examples/taskboard            # http://127.0.0.1:8080
 go run ./examples/taskboard -h         # buffer, heartbeat, write timeout, admission
 ```
 
-Requirements: Go 1.27.3 or later. HTMX 2.0.11 and htmx-ext-sse 2.2.4 are
-vendored in `static/` with their 0BSD licenses (from the npm registry,
-integrity verified), so there is no frontend build or CDN.
+Requirements: Go 1.27.3 or later. The browser files are vendored in
+`static/` with their licenses, so there is no frontend build, Node or CDN
+(see [Vendored browser files](#vendored-browser-files)).
 
 ## Try it
 
@@ -22,6 +22,30 @@ integrity verified), so there is no frontend build or CDN.
    shows every task.
 3. Stop the server with Ctrl-C: windows show *Reconnecting…* and reconnect
    when it is back. The in-memory board starts empty again.
+
+## Showcase
+
+**Showcase** in the board's header lists working scenarios for Tavern and
+[tavern-js](https://github.com/catgoose/tavern-js). [COVERAGE.md](COVERAGE.md)
+lists every capability of both libraries, what demonstrates it, and what is
+still planned.
+
+**Connection and live updates** (`/showcase/connection`) is a counter
+published with event IDs (`PublishWithID`, kept by `SetReplayPolicy`) and
+streamed with `SubscribeFromIDWith` and `StreamSSE`. tavern-js shows the
+region's state from real connection events:
+
+1. Open it in two windows. Both show *Live*; **Increment** updates both.
+2. **Drop, then increment while away** ends this window's stream on the
+   server and changes the counter before the window can reconnect. The
+   region shows *Connection lost*. After the browser's reconnect delay it
+   reconnects with `Last-Event-ID`, the server replays the missed value and
+   sends `tavern-reconnected`, and the region shows *Live* again. The event
+   log shows `replayDelivered: 1`.
+
+A fresh connection replays the values the broker still keeps (four),
+ending with the current one, so a change made while the page loads is not
+missed.
 
 ## How it works
 
@@ -51,8 +75,8 @@ so its queue really fills; it exists only for the demonstration. The name
 field is display text, not authentication: a real application derives
 identity and topic access from its session.
 
-Not covered here: ID-backed replay (`Last-Event-ID`), scoped topics,
-persistence, multiple server instances.
+The board does not use ID-backed replay; the showcase's connection scenario
+does. Not covered: scoped topics, persistence, multiple server instances.
 
 ## Behind a proxy
 
@@ -82,4 +106,50 @@ both on every pull request.
 
 `taskboard_test.go` runs the app on a real HTTP server: page and assets,
 two viewers receiving every change, overflow and reconnect, a client that
-never reads, the admission limit, and shutdown.
+never reads, the admission limit, and shutdown. `showcase_test.go` checks the
+counter stream: every viewer receives each value, and a dropped window's
+resume replays what it missed before `tavern-reconnected`.
+
+## Browser tests
+
+`browser/` runs the app in headless Chromium with Playwright. It needs Node
+20 or later; the app itself does not.
+
+```sh
+make browser-install   # npm ci and the matching Chromium build
+make browser-test
+TASKBOARD_BROWSER_CHANNEL=chrome make browser-test   # use installed Google Chrome
+```
+
+The tests build the app, start it on a free local port, and stop it
+afterwards. Each window gets its own browser context. Every page fails its
+test on a page error, a console error, a failed request, a 4xx or 5xx
+response, or a request to any other host; a test that causes an error on
+purpose declares it. The tests:
+
+- load the board, add a task and follow the links to the showcase;
+- check that tavern-js marks two windows live and that **Increment**
+  updates both;
+- drop one window and check the lost state, the replayed value,
+  `replayDelivered: 1`, the order of tavern-js events, and the return to
+  *Live*, while the other window stays connected.
+
+CI runs them on every pull request and on `main`
+(`.github/workflows/validate.yml`, job *reference app in a browser*).
+
+## Vendored browser files
+
+| File | Version | Source | License |
+|---|---|---|---|
+| `htmx-2.0.11.min.js` | htmx 2.0.11 | npm registry, integrity verified | 0BSD (`LICENSE.htmx`) |
+| `htmx-ext-sse-2.2.4.min.js` | htmx-ext-sse 2.2.4 | npm registry, integrity verified | 0BSD (`LICENSE.htmx-ext-sse`) |
+| `tavern-0.0.23.min.js` | tavern-js v0.0.23 (tag object `82d3ad8`, commit `f3166d8e781b250cf604e0f5ed44c306284d33ff`) | `tavern.min.js` asset of the [v0.0.23 release](https://github.com/catgoose/tavern-js/releases/tag/v0.0.23) | MIT (`LICENSE.tavern-js`, from that commit) |
+
+`vendor.sha256` records their digests. Scripts load in this order: htmx,
+the SSE extension, then tavern-js, which binds to the extension's events.
+
+```sh
+./vendor.sh check      # files match vendor.sha256 (offline)
+./vendor.sh upstream   # and tavern-js matches the pinned release (make verify-assets)
+./vendor.sh update     # download the pinned tavern-js release
+```

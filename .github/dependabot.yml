@@ -17,6 +17,14 @@ updates:
       go-dependencies:
         patterns: ["*"]
 
+  - package-ecosystem: npm
+    directory: /examples/taskboard/browser
+    schedule:
+      interval: weekly
+    groups:
+      browser-test-dependencies:
+        patterns: ["*"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

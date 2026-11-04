@@ -15,6 +15,7 @@ const pageHTML = `<!doctype html>
       hx-on:htmx:sse-error="document.getElementById('status').dataset.state = 'down'">
 <header>
   <h1>Task board</h1>
+  <nav><a href="/showcase">Showcase</a></nav>
   <p id="status" data-state="connecting"><span class="live">Live</span><span class="down">Reconnecting…</span><span class="connecting">Connecting…</span></p>
 </header>
 
