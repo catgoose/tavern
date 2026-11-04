@@ -51,6 +51,9 @@ on top of Tavern:
 - [Delivery Observability](docs/delivery-observability.md) -- control events
   clients receive during reconnection and subscription changes. Structured
   JSON payloads, delivery scenarios, and how tavern-js consumes them.
+- [Multi-User Coordination](docs/multi-user-coordination.md) -- conflicts,
+  claims, leases and presence built above delivery. What delivery signals
+  do not mean, and which state the application owns.
 
 ---
 
