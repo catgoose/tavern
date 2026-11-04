@@ -228,7 +228,7 @@ const labFragmentsHTML = `{{define "vote-card"}}<div id="lab-vote-{{.T.ID}}">{{t
   <span class="title">{{.T.Title}}</span>{{if .T.Internal}} <span class="badge">Internal</span>{{end}}
   <span class="moves">
     <button hx-get="/showcase/lab/tasks/{{.T.ID}}/edit" hx-target="#lab-edit-{{.T.ID}}">Edit</button>
-    <button hx-post="/showcase/lab/tasks/{{.T.ID}}/delete" hx-target="#lab-edit-{{.T.ID}}" hx-swap="delete">Delete</button>
+    <button hx-post="/showcase/lab/tasks/{{.T.ID}}/delete" hx-target="#lab-edit-{{.T.ID}}" hx-swap="outerHTML">Delete</button>
   </span>
 </article>{{end}}
 {{define "editor"}}<form class="lab-editor" data-rev="{{.Rev}}" hx-post="/showcase/lab/tasks/{{.TaskID}}/title" hx-target="#lab-edit-{{.TaskID}}">

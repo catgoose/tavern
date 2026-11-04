@@ -122,6 +122,12 @@ commands in `examples/backends`, `tavernprom/cmd/promdemo` and
   whose last update arrived while it was protected stays out of date until
   something else arrives, so the lab asks the server for a snapshot when
   `flushed` is above zero, and shows "Catching up" until it lands.
+- In the lab, the window that deletes a task replaces its card with an
+  empty placeholder carrying the card's ID, rather than removing it: the
+  server's delete fragment reaches that window too, and removing the card
+  twice made htmx report a missing target. If the fragment arrives first,
+  the editor still has focus and holds it, and the catch-up snapshot
+  replaces the list.
 - htmx focuses `[autofocus]` elements in swapped content. The lab's draft
   guard removes `autofocus` from an editor it keeps, or a snapshot would
   pull focus back into the region and hold every later update.
