@@ -256,4 +256,3 @@ var (
 	shellPageTmpl    = template.Must(template.New("shell").Parse(shellPageHTML))
 	shellChooserTmpl = template.Must(template.New("shell-chooser").Parse(shellChooserHTML))
 )
-

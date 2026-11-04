@@ -164,7 +164,9 @@ func TestShellBoardRecoversAfterLoss(t *testing.T) {
 		}
 		tb.app.shell.addBoardTask(personas[0])
 	}
-	require.Eventually(t, func() bool { return strings.Contains(tb.logs.String(), "shell board stream ended") && strings.Contains(tb.logs.String(), "reason=queue-loss") }, 3*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		return strings.Contains(tb.logs.String(), "shell board stream ended") && strings.Contains(tb.logs.String(), "reason=queue-loss")
+	}, 3*time.Second, time.Millisecond)
 
 	tb.app.shell.mu.Lock()
 	latest := tb.app.shell.board[0]
