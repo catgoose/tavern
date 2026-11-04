@@ -35,7 +35,7 @@ func (b *SSEBroker) PublishWithTTL(topic, msg string, ttl time.Duration, opts ..
 		b.mu.Unlock()
 		return
 	}
-	entry := b.storeReplayWithTTL(topic, msg, now, ttl, cfg)
+	entry := b.storeReplayWithTTL(topic, "", msg, now, ttl, cfg)
 	store := b.replayStore
 
 	subscribers := b.topics[topic]
@@ -46,7 +46,7 @@ func (b *SSEBroker) PublishWithTTL(topic, msg string, ttl time.Duration, opts ..
 	b.mu.Unlock()
 
 	if store != nil {
-		b.appendReplay(store, topic, entry)
+		b.appendTTLReplay(store, topic, entry)
 	}
 
 	b.ensureTTLSweeper()
@@ -76,7 +76,7 @@ func (b *SSEBroker) PublishToWithTTL(topic, scope, msg string, ttl time.Duration
 		b.mu.Unlock()
 		return
 	}
-	entry := b.storeReplayWithTTL(topic, msg, now, ttl, cfg)
+	entry := b.storeReplayWithTTL(topic, scope, msg, now, ttl, cfg)
 	store := b.replayStore
 
 	scopedSubs, exists := b.scopedTopics[topic]
@@ -92,7 +92,7 @@ func (b *SSEBroker) PublishToWithTTL(topic, scope, msg string, ttl time.Duration
 	b.mu.Unlock()
 
 	if store != nil {
-		b.appendReplay(store, topic, entry)
+		b.appendTTLReplay(store, topic, entry)
 	}
 
 	b.ensureTTLSweeper()
@@ -124,7 +124,7 @@ func (b *SSEBroker) PublishIfChangedWithTTL(topic, msg string, ttl time.Duration
 		return false
 	}
 	b.lastHash[topic] = h
-	entry := b.storeReplayWithTTL(topic, msg, now, ttl, cfg)
+	entry := b.storeReplayWithTTL(topic, "", msg, now, ttl, cfg)
 	store := b.replayStore
 
 	subscribers := b.topics[topic]
@@ -135,7 +135,7 @@ func (b *SSEBroker) PublishIfChangedWithTTL(topic, msg string, ttl time.Duration
 	b.mu.Unlock()
 
 	if store != nil {
-		b.appendReplay(store, topic, entry)
+		b.appendTTLReplay(store, topic, entry)
 	}
 
 	b.ensureTTLSweeper()
@@ -153,11 +153,12 @@ func (b *SSEBroker) PublishIfChangedWithTTL(topic, msg string, ttl time.Duration
 // with TTL metadata. Must be called with b.mu held. When an external
 // ReplayStore is configured, this only builds and returns the entry; the
 // caller is responsible for appending it to the store after releasing the lock.
-func (b *SSEBroker) storeReplayWithTTL(topic, msg string, now time.Time, ttl time.Duration, cfg ttlConfig) ReplayEntry {
+func (b *SSEBroker) storeReplayWithTTL(topic, scope, msg string, now time.Time, ttl time.Duration, cfg ttlConfig) ReplayEntry {
 	entry := ReplayEntry{
 		Msg:         msg,
 		ExpiresAt:   now.Add(ttl),
 		PublishedAt: now,
+		Scope:       scope,
 	}
 	if cfg.autoRemoveID != "" {
 		entry.AutoRemoveID = cfg.autoRemoveID
@@ -174,7 +175,7 @@ func (b *SSEBroker) storeReplayWithTTL(topic, msg string, now time.Time, ttl tim
 
 	// Update replay cache.
 	msgs := b.replayCache[topic]
-	msgs = append(msgs, msg)
+	msgs = append(msgs, replayItem{msg: msg, scope: scope})
 	if len(msgs) > maxSize {
 		msgs = msgs[len(msgs)-maxSize:]
 	}
@@ -227,6 +228,7 @@ func (b *SSEBroker) ttlSweepInterval() time.Duration {
 func (b *SSEBroker) sweepExpiredEntries(now time.Time) {
 	type autoRemoval struct {
 		topic     string
+		scope     string
 		elementID string
 	}
 	var removals []autoRemoval
@@ -234,17 +236,18 @@ func (b *SSEBroker) sweepExpiredEntries(now time.Time) {
 	b.mu.Lock()
 	for topic, log := range b.replayLog {
 		var kept []ReplayEntry
-		var keptMsgs []string
+		var keptMsgs []replayItem
 		cache := b.replayCache[topic]
 
 		// Build a set of messages to remove based on expired log entries.
-		expiredMsgs := make(map[string]struct{})
+		expiredMsgs := make(map[replayItem]struct{})
 		for _, entry := range log {
 			if !entry.ExpiresAt.IsZero() && now.After(entry.ExpiresAt) {
-				expiredMsgs[entry.Msg] = struct{}{}
+				expiredMsgs[replayItem{msg: entry.Msg, scope: entry.Scope}] = struct{}{}
 				if entry.AutoRemoveID != "" {
 					removals = append(removals, autoRemoval{
 						topic:     topic,
+						scope:     entry.Scope,
 						elementID: entry.AutoRemoveID,
 					})
 				}
@@ -275,10 +278,29 @@ func (b *SSEBroker) sweepExpiredEntries(now time.Time) {
 	}
 	b.mu.Unlock()
 
-	// Publish auto-remove fragments outside the lock.
+	// Publish auto-remove fragments outside the lock, to the audience the
+	// entry was published to.
 	for _, r := range removals {
-		b.PublishOOB(r.topic, Delete(r.elementID))
+		if r.scope != "" {
+			b.PublishOOBTo(r.topic, r.scope, Delete(r.elementID))
+		} else {
+			b.PublishOOB(r.topic, Delete(r.elementID))
+		}
 	}
+}
+
+// appendTTLReplay writes a TTL entry to the replay store. A scoped entry is
+// written only to a store that keeps its scope; any other store could
+// return it without one, which would replay it to every subscriber, so the
+// entry is not stored and the refusal is reported.
+func (b *SSEBroker) appendTTLReplay(store ReplayStore, topic string, entry ReplayEntry) {
+	if entry.Scope != "" {
+		if ss, ok := store.(ScopedReplayStore); !ok || !ss.StoresScope() {
+			b.reportReplayStoreError(&ReplayStoreError{Op: ReplayOpAppend, Topic: topic, Err: ErrReplayScopeUnsupported})
+			return
+		}
+	}
+	b.appendReplay(store, topic, entry)
 }
 
 func parseTTLOpts(opts []TTLOption) ttlConfig {

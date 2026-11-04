@@ -25,7 +25,7 @@ import (
 type SSEBroker struct {
 	topics            map[string]map[chan string]struct{}
 	scopedTopics      map[string]map[chan string]scopedSub
-	replayCache       map[string][]string       // topic → recent messages (ring buffer)
+	replayCache       map[string][]replayItem   // topic → recent messages (ring buffer)
 	replaySize        map[string]int            // topic → max messages to keep
 	replayLog         map[string][]ReplayEntry  // topic → ordered log with IDs for Last-Event-ID resumption
 	lastHash          map[string]uint64 // topic → FNV hash of last published message via PublishIfChanged
@@ -100,6 +100,30 @@ const (
 )
 
 // scopedSub tracks the scope key alongside the channel.
+// replayItem is a cached replay message and its audience (empty: everyone).
+type replayItem struct {
+	msg   string
+	scope string
+}
+
+// replayVisible reports whether a replay entry for entryScope may be sent
+// to a subscriber with subScope. Unscoped entries go to every subscriber;
+// a scoped entry only to its own scope.
+func replayVisible(entryScope, subScope string) bool {
+	return entryScope == "" || entryScope == subScope
+}
+
+// cachedFor returns the cached messages a subscriber with scope may see.
+func cachedFor(items []replayItem, scope string) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if replayVisible(it.scope, scope) {
+			out = append(out, it.msg)
+		}
+	}
+	return out
+}
+
 type scopedSub struct {
 	scope string
 }
@@ -326,7 +350,7 @@ func NewSSEBroker(opts ...BrokerOption) *SSEBroker {
 	b := &SSEBroker{
 		topics:         make(map[string]map[chan string]struct{}),
 		scopedTopics:   make(map[string]map[chan string]scopedSub),
-		replayCache:    make(map[string][]string),
+		replayCache:    make(map[string][]replayItem),
 		replaySize:     make(map[string]int),
 		replayLog:      make(map[string][]ReplayEntry),
 		topicEmpty:     make(map[string]time.Time),
@@ -404,12 +428,12 @@ func (b *SSEBroker) subscribeLive(topic string, spec subSpec, withSnapshot bool)
 	var store ReplayStore
 	switch {
 	case spec.filter != nil:
-		replayMsgs = append([]string(nil), b.replayCache[topic]...)
+		replayMsgs = cachedFor(b.replayCache[topic], spec.scope)
 	case withSnapshot:
 	case b.replayStore != nil:
 		store = b.replayStore
 	default:
-		replayMsgs = append([]string(nil), b.replayCache[topic]...)
+		replayMsgs = cachedFor(b.replayCache[topic], spec.scope)
 	}
 	b.mu.Unlock()
 	b.finishJoin(topic, j)
@@ -423,7 +447,9 @@ func (b *SSEBroker) subscribeLive(topic string, spec subSpec, withSnapshot bool)
 			}
 		}
 		for _, e := range entries {
-			replayMsgs = append(replayMsgs, e.Msg)
+			if replayVisible(e.Scope, spec.scope) {
+				replayMsgs = append(replayMsgs, e.Msg)
+			}
 		}
 	}
 	for _, msg := range replayMsgs {
@@ -861,7 +887,7 @@ func (b *SSEBroker) publishWithReplayDirect(topic, msg string) {
 			maxSize = n
 		}
 		msgs := b.replayCache[topic]
-		msgs = append(msgs, msg)
+		msgs = append(msgs, replayItem{msg: msg})
 		if len(msgs) > maxSize {
 			msgs = msgs[len(msgs)-maxSize:]
 		}

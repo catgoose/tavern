@@ -241,33 +241,49 @@ test("at most five notices show; they all leave when they expire, and later wind
   for (let i = 0; i < 6; i++) await button(page, "Post a notice").click();
   await expect(page.locator("#ttl-notice-result")).toHaveText("5 notices are showing; wait for one to expire.");
   await expect(page.locator("#ttl-notices li")).toHaveCount(5);
-  for (let i = 0; i < 3; i++) {
-    const posted = page.waitForResponse((r) => r.url().endsWith("/ttl/team"));
-    await button(page, "Post a team notice").click();
-    await posted;
-  }
-  // The last update arrives over the stream after its POST returns.
-  let team = "";
-  await expect(async () => {
-    const before = await page.locator("#ttl-team").textContent();
-    await page.waitForTimeout(300);
-    team = await page.locator("#ttl-team").textContent();
-    expect(team).toBe(before);
-  }).toPass();
-  expect(team).toMatch(/^Team notice \d+/);
   const later = await open(viewer, "ttl");
   await expect(later.locator("#ttl-notices li")).toHaveCount(5); // from the replay cache
-  await expect(later.locator("#ttl-team")).toHaveText(team);
 
   await expect(page.locator("#ttl-notices li")).toHaveCount(0, { timeout: 5000 });
   await expect(later.locator("#ttl-notices li")).toHaveCount(0);
   await page.waitForTimeout(500);
   await expect(page.locator("#ttl-notices li")).toHaveCount(0);
-  await expect(page.locator("#ttl-team")).toHaveText(team); // the team notice stays after expiry
   await button(page, "Post a notice").click();
   await expect(page.locator("#ttl-notice-result")).toHaveText("Posted.");
   await expect(page.locator("#ttl-notices li")).toHaveCount(1);
 });
+
+test("team notices reach only red windows on the same topic, replayed while they last and removed on expiry", async ({ viewer }) => {
+  const openAs = async (team) => {
+    const page = await viewer();
+    await page.goto(`/showcase/delivery/ttl?team=${team}`);
+    await expect(page.locator("#ttl-team")).toHaveAttribute("data-team", team);
+    return page;
+  };
+  const red = await openAs("red");
+  const blue = await openAs("blue");
+  const none = await openAs("none");
+  await expect(red.locator("#ttl-team li")).toHaveCount(0, { timeout: 5000 }); // earlier tests' team notices expire
+  await red.waitForTimeout(300); // every window subscribed
+  for (let i = 0; i < 2; i++) {
+    const posted = red.waitForResponse((r) => r.url().endsWith("/ttl/team"));
+    await button(red, "Post a team notice").click();
+    await posted;
+  }
+  await expect(red.locator("#ttl-team li")).toHaveCount(2);
+  const lateRed = await openAs("red");
+  const lateBlue = await openAs("blue");
+  await expect(lateRed.locator("#ttl-team li")).toHaveCount(2); // replayed to the team
+  await lateBlue.waitForTimeout(300);
+  for (const page of [blue, none, lateBlue]) await expect(page.locator("#ttl-team li")).toHaveCount(0);
+
+  for (const page of [red, lateRed]) await expect(page.locator("#ttl-team li")).toHaveCount(0, { timeout: 5000 });
+  const afterBlue = await openAs("blue");
+  const afterRed = await openAs("red");
+  await afterRed.waitForTimeout(300);
+  for (const page of [blue, none, lateBlue, afterBlue, afterRed]) await expect(page.locator("#ttl-team li")).toHaveCount(0);
+});
+
 
 test("workflow windows opened later, or reloaded, show the model's rows and summary", async ({ viewer }) => {
   const first = await open(viewer, "flow");

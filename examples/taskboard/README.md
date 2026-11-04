@@ -392,17 +392,19 @@ server state** lists the server's counters and what it saw.
 3. **Expiring messages** (`ttl`): messages with a 3 s time-to-live and a
    100 ms sweep (`WithMessageTTLSweep`). A notice (`PublishWithTTL` with
    `WithAutoRemove`) disappears from open windows when it expires; the
-   banner (`PublishOOBWithTTL`) and the team notice (`PublishToWithTTL`)
-   stay on pages that show them. A window opened before expiry gets them
-   from the replay cache, one opened after gets nothing. At most five notices
-   show at once: the replay cache keeps five, and expiry removes only
-   entries still in it, so a notice pushed out by a sixth would never be
-   removed. A sixth is refused until one expires; the app learns that a
-   notice has gone by seeing the sweeper's removal publish. The status uses
-   `PublishIfChangedWithTTL`. Each window also subscribes to a topic of its
-   own, which the broker drops about a second after the window closes
-   (`WithTopicTTL`). The replay cache is per topic, not per scope, so the
-   team notice uses a topic that only the red team subscribes to (#245).
+   banner (`PublishOOBWithTTL`) stays on pages that show it. A window opened
+   before expiry gets them from the replay cache, one opened after gets
+   nothing. Team notices (`PublishToWithTTL` with `WithAutoRemove`) are for
+   the red team; every window subscribes to the team topic, as red, as blue
+   (`?team=blue`) or without a team (`?team=none`), and only red windows
+   receive them, are replayed them while they last and see them removed.
+   At most five notices, and five team notices, show at once: the replay
+   cache keeps five, and expiry removes only entries still in it, so a
+   notice pushed out by a sixth would never be removed. A sixth is refused
+   until one expires; the app learns that a notice has gone by seeing the
+   sweeper's removal publish. The status uses `PublishIfChangedWithTTL`.
+   Each window also subscribes to a topic of its own, which the broker drops
+   about a second after the window closes (`WithTopicTTL`).
 4. **Batches and ordering** (`batch`): a batch of two board updates and a
    feed item for everyone and one of each for the red team. `Flush` sends one
    channel message per topic and scope, so the window's four subscriptions
@@ -653,7 +655,8 @@ delivery family over HTTP: change-only fields and dedup reset with scoped
 isolation, lazy rendering with and without an audience, components and a
 refused render, the burst's final values and counts, TTL delivery, replay
 expiry and auto-removal while a window stays connected, more notices than
-the replay cache keeps refused until one expires, idle topic cleanup,
+the replay cache keeps refused until one expires, team notices reaching
+only red windows on the same topic, live, replayed and removed, idle topic cleanup,
 one channel message per topic and scope (read from a raw channel) and
 discard, the ordered topic's single order under concurrent producers,
 rate-limited and coalescing windows ending on the latest value while a
@@ -739,7 +742,9 @@ purpose declares it. The tests:
 - in the delivery lab: each page reached from the showcase; a burst ending
   on one value at once, debounced and throttled, with their counts; an
   expiring notice leaving open windows while a banner stays, and windows
-  opened later getting nothing; an order reaching the page through the
+  opened later getting nothing; team notices on one topic reaching only red
+  windows, replayed to a red window opened later and removed on expiry,
+  while blue and unscoped windows never see them; an order reaching the page through the
   mutation hook, middleware and derived summary, and a test order held
   back; slow rate-limited and coalescing panels ending on the latest value
   while the plain one falls behind; a held-back window throttled and

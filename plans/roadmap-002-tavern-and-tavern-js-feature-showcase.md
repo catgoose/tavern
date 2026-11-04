@@ -68,12 +68,17 @@
   - Plan: .agents/.local/plans/handoff-028-delivery-shaping-and-reactive-workflow-scenarios.md
   - Review: https://github.com/catgoose/tavern/pull/246 (merged); reviewed head b78ebf89fa4e45820cda45ca59f5a27a1db4c993, merge commit 2614a10fc2251d20b1b6e9e2dbc2184b12844a76. Includes bounded TTL admission, ordered workflow snapshots and concurrent mutation/derived-summary regressions; 54 browser cases pass. Scoped TTL remains Partial under #245, and replay eviction losing TTL auto-remove is documented with a bounded application workaround.
 
-- [ ] Pass 007: Presence and operational diagnostics.
+- [x] Pass 007: Presence and operational diagnostics.
   - Requirements: Demonstrate structured presence and connection events with explicit per-connection/per-user/process boundaries, admission limits, write/flush failures, heartbeats, maximum connection lifetime and graceful shutdown. Expose useful broker/per-topic metrics and observability. Supply runnable opt-in exercises for memory backend fanout, replay storage and Prometheus/OpenTelemetry adapters without adding adapter dependencies to core. Reuse existing proxy/capacity tooling where it covers a capability and explain what it proves.
   - Plan: .agents/.local/plans/handoff-030-presence-and-operational-diagnostics-exercises.md
+  - Review: https://github.com/catgoose/tavern/pull/247 (merged); reviewed head 43b937b6f1a50473cd20d6908fe606e5c5acfd5a, merge commit e86608135bc1f50436f5d2679948a699a6ed4166. Includes generation-bound request cancellation, sealed final shutdown, offline backend/exporter exercises and 61 browser cases. Also fixes the interaction-lab double removal, cross-topic test assumption and exporter label-ranking tie.
+
+- [ ] Pass 008: Scoped TTL replay isolation and expiry routing.
+  - Requirements: Fix confirmed core issue #245 before claiming scoped TTL coverage complete: private TTL replay reaches only its matching audience, expiry deletions retain scope, unscoped behavior stays compatible, and every relevant in-memory/external replay read path is tested. Keep the fix in a separate reviewed PR. This bounded prerequisite was split from final closure after the showcase exposed a real replay-isolation defect; final closure retains all original requirements in pass 009.
+  - Plan: .agents/.local/plans/handoff-032-scoped-ttl-replay-isolation-and-expiry-routing.md
   - Review: pending.
 
-- [ ] Pass 008: Complete coverage and evaluation experience.
+- [ ] Pass 009: Complete coverage and evaluation experience.
   - Requirements: Resolve every uncovered matrix entry through a working scenario or runnable exercise, with explicit treatment of aliases and test-helper APIs. Complete browser coverage of two-user updates, scope isolation, idle-after-edit convergence, hot commands, navigation/teardown, reconnect/gaps and pressure recovery. Check keyboard/status accessibility, source links, startup/reset instructions, pinned asset reproduction and bounded resource cleanup. Reconcile #128 against the original criteria and verified full-library coverage; accurately close or retain upstream issues.
   - Plan: pending.
   - Review: pending.
@@ -88,7 +93,7 @@
 - Failure controls need deterministic bounded ownership; avoid global sleeps, unbounded logs, shared cross-scenario pressure or cleanup of resources the demo did not create.
 - Browser assets must be pinned with provenance/licenses, and browser CI must participate in the existing required aggregate check. Optional adapters must not raise core dependencies.
 - Separate repositories have separate worktrees, CI and review baselines; consume only reviewed upstream revisions and preserve existing local changes.
-- Final closure must investigate the intermittent interaction-lab `htmx:oobErrorNoTarget #lab-edit-6` observed in PR #246's earlier CI run (unchanged lab code). Ten local reruns and the final CI passed; preserve that evidence and do not hide the failure with a broad browser error allowance. Retain the documented TTL limitations and honest Partial entries until their delivered evidence is reconciled.
+- PR #247 fixes the interaction-lab double removal behind `htmx:oobErrorNoTarget #lab-edit-6` with a placeholder and 40 repeated delete-test passes. Final closure still needs deterministic regression evidence (a server/writer barrier can control delivery without browser SSE interception) and must stabilize the separate refused-command test's 1,050 ms burst-timing assumption. Preserve evidence and narrow error checks. Retain documented TTL limitations and honest Partial entries until their delivered evidence is reconciled.
 
 ## Deferred Questions
 
@@ -100,4 +105,4 @@
 
 ## Suggested Next Plan
 
-- Pass 007: presence, transport and admission diagnostics, observability, and opt-in backend/exporter exercises. Dispatch handoff-030 in roadmap-run mode. Leave final closure unplanned until its turn.
+- Pass 008: fix #245's scoped TTL replay and expiry routing in a separate PR before final coverage closure (now pass 009). Dispatch handoff-032 in roadmap-run mode. Build the closure packet only after this correctness pass is reviewed and merged.

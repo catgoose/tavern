@@ -103,14 +103,20 @@ func (b *SSEBroker) buildReconnectInfo(topic, lastEventID string, ch chan string
 		info.SubscriberID = meta.ID
 	}
 
-	// Compute gap duration and missed count from the replay log.
+	// Compute gap duration and missed count from the replay log, counting
+	// only entries this subscriber's scope may see.
+	scope := b.scopedTopics[topic][ch].scope
 	log := b.replayLog[topic]
 	for i, entry := range log {
 		if entry.ID == lastEventID {
 			if !entry.PublishedAt.IsZero() {
 				info.Gap = time.Since(entry.PublishedAt)
 			}
-			info.MissedCount = len(log) - i - 1
+			for _, e := range log[i+1:] {
+				if replayVisible(e.Scope, scope) {
+					info.MissedCount++
+				}
+			}
 			break
 		}
 	}

@@ -334,7 +334,7 @@ func TestPublishWithTTL_SubscribeFromID_EmptyID_FiltersExpired(t *testing.T) {
 		{ID: "2", Msg: "expired", ExpiresAt: time.Now().Add(-time.Second)},
 		{ID: "3", Msg: "also-alive"},
 	}
-	b.replayCache["events"] = []string{"alive", "expired", "also-alive"}
+	b.replayCache["events"] = []replayItem{{msg: "alive"}, {msg: "expired"}, {msg: "also-alive"}}
 	b.mu.Unlock()
 
 	ch, unsub := b.SubscribeFromID("events", "")

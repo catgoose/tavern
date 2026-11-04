@@ -23,6 +23,13 @@ type ReplayEntry struct {
 	// PublishedAt records when the entry was originally published, used to
 	// compute reconnection gap durations.
 	PublishedAt time.Time
+	// Scope is the audience of an entry published to scoped subscribers
+	// (SSEBroker.PublishToWithTTL). Such an entry is replayed only to
+	// subscribers with the same scope, and its auto-removal goes only to
+	// them. Empty means the entry is for every subscriber of the topic. A
+	// ReplayStore receives scoped entries only if it implements
+	// [ScopedReplayStore].
+	Scope string
 }
 
 // PublishWithID publishes msg to the topic with an associated event ID.
@@ -49,7 +56,7 @@ func (b *SSEBroker) PublishWithID(topic, id, msg string) {
 
 		// Also update replayCache for regular Subscribe replay compatibility.
 		msgs := b.replayCache[topic]
-		msgs = append(msgs, msg)
+		msgs = append(msgs, replayItem{msg: msg})
 		if len(msgs) > maxSize {
 			msgs = msgs[len(msgs)-maxSize:]
 		}
@@ -127,13 +134,13 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 			// Filter out expired entries from the replay log if present.
 			if log := b.replayLog[topic]; len(log) > 0 {
 				for _, e := range log {
-					if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
+					if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) || !replayVisible(e.Scope, cfg.scope) {
 						continue
 					}
 					replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
 				}
 			} else {
-				replayMsgs = append([]string(nil), b.replayCache[topic]...)
+				replayMsgs = cachedFor(b.replayCache[topic], cfg.scope)
 			}
 		} else {
 			log := b.replayLog[topic]
@@ -143,7 +150,7 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 					found = true
 					// Replay everything after this entry, skipping expired.
 					for _, e := range log[i+1:] {
-						if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
+						if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) || !replayVisible(e.Scope, cfg.scope) {
 							continue
 						}
 						replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
@@ -194,6 +201,9 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 				}
 			}
 			for _, e := range entries {
+				if !replayVisible(e.Scope, cfg.scope) {
+					continue
+				}
 				if e.ID != "" {
 					replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
 				} else {
@@ -222,7 +232,9 @@ func (b *SSEBroker) subscribeFromIDInternal(topic, lastEventID string, cfg subsc
 				b.mu.RUnlock()
 			}
 			for _, e := range entries {
-				replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
+				if replayVisible(e.Scope, cfg.scope) {
+					replayMsgs = append(replayMsgs, injectSSEID(e.Msg, e.ID))
+				}
 			}
 		}
 	}

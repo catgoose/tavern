@@ -187,7 +187,7 @@ func TestDeliveryTTL(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, tb.dlPost(t, "ttl/notice"))
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/banner"))
-	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/team"))
+	require.Equal(t, http.StatusOK, tb.dlPost(t, "ttl/team"))
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/status?value=amber"))
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/status?value=amber"))
 	live := recUntilQuiet(early, 200*time.Millisecond)
@@ -205,10 +205,10 @@ func TestDeliveryTTL(t *testing.T) {
 	assert.Len(t, containing(later, `id="notice-1"`), 1, "a window opened before expiry gets the cached notice")
 	assert.Len(t, containing(later, `id="ttl-banner"`), 1)
 
-	removed := waitFor(t, early, `<div id="notice-1" hx-swap-oob="delete">`, ttTTL+time.Second)
-	assert.NotEmpty(t, removed.data, "the notice is removed from an open window when it expires")
-	rest := recUntilQuiet(early, 300*time.Millisecond)
-	assert.Empty(t, containing(rest, "delete"), "the banner, status and team notice have no auto-removal")
+	gone := recUntilQuiet(early, ttTTL+time.Second)
+	assert.Len(t, containing(gone, `<div id="notice-1" hx-swap-oob="delete">`), 1, "the notice is removed from an open window when it expires")
+	assert.Len(t, containing(gone, `<div id="team-3" hx-swap-oob="delete">`), 1, "so is the team notice (the banner took 2), from a red window")
+	assert.Len(t, containing(gone, "delete"), 2, "the banner and status have no auto-removal")
 
 	expired := recUntilQuiet(dlStream(t, tb, "ttl", "c"), 300*time.Millisecond)
 	assert.Empty(t, expired, "a window opened after expiry gets nothing from the cache")
@@ -560,20 +560,21 @@ func TestDeliveryNoticesStayWithinRetention(t *testing.T) {
 	}
 	assert.False(t, l.notice(), "a sixth notice is refused while five show")
 	assert.True(t, l.log.has("notice refused: 5 are showing"))
-	for range 3 {
-		require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/team"))
+	for range ttKept {
+		assert.True(t, l.team())
 	}
+	assert.False(t, l.team(), "team notices have the same limit")
 	later := recUntilQuiet(dlStream(t, tb, "ttl", "b"), 300*time.Millisecond)
 	assert.Equal(t, []int{1, 2, 3, 4, 5}, liveIDs(later, "notice"), "a later window gets the five showing")
-	team := containing(later, "Team notice")
-	require.Len(t, team, 1, "the team notice is one slot")
-	assert.Contains(t, team[0], "Team notice 8")
+	assert.Equal(t, []int{6, 7, 8, 9, 10}, liveIDs(later, "team"), "and, as red, the five team notices")
 
 	got := recUntilQuiet(events, ttTTL+time.Second)
 	assert.Empty(t, liveIDs(got, "notice"), "every notice has left the open window")
+	assert.Empty(t, liveIDs(got, "team"), "every team notice too")
 	assert.True(t, l.notice(), "once they expire, notices can be posted again")
 	l.mu.Lock()
-	assert.Len(t, l.showing, 1)
+	assert.Len(t, l.showing[ttNotices], 1)
+	assert.Empty(t, l.showing[ttTeam])
 	l.mu.Unlock()
 }
 
@@ -722,4 +723,31 @@ func TestDeliveryWorkflowAuditIsBounded(t *testing.T) {
 	assert.Len(t, l.audit, flAuditMax)
 	assert.Len(t, l.orders, flKept)
 	l.mu.Unlock()
+}
+
+// TestDeliveryTeamNoticesReachOnlyTheTeam opens red, blue and unscoped
+// windows on the same team topic. Only red windows receive a team notice,
+// are replayed it when they open later, and receive its removal.
+func TestDeliveryTeamNoticesReachOnlyTheTeam(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	l := tb.app.delivery.ttl
+	red := dlStream(t, tb, "ttl", "red", "team=red")
+	blue := dlStream(t, tb, "ttl", "blue", "team=blue")
+	none := dlStream(t, tb, "ttl", "none", "team=none")
+	require.Eventually(t, func() bool { return l.reg.openStreams() == 3 }, time.Second, 5*time.Millisecond)
+	require.Equal(t, http.StatusOK, tb.dlPost(t, "ttl/team"))
+	assert.Equal(t, []int{1}, liveIDs(recUntilQuiet(red, 200*time.Millisecond), "team"))
+
+	lateRed := dlStream(t, tb, "ttl", "late-red", "team=red")
+	lateBlue := dlStream(t, tb, "ttl", "late-blue", "team=blue")
+	lateNone := dlStream(t, tb, "ttl", "late-none", "team=none")
+	assert.Equal(t, []int{1}, liveIDs(recUntilQuiet(lateRed, 200*time.Millisecond), "team"), "a red window opened later is replayed it")
+
+	for name, ch := range map[string]<-chan recEvent{"red": red, "late red": lateRed} {
+		assert.Len(t, containing(recUntilQuiet(ch, ttTTL+time.Second), `<div id="team-1" hx-swap-oob="delete">`), 1, "%s: removed on expiry", name)
+	}
+	for name, ch := range map[string]<-chan recEvent{"blue": blue, "unscoped": none, "late blue": lateBlue, "late unscoped": lateNone} {
+		assert.Empty(t, containing(recUntilQuiet(ch, 100*time.Millisecond), "team-1"), "%s: never sees the team notice or its removal", name)
+	}
+	assert.Equal(t, http.StatusBadRequest, tb.status(t, "/showcase/delivery/ttl/events?conn=x&team=green"))
 }

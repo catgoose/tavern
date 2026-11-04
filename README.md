@@ -387,6 +387,8 @@ broker.PublishWithTTL("toasts", toastHTML, 5*time.Second,
 ```
 
 Also available: `PublishOOBWithTTL`, `PublishToWithTTL`, `PublishIfChangedWithTTL`.
+A `PublishToWithTTL` message is replayed only to subscribers with its scope,
+and its auto-removal is sent only to them.
 
 ### Batch publishing (Batch / Flush)
 
@@ -833,6 +835,16 @@ type ReplayStore interface {
 IDs are topic-scoped. TTL filtering happens at read time — stores must not
 return expired entries. `AfterID` returns `found=false` when the requested ID
 has been evicted; the broker treats this as a gap.
+
+Entries from `PublishToWithTTL` carry their scope in `ReplayEntry.Scope` and
+are replayed only to subscribers with that scope. The broker writes them only
+to a store that implements `ScopedReplayStore` (`StoresScope() bool`), which
+promises to store the field and return it unchanged; `MemoryReplayStore`
+does. For any other store a scoped entry is delivered live but not stored,
+and the append is reported to the replay store error handler with
+`ErrReplayScopeUnsupported`. TTL auto-removal (`WithAutoRemove`) runs from the
+broker's in-memory log, so it does not fire for entries kept in a replay
+store.
 
 ### Replay gap detection (OnReplayGap / SetReplayGapPolicy)
 
