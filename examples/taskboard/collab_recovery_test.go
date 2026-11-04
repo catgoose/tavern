@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,8 +16,10 @@ import (
 )
 
 // overflowFeed opens Bob's feed, pauses its writes, and adds public tasks
-// until feed updates are dropped. It returns the feed's events and the
-// last title added; nothing changes the board afterwards.
+// until feed updates are dropped. The last task added is the first whose
+// activity or counts update was dropped (Bob's feed is the only
+// subscriber), and nothing changes the board afterwards. It returns the
+// feed's events and that task's title.
 func overflowFeed(t *testing.T, tb *testBoard) (feed <-chan sseEvent, last string) {
 	t.Helper()
 	feed = openSSE(t, tb, "/showcase/collaboration/feed?as=bob&conn=f")
@@ -79,16 +82,21 @@ func TestCollabFeedRecoversAfterDroppedUpdate(t *testing.T) {
 }
 
 // TestCollabFeedStaysStaleWithoutRepair is the same run with repair turned
-// off, showing that the loss is real and the repair is what fixes it.
+// off, showing that the loss is real and the repair is what fixes it. The
+// final change's activity update, counts update or both were dropped, so at
+// least one of them is never shown.
 func TestCollabFeedStaysStaleWithoutRepair(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Buffer = 2
 	tb := newTestBoard(t, cfg)
 	tb.app.collab.feed.close()
 
-	feed, _ := overflowFeed(t, tb)
+	feed, last := overflowFeed(t, tb)
 	got := drain(t, feed, 300*time.Millisecond)
-	assert.NotContains(t, got["collab/stats/contributor"], currentStats(tb))
+	statsCurrent := strings.Contains(got["collab/stats/contributor"], currentStats(tb))
+	activityCurrent := strings.Contains(got["collab/activity/contributor"], "Bob added &#34;"+last+"&#34;")
+	t.Logf("current without repair: counts %v, activity %v", statsCurrent, activityCurrent)
+	assert.False(t, statsCurrent && activityCurrent, "without repair the feed should still miss the final change")
 }
 
 // waitHeld starts a reconnect for conn and reports when it returns.
