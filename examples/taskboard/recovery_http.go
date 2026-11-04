@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"html/template"
 	"net/http"
 	"slices"
@@ -65,16 +66,28 @@ func (a *App) recoveryEvents(w http.ResponseWriter, r *http.Request, s *scenario
 			return
 		}
 	}
+	// Reserve the connection ID before anything is published for it, so a
+	// second request with the same ID cannot take over its controls.
+	c := &recoveryConn{gate: &pauser{resume: make(chan struct{})}, done: make(chan struct{})}
+	if err := s.reserve(conn, c); err != nil {
+		code := http.StatusConflict
+		if errors.Is(err, errConnsFull) {
+			code = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), code)
+		return
+	}
+	unsub := func() {}
+	defer func() {
+		unsub()
+		c.gate.set(false)
+		s.release(conn, c)
+		close(c.done)
+	}()
+
 	lastID := r.Header.Get("Last-Event-ID")
 	status := tavern.NewSubscriptionStatus()
-
-	gate := &pauser{resume: make(chan struct{})}
-	s.pausers.Store(conn, gate)
-	defer func() {
-		s.pausers.CompareAndDelete(conn, gate)
-		gate.set(false)
-	}()
-	pw := pausableWriter{w, func() { gate.wait(r.Context(), a.done) }}
+	pw := pausableWriter{w, func() { c.gate.wait(r.Context(), a.done) }}
 	opts := []tavern.StreamSSEOption{
 		tavern.WithStreamHeartbeat(a.cfg.Heartbeat),
 		tavern.WithStreamWriteTimeout(a.cfg.WriteTimeout),
@@ -83,39 +96,27 @@ func (a *App) recoveryEvents(w http.ResponseWriter, r *http.Request, s *scenario
 
 	var err error
 	if s.kind == kindMulti {
-		ch, unsub := s.broker.SubscribeMultiFromID(s.topics, lastID)
-		done := s.track(conn, unsub)
-		defer done()
+		var ch <-chan tavern.TopicMessage
+		ch, unsub = s.subscribeMulti(lastID)
+		s.setUnsubscribe(c, unsub)
 		err = tavern.StreamSSE(r.Context(), pw, ch, func(m tavern.TopicMessage) string { return m.Data }, opts...)
 	} else {
-		ch, unsub := s.subscribe(conn, lastID, status)
+		ch, u := s.subscribe(conn, lastID, status)
 		if ch == nil {
 			http.Error(w, "Too many connections, try again shortly", http.StatusServiceUnavailable)
 			return
 		}
+		unsub = u
 		if s.kind == kindStoreStrict {
-			ch, unsub = s.withFallback(r.Context(), conn, ch, unsub, status)
+			ch, unsub = s.withFallback(r.Context(), conn, ch, u, status)
 		}
-		done := s.track(conn, unsub)
-		defer done()
+		s.setUnsubscribe(c, unsub)
 		err = tavern.StreamSSE(r.Context(), pw, ch, func(m string) string { return m }, opts...)
 	}
 	if reason := status.Termination().Reason; reason != tavern.TerminationNone && reason != tavern.TerminationUnsubscribe {
 		s.observe(conn, "stream ended: %s", reason)
 	}
 	a.logger.Info("recovery stream ended", "scenario", s.name, "write_error", err)
-}
-
-// track registers conn's open stream so the away control can end it. The
-// returned function unsubscribes and unregisters it.
-func (s *scenario) track(conn string, unsub func()) func() {
-	cs := &droppableStream{unsubscribe: unsub, done: make(chan struct{})}
-	s.streams.Store(conn, cs)
-	return func() {
-		unsub()
-		s.streams.CompareAndDelete(conn, cs)
-		close(cs.done)
-	}
 }
 
 // withFallback forwards ch and, if it ends because the replay store could
@@ -196,8 +197,8 @@ func (a *App) recoveryAway(w http.ResponseWriter, r *http.Request, s *scenario) 
 		http.Error(w, "n must be from 0 to 20", http.StatusBadRequest)
 		return
 	}
-	v, open := s.streams.Load(conn)
-	if !open {
+	c, unsubscribe := s.subscribed(conn)
+	if c == nil {
 		http.Error(w, "This window has no stream", http.StatusNotFound)
 		return
 	}
@@ -206,10 +207,10 @@ func (a *App) recoveryAway(w http.ResponseWriter, r *http.Request, s *scenario) 
 		return
 	}
 	defer s.holds.take(conn)
-	cs := v.(*droppableStream)
-	cs.unsubscribe()
+	unsubscribe()
+	c.gate.set(false) // a held-back stream can only end once its writes resume
 	select {
-	case <-cs.done:
+	case <-c.done:
 	case <-r.Context().Done():
 		return
 	}
@@ -220,12 +221,12 @@ func (a *App) recoveryAway(w http.ResponseWriter, r *http.Request, s *scenario) 
 }
 
 func (a *App) recoveryPause(w http.ResponseWriter, r *http.Request, s *scenario) {
-	v, ok := s.pausers.Load(r.URL.Query().Get("conn"))
-	if !ok {
+	c := s.owner(r.URL.Query().Get("conn"))
+	if c == nil {
 		http.Error(w, "This window has no stream", http.StatusNotFound)
 		return
 	}
-	v.(*pauser).set(r.URL.Query().Get("on") == "1")
+	c.gate.set(r.URL.Query().Get("on") == "1")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -247,13 +248,15 @@ func (a *App) recoveryFault(w http.ResponseWriter, r *http.Request, s *scenario)
 
 type recoveryStateView struct {
 	Values       map[string]int `json:"values"`
+	Rev          int            `json:"rev"` // the event ID the values were published with
 	Observations []observation  `json:"observations"`
 	FailAppend   bool           `json:"failAppend"`
 	FailRead     bool           `json:"failRead"`
 }
 
 func (a *App) recoveryState(w http.ResponseWriter, r *http.Request, s *scenario) {
-	v := recoveryStateView{Values: s.current(), Observations: s.observations(r.URL.Query().Get("conn"))}
+	v := recoveryStateView{Observations: s.observations(r.URL.Query().Get("conn"))}
+	v.Values, v.Rev = s.state()
 	if s.store != nil {
 		v.FailAppend, v.FailRead = s.store.failAppend.Load(), s.store.failRead.Load()
 	}

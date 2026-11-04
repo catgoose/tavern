@@ -21,6 +21,14 @@ async function serverValue(page, name) {
 
 const events = (page) => page.locator("#recovery-events");
 const button = (page, name) => page.getByRole("button", { name, exact: true });
+const reconnects = (page) => events(page).locator("li", { hasText: "tavern:reconnected" }).count();
+
+// reconnected runs action and waits for one more server-confirmed resume.
+async function reconnected(page, action) {
+  const before = await reconnects(page);
+  await action();
+  await expect.poll(() => reconnects(page)).toBeGreaterThan(before);
+}
 
 // converges waits until the window shows the server's current value.
 async function converges(page, name) {
@@ -82,7 +90,7 @@ test("gap actions: banner, custom event and reload all end on the current value"
 
   const custom = await openScenario(await viewer({ expected: sseErrors(1) }), "resume", "recovery-gap");
   await button(custom, "Disconnect and miss 8 changes").click();
-  await expect(events(custom)).toContainText("custom handler refetched the current value");
+  await expect(events(custom)).toContainText(/custom handler: (applied|fetched) revision \d+/);
   await expect(custom.locator("#recovery-region")).toHaveClass(/\bis-live\b/);
   await converges(custom, "resume");
 
@@ -154,7 +162,8 @@ for (const [name, reason] of [["evict", "evicted"], ["loss-aware", "queue-loss"]
 }
 
 test("replay store failures: a failed read falls back to a snapshot; strict mode ends the replay", async ({ viewer }) => {
-  const page = await openScenario(await viewer({ expected: sseErrors(3) }), "store");
+  test.setTimeout(60_000);
+  const page = await openScenario(await viewer({ expected: sseErrors(5) }), "store");
   try {
     await button(page, "Fail reads").click();
     await button(page, "Disconnect and miss 3 changes").click();
@@ -162,6 +171,25 @@ test("replay store failures: a failed read falls back to a snapshot; strict mode
     await expect(page.locator("#recovery-region")).toHaveClass(/\bis-live\b/);
     await converges(page, "store");
     await serverSaw(page, "replay store after-id on recovery/stored failed");
+    await button(page, "Repair the store").click();
+
+    // Failed appends: the resume looks complete and the window stays behind.
+    await button(page, "Fail appends").click();
+    await reconnected(page, () => button(page, "Disconnect and miss 3 changes").click());
+    await serverSaw(page, "replay store append on recovery/stored failed");
+    const behind = await page.locator("#recovery-value").textContent();
+    expect(Number(await serverValue(page, "store"))).toBeGreaterThan(Number(behind));
+    // The same window recovers with nothing more changed: clear the
+    // history, and its next resume is a gap answered with a snapshot.
+    await button(page, "Repair the store").click();
+    const canonical = await serverValue(page, "store");
+    await button(page, "Clear replay history").click();
+    await reconnected(page, () => button(page, "Reconnect now").click());
+    await expect(page.locator("#recovery-value")).toHaveText(canonical);
+    await page.waitForTimeout(300);
+    await expect(page.locator("#recovery-value")).toHaveText(canonical);
+    expect(await serverValue(page, "store")).toBe(canonical);
+    await button(page, "Fail reads").click();
 
     const strict = await openScenario(page, "store-strict");
     await button(strict, "Disconnect and miss 3 changes").click();
@@ -177,4 +205,88 @@ test("replay store failures: a failed read falls back to a snapshot; strict mode
   } finally {
     await page.evaluate(() => fetch("/showcase/recovery/store/fault?append=0&read=0", { method: "POST" }));
   }
+});
+
+// holdState holds the custom gap handler's state fetches: each is sent to
+// the server when made, and its response is kept until released.
+async function holdState(page, name) {
+  const held = [];
+  let arrived;
+  await page.route(new RegExp(`/showcase/recovery/${name}/state\\?conn=`), async (route) => {
+    const response = await route.fetch();
+    held.push({ route, response });
+    if (arrived) arrived();
+  });
+  return {
+    held,
+    next: (n) => expect.poll(() => held.length).toBeGreaterThanOrEqual(n),
+    release: async (i) => {
+      try {
+        await held[i].route.fulfill({ response: held[i].response });
+      } catch {
+        // the page cancelled this fetch
+      }
+    },
+  };
+}
+
+test("a custom gap fetch that returns after a newer update does not replace it", async ({ viewer }) => {
+  const page = await openScenario(await viewer({ expected: sseErrors(1) }), "resume", "recovery-gap");
+  const state = await holdState(page, "resume");
+  await button(page, "Disconnect and miss 8 changes").click();
+  await state.next(1); // fetched at the value after the absence
+  await expect(page.locator("#recovery-region")).toHaveClass(/\bis-live\b/);
+  await converges(page, "resume");
+
+  await button(page, "Change").click(); // the stream delivers a newer value
+  await converges(page, "resume");
+  const newest = await page.locator("#recovery-value").textContent();
+  await state.release(0); // now the older fetch returns
+  await expect(events(page)).toContainText(/custom handler: fetched revision \d+, already showing \d+/);
+  await page.waitForTimeout(300);
+  await expect(page.locator("#recovery-value")).toHaveText(newest);
+  expect(await serverValue(page, "resume")).toBe(newest);
+});
+
+test("overlapping custom gap fetches: the newer one wins and the older is cancelled", async ({ viewer }) => {
+  const page = await openScenario(
+    await viewer({ expected: [...sseErrors(2), /request failed: .*\/showcase\/recovery\/resume\/state\?conn=.* net::ERR_ABORTED/] }),
+    "resume",
+    "recovery-gap",
+  );
+  const state = await holdState(page, "resume");
+  await button(page, "Disconnect and miss 8 changes").click();
+  await state.next(1);
+  await button(page, "Disconnect and miss 8 changes").click(); // a second gap while the first fetch is out
+  await state.next(2);
+  await state.release(1);
+  await expect(events(page)).toContainText(/custom handler: (applied|fetched) revision \d+/);
+  await state.release(0);
+  await page.waitForTimeout(300);
+  await expect(events(page).locator("li", { hasText: "custom handler:" })).toHaveCount(1);
+  await converges(page, "resume");
+});
+
+test("a custom gap fetch that keeps failing gives up and leaves the stream in charge", async ({ viewer }) => {
+  const page = await openScenario(
+    await viewer({
+      expected: [
+        ...sseErrors(1),
+        ...Array(3).fill(/^503 .*\/showcase\/recovery\/resume\/state\?conn=/),
+        ...Array(3).fill("console error: Failed to load resource: the server responded with a status of 503 (Service Unavailable)"),
+      ],
+    }),
+    "resume",
+    "recovery-gap",
+  );
+  let calls = 0;
+  await page.route(/\/showcase\/recovery\/resume\/state\?conn=/, (route) => {
+    calls++;
+    return route.fulfill({ status: 503, body: "unavailable" });
+  });
+  await button(page, "Disconnect and miss 8 changes").click();
+  await expect(events(page)).toContainText("custom handler: gave up (HTTP 503)");
+  await page.waitForTimeout(1500);
+  expect(calls).toBe(3);
+  await converges(page, "resume");
 });

@@ -284,7 +284,11 @@ streams that ended), and the page logs each tavern-js event it sees.
    page with each gap action: **banner** shows tavern-js's banner,
    **reload** reloads the page once (the new page starts from a snapshot,
    so it does not reload again), and **custom event** has the page fetch
-   the current value.
+   the current value. The fetch is applied only if its revision (the event
+   ID the values were published with) is newer than the last one the
+   stream delivered, so a slow response cannot replace a newer update. A
+   newer gap cancels an older fetch, and a failing one is tried three times
+   and then left to the stream.
 2. **Gap without a snapshot** (`resume-silent`) is the same with
    `GapSilent`: after a long absence the window goes live with an old value
    and stays behind until the next change. Only the server sees the gap.
@@ -319,6 +323,10 @@ streams that ended), and the page logs each tavern-js event it sees.
    gap: the window gets the gap event and a snapshot. Failed appends are
    lost without a gap: the window's ID is still stored and nothing after it
    was kept, so the resume looks complete and only the handler saw it.
+   That window recovers, with nothing more changed, once its history is
+   gone: **Repair the store**, **Clear replay history**, then **Reconnect
+   now**. The resume no longer finds its ID, so it is a gap answered with a
+   snapshot.
    With `SubWithTerminateOnReplayError` a failed read ends the subscription
    (`replay-failure`) instead; the app then serves a `SubscribeWithSnapshot`
    subscription on the same response, so the window still reaches the
@@ -333,11 +341,21 @@ How it is built:
 - Every scenario runs on its own broker, created in `newRecovery`, so
   buffer size, drop policy, eviction and the replay store never touch the
   app broker or its publish-drop callback. All are closed at shutdown.
-- A fresh window starts from a snapshot taken with its subscription under
-  the scenario's lock, carrying the latest event ID, and no replay. A
-  window resuming with `Last-Event-ID` gets `SubscribeFromIDWith` with its
-  connection ID as subscriber ID, so the server's reconnect and gap
-  observations name it.
+- A fresh window starts from a snapshot carrying the latest event ID, and
+  no replay. A window resuming with `Last-Event-ID` gets
+  `SubscribeFromIDWith` with its connection ID as subscriber ID, so the
+  server's reconnect and gap observations name it.
+- Each scenario holds one publication lock across every publish (including
+  repair) and across each subscribe, with its replay and gap snapshot. A
+  change made while a snapshot is taken is queued after it, so a snapshot
+  never replaces a newer value or moves the window's event ID back. The gap
+  snapshot callback, which the broker calls during the subscribe, takes
+  only the model lock.
+- A connection ID has one open stream at a time. It is reserved before the
+  stream's pause gate is published or its subscription is made; a second
+  stream with the same ID is refused (409) and the first keeps its
+  controls. The reservation is released when the stream ends, before a
+  held reconnect is let through. At most 32 streams are open per scenario.
 - **Disconnect** ends the window's own stream and holds its reconnect
   (the collaboration scenario's bounded holds) while the changes are made,
   so the absence is exactly that many changes. Holds end on release,
@@ -429,8 +447,11 @@ silent gap, two topics on one resume, a truncated replay repaired (and
 staying behind with repair off) and then confirmed, full queues with each
 drop policy (with a no-repair control), eviction and loss termination, store
 read and append failures with and without strict mode and recovery once
-the fault clears, clearing replay, controls that act on one window, and
-release of held windows at shutdown.
+the fault clears (the window behind failed appends included, with nothing
+more changed), clearing replay, a change published while a gap snapshot is
+taken on one topic, two topics and the store, one owner per connection ID,
+release of connections however they end, controls that act on one window,
+and release of held windows at shutdown.
 
 ## Browser tests
 
@@ -485,9 +506,12 @@ purpose declares it. The tests:
   reload gap actions each ending on the current value, with one reload
   only; two topics resumed from one ID; a truncated replay repaired but not
   confirmed until a real resume; full queues with each drop policy,
-  eviction and loss termination ending on the current value; and replay
+  eviction and loss termination ending on the current value; replay
   store read failures in default and strict mode, recovering once the
-  store is repaired.
+  store is repaired; a window left behind by failed appends recovering
+  with nothing more changed; and custom gap fetches that return after a
+  newer update, overlap, or keep failing, none of which replace the
+  newest value.
 
 CI runs them on every pull request and on `main`
 (`.github/workflows/validate.yml`, job *reference app in a browser*).

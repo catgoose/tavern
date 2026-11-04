@@ -115,15 +115,57 @@ const recoveryPageHTML = `<!doctype html>
   function state() {
     return fetch("/showcase/recovery/" + name + "/state?conn=" + conn).then(function (r) { return r.json(); });
   }
-  // The custom gap action: fetch the current values from the server.
-  document.addEventListener("recovery-gap", function () {
-    state().then(function (s) {
-      Object.keys(s.values).forEach(function (topic) {
-        var id = { "recovery/left": "recovery-left", "recovery/right": "recovery-right" }[topic] || "recovery-value";
-        document.getElementById(id).textContent = s.values[topic];
-      });
-      note("custom handler refetched the current value");
+  // seen is the newest event ID the stream has applied. Every value message
+  // carries one, so a fetched state is applied only if it is newer.
+  var seen = 0;
+  document.addEventListener("htmx:sseMessage", function (e) {
+    var id = Number(e.detail && e.detail.lastEventId);
+    if (id > seen) seen = id;
+  });
+  function show(values) {
+    Object.keys(values).forEach(function (topic) {
+      var id = { "recovery/left": "recovery-left", "recovery/right": "recovery-right" }[topic] || "recovery-value";
+      document.getElementById(id).textContent = values[topic];
     });
+  }
+
+  // The custom gap action: fetch the current values from the server. One
+  // fetch at a time; a newer gap cancels the older one. A failed fetch is
+  // tried twice more, then left to the stream.
+  var pending = null;
+  document.addEventListener("recovery-gap", function () {
+    if (pending) pending.abort();
+    var ctl = new AbortController();
+    pending = ctl;
+    var tries = 0;
+    (function attempt() {
+      if (ctl.signal.aborted) return;
+      fetch("/showcase/recovery/" + name + "/state?conn=" + conn, { signal: ctl.signal })
+        .then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json();
+        })
+        .then(function (s) {
+          if (pending !== ctl) return;
+          pending = null;
+          if (s.rev <= seen) {
+            note("custom handler: fetched revision " + s.rev + ", already showing " + seen);
+            return;
+          }
+          show(s.values);
+          seen = s.rev;
+          note("custom handler: applied revision " + s.rev);
+        })
+        .catch(function (err) {
+          if (pending !== ctl) return;
+          if (++tries < 3) {
+            setTimeout(attempt, 500 * tries);
+            return;
+          }
+          pending = null;
+          note("custom handler: gave up (" + err.message + "); the stream stays authoritative");
+        });
+    })();
   });
   document.getElementById("recovery-inspect").addEventListener("click", function () {
     state().then(function (s) {

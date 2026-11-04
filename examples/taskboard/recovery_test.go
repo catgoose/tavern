@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/catgoose/tavern"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -314,10 +317,17 @@ func TestRecoveryReplayStoreFailures(t *testing.T) {
 		got := recUntilQuiet(recStream(t, tb, "store", "a", snap.id), 400*time.Millisecond)
 		assert.Equal(t, []string{"tavern-reconnected"}, names(got),
 			"the window's ID is still stored and nothing after it was kept, so the resume looks complete; only the error handler saw the loss")
-		require.Equal(t, http.StatusNoContent, tb.recPost(t, "store/change"))
-		next := recUntilQuiet(recStream(t, tb, "store", "b", ""), 200*time.Millisecond)
-		value, _ := lastValue(next, "value")
-		assert.Equal(t, strconv.Itoa(tb.recValue("store", "recovery/stored")), value, "with appends working again, the next change brings windows current")
+
+		// The same window, with nothing more changed: clearing the history
+		// makes its next resume a gap, answered with a snapshot.
+		canonical := tb.recValue("store", "recovery/stored")
+		require.Equal(t, http.StatusNoContent, tb.recPost(t, "store/clear"))
+		require.Equal(t, http.StatusNoContent, tb.recPost(t, "store/away?conn=a&n=0"))
+		healed := recUntilQuiet(recStream(t, tb, "store", "a", snap.id), 400*time.Millisecond)
+		assert.Equal(t, []string{"tavern-replay-gap", "value", "tavern-reconnected"}, names(healed))
+		value, _ := lastValue(healed, "value")
+		assert.Equal(t, strconv.Itoa(canonical), value)
+		assert.Equal(t, canonical, tb.recValue("store", "recovery/stored"), "no change was made to recover")
 	})
 	t.Run("clearing drops history but keeps the policies", func(t *testing.T) {
 		tb := newTestBoard(t, DefaultConfig())
@@ -365,4 +375,130 @@ func TestRecoveryShutdownReleasesHeldWindows(t *testing.T) {
 		t.Fatal("a held stream did not end at shutdown")
 	}
 	assert.Zero(t, s.holds.len())
+}
+
+// TestRecoveryGapSnapshotIsNotOvertaken publishes a change while the gap
+// snapshot is being taken. The change must be queued after the snapshot,
+// so the window ends on the newest value. The hook waits briefly for the
+// change: without ordering it completes first and is queued ahead of the
+// older snapshot.
+func TestRecoveryGapSnapshotIsNotOvertaken(t *testing.T) {
+	for _, c := range []struct{ name, topic, event, fault string }{
+		{"resume", "recovery/resume", "value", ""},
+		{"multi", "recovery/left", "left", ""},
+		{"store", "recovery/stored", "value", "store/fault?read=1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tb := newTestBoard(t, DefaultConfig())
+			s := tb.app.recovery.scenarios[c.name]
+			first := recStream(t, tb, c.name, "a", "")
+			snap := recNext(t, first)
+			require.Equal(t, http.StatusNoContent, tb.recPost(t, c.name+"/away?conn=a&n=8"))
+			if c.fault != "" {
+				require.Equal(t, http.StatusNoContent, tb.recPost(t, c.fault))
+				t.Cleanup(func() { s.store.failRead.Store(false) })
+			}
+			var once sync.Once
+			s.broker.SetReplayGapPolicy(c.topic, tavern.GapFallbackToSnapshot, func() string {
+				snapshot := s.snapshot(c.topic)
+				once.Do(func() {
+					changed := make(chan struct{})
+					go func() { s.change(c.topic); close(changed) }()
+					select {
+					case <-changed:
+					case <-time.After(100 * time.Millisecond):
+					}
+				})
+				return snapshot
+			})
+			got := recUntilQuiet(recStream(t, tb, c.name, "a", snap.id), 400*time.Millisecond)
+			value, _ := lastValue(got, c.event)
+			assert.Equal(t, strconv.Itoa(tb.recValue(c.name, c.topic)), value, "frames: %v", got)
+			var ids []int
+			for _, ev := range got {
+				if ev.id != "" {
+					id, _ := strconv.Atoi(ev.id)
+					ids = append(ids, id)
+				}
+			}
+			assert.IsNonDecreasing(t, ids, "the stream's event IDs never go back")
+		})
+	}
+}
+
+// TestRecoveryConnectionHasOneOwner opens a second stream with a window's
+// connection ID while the first is open and held back.
+func TestRecoveryConnectionHasOneOwner(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	s := tb.app.recovery.scenarios["resume"]
+	original := recStream(t, tb, "resume", "same", "")
+	recNext(t, original)
+	require.Equal(t, http.StatusNoContent, tb.recPost(t, "resume/pause?conn=same&on=1"))
+	require.Equal(t, http.StatusNoContent, tb.recPost(t, "resume/change"))
+
+	resp, err := tb.srv.Client().Get(tb.srv.URL + "/showcase/recovery/resume/events?conn=same")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+	assert.Equal(t, 1, s.openStreams())
+
+	require.Equal(t, http.StatusNoContent, tb.recPost(t, "resume/pause?conn=same&on=0"), "the original keeps its controls")
+	ev := recNext(t, original)
+	assert.Equal(t, strconv.Itoa(tb.recValue("resume", "recovery/resume")), ev.data, "and its held change arrives")
+
+	require.Equal(t, http.StatusNoContent, tb.recPost(t, "resume/away?conn=same&n=0"))
+	again := recStream(t, tb, "resume", "same", ev.id)
+	assert.Equal(t, "tavern-reconnected", recNext(t, again).name, "the ID can be used again once its stream has ended")
+	require.Eventually(t, func() bool { return s.openStreams() == 1 }, time.Second, 5*time.Millisecond)
+}
+
+// TestRecoveryConnectionsAreReleased ends streams in every way they end and
+// checks that no reservation, gate or subscription is left behind.
+func TestRecoveryConnectionsAreReleased(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	s := tb.app.recovery.scenarios["resume"]
+
+	// Cancelled while open and held back.
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, "GET", tb.srv.URL+"/showcase/recovery/resume/events?conn=c1", http.NoBody)
+	go func() {
+		if resp, err := tb.srv.Client().Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	require.Eventually(t, func() bool { return s.owner("c1") != nil }, time.Second, 5*time.Millisecond)
+	require.Equal(t, http.StatusNoContent, tb.recPost(t, "resume/pause?conn=c1&on=1"))
+	require.Equal(t, http.StatusNoContent, tb.recPost(t, "resume/change"))
+	cancel()
+	require.Eventually(t, func() bool { return s.owner("c1") == nil }, time.Second, 5*time.Millisecond)
+
+	// Cancelled while its reconnect is held: it never reserves.
+	_, err := s.holds.add("c2")
+	require.NoError(t, err)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	req2, _ := http.NewRequestWithContext(ctx2, "GET", tb.srv.URL+"/showcase/recovery/resume/events?conn=c2", http.NoBody)
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		if resp, err := tb.srv.Client().Do(req2); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel2()
+	<-done2
+	s.holds.take("c2")
+	assert.Nil(t, s.owner("c2"))
+
+	// The limit, then shutdown.
+	for i := range recoveryMaxOpen {
+		recNext(t, recStream(t, tb, "resume", "n"+strconv.Itoa(i), ""))
+	}
+	resp, err := tb.srv.Client().Get(tb.srv.URL + "/showcase/recovery/resume/events?conn=over")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	tb.app.Shutdown()
+	require.Eventually(t, func() bool { return s.openStreams() == 0 }, 2*time.Second, 5*time.Millisecond)
+	assert.Zero(t, s.broker.SubscriberCount())
 }

@@ -43,20 +43,27 @@ type scenario struct {
 	lossAware          bool
 	retention          int // replay entries kept per topic; recoveryRetention when zero
 
+	// pubMu orders publications against subscription setup: it is held
+	// across every publish and across each subscribe, including its replay
+	// and gap snapshot, so no change can be queued ahead of a snapshot
+	// older than it. Lock order is pubMu, then mu; gap snapshot callbacks,
+	// which the broker calls during a subscribe, take only mu.
+	pubMu  sync.Mutex
 	mu     sync.Mutex
 	values map[string]int // topic → canonical value
 	seq    int            // last event ID, shared by the scenario's topics
+
+	connMu sync.Mutex
+	conns  map[string]*recoveryConn // connection id → its open stream's owner
 
 	// The log has its own lock: replay store errors are reported while a
 	// publish holds mu.
 	logMu sync.Mutex
 	log   []observation // newest first, bounded
 
-	streams sync.Map // connection id → *droppableStream
-	pausers sync.Map // connection id → *pauser, while its stream is open
-	holds   holds
-	repair  feedRepair
-	store   *faultyStore
+	holds  holds
+	repair feedRepair
+	store  *faultyStore
 }
 
 func (s *scenario) Name() string  { return s.name }
@@ -81,9 +88,18 @@ func (s *scenario) observe(conn, format string, args ...any) {
 // change adds one to topic's value and publishes every topic's current value
 // with one new event ID, so a multi-topic resume finds the ID in each log.
 func (s *scenario) change(topic string) {
+	s.publish(func() { s.values[topic]++ })
+}
+
+// publish applies update, if any, and publishes the current values.
+func (s *scenario) publish(update func()) {
+	s.pubMu.Lock()
+	defer s.pubMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.values[topic]++
+	if update != nil {
+		update()
+	}
 	s.publishLocked()
 }
 
@@ -125,13 +141,19 @@ func eventFor(topic string) string {
 }
 
 func (s *scenario) current() map[string]int {
+	values, _ := s.state()
+	return values
+}
+
+// state is the current values and the event ID they were published with.
+func (s *scenario) state() (values map[string]int, rev int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make(map[string]int, len(s.values))
+	values = make(map[string]int, len(s.values))
 	for k, v := range s.values {
-		out[k] = v
+		values[k] = v
 	}
-	return out
+	return values, s.seq
 }
 
 func (s *scenario) observations(conn string) []observation {
@@ -243,6 +265,7 @@ func newRecovery() *recovery {
 
 	add := func(s *scenario) *scenario {
 		s.values = map[string]int{}
+		s.conns = map[string]*recoveryConn{}
 		s.holds.ttl, s.holds.max = holdTTL, holdMax
 		r.scenarios[s.name] = s
 		r.order = append(r.order, s)
@@ -266,7 +289,7 @@ func newRecovery() *recovery {
 		about: "SubWithDisconnectOnLoss: the first drop ends the subscription with reason queue-loss. The browser reconnects and starts from a snapshot."})
 	stored = append(stored,
 		add(&scenario{name: "store", title: "Replay store failures", kind: kindStore, broker: storeBroker, topics: []string{"recovery/stored"}, store: store,
-			about: "Replay is kept in a ReplayStore (an in-memory one, so it does not survive a restart). The store can be made to fail. A failed read is reported and treated as a gap, so the window gets the gap event and a snapshot."}),
+			about: "Replay is kept in a ReplayStore (an in-memory one, so it does not survive a restart). The store can be made to fail. A failed read is reported and treated as a gap, so the window gets the gap event and a snapshot. Failed appends are lost without a gap: the resume looks complete and the window stays behind. Repair the store, clear the replay history and reconnect, and the resume is a gap answered with a snapshot."}),
 		add(&scenario{name: "store-strict", title: "Replay store failures, strict", kind: kindStoreStrict, broker: storeBroker, topics: []string{"recovery/strict"}, store: store,
 			about: "The same store with SubWithTerminateOnReplayError: a failed read ends the subscription with reason replay-failure instead. The app then serves a snapshot subscription on the same response, so the window still ends up current. No reconnected notice is sent for a failed replay, so the region stays in Reconnecting until a resume succeeds: repair the store, then Reconnect now."}),
 	)
@@ -279,11 +302,7 @@ func newRecovery() *recovery {
 	truncating.OnPublishDrop(func(topic string, _ int) { trunc.repair.onDrop(topic) })
 	for _, s := range r.order {
 		s.applyPolicies()
-		s.repair.init(func(topic string) bool { return slices.Contains(s.topics, topic) }, func() {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			s.publishLocked()
-		})
+		s.repair.init(func(topic string) bool { return slices.Contains(s.topics, topic) }, func() { s.publish(nil) })
 		for _, t := range s.topics {
 			topic := t
 			if s.kind == kindPressure {
@@ -304,9 +323,7 @@ func newRecovery() *recovery {
 				s.observe(conn, "%s: gap, event %s is no longer kept", topic, lastID)
 			})
 		}
-		s.mu.Lock()
-		s.publishLocked() // the starting values
-		s.mu.Unlock()
+		s.publish(nil) // the starting values
 	}
 	return r
 }
@@ -322,19 +339,20 @@ func (r *recovery) close() {
 }
 
 // subscribe opens one window's single-topic stream. A fresh connection
-// (no Last-Event-ID) starts from a snapshot taken with the subscription
-// under s.mu, with no replay: replaying every kept value into a small queue
-// could drop the newest. A resume replays from the window's Last-Event-ID.
+// (no Last-Event-ID) starts from a snapshot of the current value, with no
+// replay: replaying every kept value into a small queue could drop the
+// newest. A resume replays from the window's Last-Event-ID. Both hold pubMu
+// until the subscription, its replay and any gap snapshot are queued.
 func (s *scenario) subscribe(conn, lastID string, status *tavern.SubscriptionStatus) (msgs <-chan string, unsubscribe func()) {
+	s.pubMu.Lock()
+	defer s.pubMu.Unlock()
 	topic := s.topics[0]
 	opts := []tavern.SubscribeOption{tavern.SubWithMeta(tavern.SubscribeMeta{ID: conn}), tavern.SubWithStatus(status)}
 	if s.kind == kindPressure || lastID == "" {
-		s.mu.Lock()
-		defer s.mu.Unlock()
 		if s.lossAware {
 			opts = append(opts, tavern.SubWithDisconnectOnLoss())
 		}
-		snapshot := s.snapshotLocked(topic)
+		snapshot := s.snapshot(topic)
 		return s.broker.SubscribeWith(topic, append(opts, tavern.SubWithSnapshot(func() string { return snapshot }))...)
 	}
 	if s.kind == kindStoreStrict {
@@ -343,12 +361,93 @@ func (s *scenario) subscribe(conn, lastID string, status *tavern.SubscriptionSta
 	return s.broker.SubscribeFromIDWith(topic, lastID, opts...)
 }
 
+// subscribeMulti resumes every topic from one Last-Event-ID, under pubMu.
+func (s *scenario) subscribeMulti(lastID string) (msgs <-chan tavern.TopicMessage, unsubscribe func()) {
+	s.pubMu.Lock()
+	defer s.pubMu.Unlock()
+	return s.broker.SubscribeMultiFromID(s.topics, lastID)
+}
+
 // fallbackSubscribe is the strict store scenario's way back after a failed
-// replay: a snapshot subscription, with the snapshot captured under s.mu.
+// replay: a snapshot subscription, under pubMu.
 func (s *scenario) fallbackSubscribe() (msgs <-chan string, unsubscribe func()) {
+	s.pubMu.Lock()
+	defer s.pubMu.Unlock()
+	topic := s.topics[0]
+	snapshot := s.snapshot(topic)
+	return s.broker.SubscribeWithSnapshot(topic, func() string { return snapshot })
+}
+
+func (s *scenario) snapshot(topic string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	topic := s.topics[0]
-	snapshot := s.snapshotLocked(topic)
-	return s.broker.SubscribeWithSnapshot(topic, func() string { return snapshot })
+	return s.snapshotLocked(topic)
+}
+
+// recoveryConn owns one window's open stream: its pause gate and the means
+// to end it. A connection ID has at most one owner at a time.
+type recoveryConn struct {
+	gate        *pauser
+	done        chan struct{} // closed once the stream is torn down and released
+	unsubscribe func()        // set under connMu once subscribed
+}
+
+const recoveryMaxOpen = 32 // open streams per scenario
+
+var (
+	errConnInUse = errors.New("this connection already has an open stream")
+	errConnsFull = errors.New("too many open streams")
+)
+
+// reserve makes c the owner of conn, unless conn is already owned.
+func (s *scenario) reserve(conn string, c *recoveryConn) error {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if _, ok := s.conns[conn]; ok {
+		return errConnInUse
+	}
+	if len(s.conns) >= recoveryMaxOpen {
+		return errConnsFull
+	}
+	s.conns[conn] = c
+	return nil
+}
+
+// release ends c's ownership of conn; a later owner is left alone.
+func (s *scenario) release(conn string, c *recoveryConn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.conns[conn] == c {
+		delete(s.conns, conn)
+	}
+}
+
+// owner is conn's current owner, if any.
+func (s *scenario) owner(conn string) *recoveryConn {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.conns[conn]
+}
+
+func (s *scenario) setUnsubscribe(c *recoveryConn, unsub func()) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	c.unsubscribe = unsub
+}
+
+// subscribed is conn's owner and its unsubscribe, once it has subscribed.
+func (s *scenario) subscribed(conn string) (owner *recoveryConn, unsubscribe func()) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	c := s.conns[conn]
+	if c == nil || c.unsubscribe == nil {
+		return nil, nil
+	}
+	return c, c.unsubscribe
+}
+
+func (s *scenario) openStreams() int {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return len(s.conns)
 }
