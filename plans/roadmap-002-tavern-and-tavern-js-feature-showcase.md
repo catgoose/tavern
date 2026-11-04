@@ -29,7 +29,7 @@
 ## Execution and Acceptance
 
 - Build only the next bounded packet from current source and the next unchecked pass. Future passes describe intent and can be split when evidence shows that a separate PR is needed.
-- Start pass 001 after this roadmap is written, as the user requested. The initial dispatch uses standalone mode under tmux-act; continuous roadmap-run has not been explicitly selected for this new lane.
+- Pass 001 ran in standalone mode. On November 4, after reviewing its completion and remaining passes, the user requested continuing the roadmap. From pass 002, use roadmap-run: review and merge each bounded pass, then build the next packet from current source. Routine corrections remain within their pass.
 - Retain the user's established feature-branch, explicit-commit, separate-PR, review, green-CI and squash-merge-to-main policy. The commit_policy: ask setting is satisfied by that authorization. Claude leaves implementation PRs open for Codex review; never bypass checks or force push. No AI attribution.
 - Include this roadmap in the first implementation PR; executable packets remain ignored under .agents/.local/plans/. Mark passes complete only after review and merge, with PR links in their Review fields.
 - Create tavern-js issues for concrete demonstrated gaps, checking existing issues first. Each issue needs a reproduction or concrete missing behavior, acceptance criteria, and a link to the relevant showcase scenario. Reuse #50 and #53 rather than duplicating them.
@@ -45,7 +45,7 @@
 
 - [ ] Pass 002: Collaborative server-rendered taskboard.
   - Requirements: Demonstrate task CRUD, actual OOB replace/append/delete, snapshot plus live updates, lazy/component rendering where supported, and clearly distinguished invalidation/refetch behavior. Exercise scoped per-viewer delivery, groups and subscriber filters with two browser identities. Demonstrate bulk publishing without implying application transactions or atomic cross-region rendering. Keep application authorization separate from routing.
-  - Plan: pending.
+  - Plan: .agents/.local/plans/handoff-017-collaborative-taskboard-with-scoped-oob-updates.md
   - Review: pending.
 
 - [ ] Pass 003: Safe interaction and editing.
@@ -97,6 +97,6 @@
 - Headless extension points, helper APIs and optional exporters may be demonstrated through runnable server exercises linked from the showcase rather than misleading browser controls.
 - Release/tag availability can affect consumption timing of upstream fixes; pin an exact reviewed commit with provenance if a released asset is not yet available, preserving the no-build launch.
 
-## Suggested First Plan
+## Suggested Next Plan
 
-- Pass 001: showcase shell, complete initial inventory, pinned tavern-js and a real browser-tested connection/update scenario. Dispatch the bounded handoff-016 packet after this roadmap is filled. Leave later passes unplanned until their turn.
+- Pass 002: the collaborative taskboard, scoped and filtered views, grouped delivery, real OOB fragments, and snapshot/update consistency. Dispatch handoff-017 in roadmap-run mode. Leave later passes unplanned until their turn.

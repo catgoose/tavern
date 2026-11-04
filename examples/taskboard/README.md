@@ -47,6 +47,63 @@ A fresh connection replays the values the broker still keeps (four),
 ending with the current one, so a change made while the page loads is not
 missed.
 
+**Collaboration** (`/showcase/collaboration`) is a second board shared by
+two demo people: Alice, a team lead, and Bob, a contributor. Open it as
+Alice in one window and as Bob in another.
+
+1. Add, rename (**Edit**), move, assign and delete tasks in either window;
+   both boards follow. Titles are shown as text, whatever they contain.
+2. Alice can add an **Internal** task. Bob's board, counts and activity
+   never mention it, and his requests for it get 404.
+3. **Assign Bob** puts a notice in Bob's inbox only. Moving a task to Done
+   tells its creator, but only Alice takes those notices; Bob's stream
+   filters them out.
+4. **Clear finished tasks** removes every finished task the person can see.
+5. **Try a reconnect** → **Disconnect this window** ends the window's
+   board stream and holds its reconnect. Change things in the other window,
+   then **Reconnect**: the board and inbox are rebuilt from the server.
+
+The person selector is a demo switch, not a login. Each request names a
+person; what that person may see comes from a fixed definition on the
+server (`collab.go`), never from topics or scopes in the request. A real
+application takes identity from its session.
+
+How it is delivered:
+
+- **One stream per window for the board and inbox**: `SubscribeWith` with
+  `SubWithScope(person)`, `SubWithSnapshot`, `SubWithFilter`,
+  `SubWithDisconnectOnLoss` and `SubWithStatus`, written by `StreamSSE`.
+  Changes are published to each person allowed to see them with
+  `PublishLazyOOBTo`, which renders only while someone watches the board.
+  They are real OOB fragments: `AppendComponent` for a new card,
+  `ReplaceComponent` for an edit, `Delete` then `AppendComponent` for a
+  move, `Delete` for a removal, and `Prepend` for a notice (with `Delete`
+  for the oldest beyond eight). Cards implement `tavern.Component`.
+- **Snapshot, then live.** The snapshot replaces every column and the inbox.
+  It is taken, and the subscription registered, while the board's lock is
+  held; every change takes the same lock and publishes before releasing it.
+  So each change is either in the snapshot or delivered after it. The board
+  topic has no replay cache, so nothing older follows the snapshot. A
+  reconnect, or a stream ended because it fell behind, starts over from a
+  new snapshot.
+- **The inbox filter.** Notices are SSE frames whose event name carries the
+  kind (`inbox-assigned`, `inbox-completed`). The predicate reads only that
+  first line. Snapshots apply the same rule, so excluded notices never reach
+  the browser.
+- **A topic group for the feed**: `DynamicGroup` chooses the role's
+  activity and counts topics, and `DynamicGroupHandler` serves both on a
+  second stream, with the topic names as event names. Both are published
+  whole with `PublishWithReplay`, so a new feed stream starts from the latest
+  of each, and a missed update is replaced by the next. The group handler
+  is not loss-aware.
+- **Clear finished tasks** uses `Batch`: each person's removals are flushed
+  as one event. Batching joins messages for the same topic and scope into a
+  single write. It is not a transaction: the board and the feed are separate
+  publishes, and the browser applies each event when it arrives.
+
+The page therefore holds two event streams, one for the board and one for
+the feed.
+
 ## How it works
 
 - **Canonical state lives on the server** (`board.go`). Columns and the
@@ -108,7 +165,11 @@ both on every pull request.
 two viewers receiving every change, overflow and reconnect, a client that
 never reads, the admission limit, and shutdown. `showcase_test.go` checks the
 counter stream: every viewer receives each value, and a dropped window's
-resume replays what it missed before `tavern-reconnected`.
+resume replays what it missed before `tavern-reconnected`. `collab_test.go` reads the
+collaboration streams: snapshots and live fragments per person, the inbox
+scope and filter, the feed group, one batched event for the bulk action, a
+change made while a snapshot is being taken, reconnect after changes, and
+malformed input.
 
 ## Browser tests
 
@@ -133,6 +194,12 @@ purpose declares it. The tests:
 - drop one window and check the lost state, the replayed value,
   `replayDelivered: 1`, the order of tavern-js events, and the return to
   *Live*, while the other window stays connected.
+- in the collaboration scenario, as Alice and Bob in separate contexts:
+  shared create, rename, move, assign and delete; escaped titles; internal
+  tasks and notices reaching only their person; group counts and activity;
+  clearing finished tasks; a new viewer matching an existing one; and a
+  window reconnecting after deletes, renames and additions without
+  duplicate, missing or deleted cards.
 
 CI runs them on every pull request and on `main`
 (`.github/workflows/validate.yml`, job *reference app in a browser*).
