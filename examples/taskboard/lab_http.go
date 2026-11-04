@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"mime"
@@ -149,7 +150,13 @@ func (a *App) labDelete(w http.ResponseWriter, _ *http.Request, p *persona, id i
 		respond(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusOK) // the card's own swap removes it
+	// The card is replaced by an empty placeholder with its ID, which takes
+	// focus out of the region so its updates resume. The delete fragment the
+	// removal publishes then removes the placeholder; if that fragment came
+	// first it was held while the region had focus, and the catch-up
+	// snapshot replaces the list. Either way the delete has its target.
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<div id="lab-edit-%d" hidden></div>`, id)
 }
 
 // labEditor opens the editor with the title revision it starts from.

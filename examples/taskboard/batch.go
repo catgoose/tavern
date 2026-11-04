@@ -147,14 +147,17 @@ func (l *batchLab) runOrder() bool {
 	if !l.running.CompareAndSwap(false, true) {
 		return false
 	}
-	l.d.goBounded(func(ctx context.Context) {
+	if !l.d.goBounded(func(ctx context.Context) {
 		defer l.running.Store(false)
 		result := l.order1(ctx)
 		l.mu.Lock()
 		l.order = result
 		l.mu.Unlock()
 		l.ordered.PublishOOB(btResult, tavern.Replace("order-result", orderHTML(result)))
-	})
+	}) {
+		l.running.Store(false) // the lab is stopping
+		return false
+	}
 	return true
 }
 

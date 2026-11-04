@@ -84,7 +84,7 @@ func (l *shapingLab) burst() bool {
 	if !l.running.CompareAndSwap(false, true) {
 		return false
 	}
-	l.d.goBounded(func(ctx context.Context) {
+	if !l.d.goBounded(func(ctx context.Context) {
 		defer l.running.Store(false)
 		for i := range shBurst {
 			if i > 0 && !sleepCtx(ctx, shSpacing) {
@@ -98,7 +98,10 @@ func (l *shapingLab) burst() bool {
 			l.broker.Publish(shTopic, v)
 			l.broker.PublishTo(shTopic, deliveryTeam, v)
 		}
-	})
+	}) {
+		l.running.Store(false) // the lab is stopping
+		return false
+	}
 	return true
 }
 

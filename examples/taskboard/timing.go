@@ -86,7 +86,7 @@ func (l *timingLab) burst(n int) bool {
 	if !l.running.CompareAndSwap(false, true) {
 		return false
 	}
-	l.d.goBounded(func(ctx context.Context) {
+	if !l.d.goBounded(func(ctx context.Context) {
 		defer l.running.Store(false)
 		for i := range n {
 			if i > 0 && !sleepCtx(ctx, tmSpacing) {
@@ -94,7 +94,10 @@ func (l *timingLab) burst(n int) bool {
 			}
 			l.step()
 		}
-	})
+	}) {
+		l.running.Store(false) // the lab is stopping
+		return false
+	}
 	return true
 }
 

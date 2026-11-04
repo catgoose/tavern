@@ -63,14 +63,14 @@
   - Plan: .agents/.local/plans/handoff-026-replay-loss-and-recovery-scenarios.md
   - Review: https://github.com/catgoose/tavern/pull/244 (merged); reviewed head b295643a26bcc250896e1241e80056c8e1859d4b, merge commit 3dee9e25a5a2976c1a832f0d1139b72314a879be. Includes ordered gap snapshots, revision-aware reconciliation, connection reservations and idle failed-append recovery; 42 browser cases pass. Full queues can also drop replay control notices; server enqueue statistics and application repair are shown separately from browser confirmation.
 
-- [ ] Pass 006: Delivery shaping and reactive workflows.
+- [x] Pass 006: Delivery shaping and reactive workflows.
   - Requirements: Build focused, observable scenarios for publish-if-changed, debounce, throttle, TTL/OOB expiry, batching, ordering/deduplication, subscriber rate limiting, latest-value coalescing and adaptive pressure. Include After dependencies, mutation hooks, publish middleware, scheduled publishers, render failures and circuit breakers. Compare produced versus observed messages with bounded state and deterministic controls, using only compatible subscription options and accurate TTL/batch/ordering semantics.
   - Plan: .agents/.local/plans/handoff-028-delivery-shaping-and-reactive-workflow-scenarios.md
-  - Review: pending.
+  - Review: https://github.com/catgoose/tavern/pull/246 (merged); reviewed head b78ebf89fa4e45820cda45ca59f5a27a1db4c993, merge commit 2614a10fc2251d20b1b6e9e2dbc2184b12844a76. Includes bounded TTL admission, ordered workflow snapshots and concurrent mutation/derived-summary regressions; 54 browser cases pass. Scoped TTL remains Partial under #245, and replay eviction losing TTL auto-remove is documented with a bounded application workaround.
 
 - [ ] Pass 007: Presence and operational diagnostics.
   - Requirements: Demonstrate structured presence and connection events with explicit per-connection/per-user/process boundaries, admission limits, write/flush failures, heartbeats, maximum connection lifetime and graceful shutdown. Expose useful broker/per-topic metrics and observability. Supply runnable opt-in exercises for memory backend fanout, replay storage and Prometheus/OpenTelemetry adapters without adding adapter dependencies to core. Reuse existing proxy/capacity tooling where it covers a capability and explain what it proves.
-  - Plan: pending.
+  - Plan: .agents/.local/plans/handoff-030-presence-and-operational-diagnostics-exercises.md
   - Review: pending.
 
 - [ ] Pass 008: Complete coverage and evaluation experience.
@@ -88,6 +88,7 @@
 - Failure controls need deterministic bounded ownership; avoid global sleeps, unbounded logs, shared cross-scenario pressure or cleanup of resources the demo did not create.
 - Browser assets must be pinned with provenance/licenses, and browser CI must participate in the existing required aggregate check. Optional adapters must not raise core dependencies.
 - Separate repositories have separate worktrees, CI and review baselines; consume only reviewed upstream revisions and preserve existing local changes.
+- Final closure must investigate the intermittent interaction-lab `htmx:oobErrorNoTarget #lab-edit-6` observed in PR #246's earlier CI run (unchanged lab code). Ten local reruns and the final CI passed; preserve that evidence and do not hide the failure with a broad browser error allowance. Retain the documented TTL limitations and honest Partial entries until their delivered evidence is reconciled.
 
 ## Deferred Questions
 
@@ -99,4 +100,4 @@
 
 ## Suggested Next Plan
 
-- Pass 006: delivery shaping, pressure adaptation, mutation dependencies and scheduled rendering. Dispatch handoff-028 in roadmap-run mode. Leave later passes unplanned until their turn.
+- Pass 007: presence, transport and admission diagnostics, observability, and opt-in backend/exporter exercises. Dispatch handoff-030 in roadmap-run mode. Leave final closure unplanned until its turn.

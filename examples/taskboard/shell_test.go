@@ -134,10 +134,12 @@ func TestShellOpsGroup(t *testing.T) {
 	assert.Contains(t, got["shell/ops/deploys"], "0 deploys")
 	assert.Contains(t, got["shell/ops/alerts"], "0 alerts")
 
+	// A deploy publishes both values; the group has no order across its
+	// topics, so read both.
 	require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/ops/deploy"))
-	ev := next(t, ops)
-	assert.Equal(t, "shell/ops/deploys", ev.name)
-	assert.Contains(t, ev.data, "1 deploys")
+	got = nextN(t, ops, 2)
+	assert.Contains(t, got["shell/ops/deploys"], "1 deploys")
+	assert.Contains(t, got["shell/ops/alerts"], "0 alerts")
 	assert.Equal(t, http.StatusBadRequest, tb.shellPost(t, "alice", "/ops/reboot"))
 }
 

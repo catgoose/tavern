@@ -16,7 +16,8 @@ type TopicMessage struct {
 // that receives [TopicMessage] values tagged with their source topic. The
 // returned unsubscribe function removes the subscriber from all topics at
 // once. Each topic counts toward its own subscriber total (lifecycle hooks
-// fire correctly).
+// fire correctly). A topic refused by admission control is skipped; the
+// subscription covers the topics that were admitted.
 //
 // This eliminates the need for reflect.Select when a single SSE connection
 // serves multiple topics.
@@ -28,6 +29,11 @@ func (b *SSEBroker) SubscribeMulti(topics ...string) (msgs <-chan TopicMessage, 
 
 	for _, topic := range topics {
 		ch, unsub := b.Subscribe(topic)
+		if ch == nil {
+			// Refused by admission: skip the topic, as SubscribeMultiWith
+			// and SubscribeMultiFromID do.
+			continue
+		}
 		unsubs = append(unsubs, unsub)
 		t := topic
 		wg.Add(1)
