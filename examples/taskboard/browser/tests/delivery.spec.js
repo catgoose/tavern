@@ -66,6 +66,9 @@ test("an expiring notice leaves open windows; later windows never get it", async
   await expect(b.locator("#ttl-notices li", { hasText: text })).toHaveCount(0);
   await expect(a.locator("#ttl-banner")).toHaveText(banner, { timeout: 100 }); // no auto-removal
 
+  // The banner was posted just after the notice, so it expires a little
+  // later; open the last window once it has expired and been swept too.
+  await a.waitForTimeout(1000);
   const c = await open(viewer, "ttl");
   await c.waitForTimeout(500);
   await expect(c.locator("#ttl-notices li", { hasText: text })).toHaveCount(0);
