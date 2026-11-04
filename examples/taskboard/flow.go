@@ -129,7 +129,10 @@ func (l *flowLab) add(item string, test bool) {
 	m := mutation{order: o}
 	l.orders = append([]order{o}, l.orders...)
 	for len(l.orders) > flKept {
-		m.removed = append(m.removed, l.orders[len(l.orders)-1].ID)
+		// A test order was never shown, so there is no row to remove.
+		if old := l.orders[len(l.orders)-1]; !old.Test {
+			m.removed = append(m.removed, old.ID)
+		}
 		l.orders = l.orders[:len(l.orders)-1]
 	}
 	note := ""

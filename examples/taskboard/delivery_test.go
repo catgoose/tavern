@@ -684,6 +684,22 @@ func TestDeliveryWorkflowMutationsStayInOrder(t *testing.T) {
 	assert.Contains(t, summaries[len(summaries)-1], want, "the last summary is the model's")
 }
 
+// TestDeliveryWorkflowRemovesOnlyShownRows ages a held-back test order out
+// of the model: no removal is sent for a row no window has.
+func TestDeliveryWorkflowRemovesOnlyShownRows(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	events := dlStream(t, tb, "flow", "a")
+	waitFor(t, events, `id="audit-rows"`, time.Second)
+	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "flow/order?item=tea&test=1"))
+	for range flKept + 1 {
+		require.Equal(t, http.StatusNoContent, tb.dlPost(t, "flow/order?item=cake"))
+	}
+	got := recUntilQuiet(events, 300*time.Millisecond)
+	assert.Empty(t, containing(got, `<div id="order-1" hx-swap-oob="delete">`), "the test order was never shown")
+	assert.Len(t, containing(got, `<div id="order-2" hx-swap-oob="delete">`), 1)
+	assert.Equal(t, []int{3, 4, 5, 6, 7, 8}, liveIDs(got, "order"))
+}
+
 func TestDeliveryWorkflowAuditIsBounded(t *testing.T) {
 	tb := newTestBoard(t, DefaultConfig())
 	l := tb.app.delivery.flow

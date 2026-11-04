@@ -55,8 +55,8 @@ test("an expiring notice leaves open windows; later windows never get it", async
   const notice = a.locator("#ttl-notices li").first();
   await expect(notice).toBeVisible();
   const text = await notice.textContent();
+  await expect(a.locator("#ttl-banner")).toHaveText(/^Banner \d+/);
   const banner = await a.locator("#ttl-banner").textContent();
-  expect(banner).toMatch(/^Banner \d+/);
 
   const b = await open(viewer, "ttl");
   await expect(b.locator("#ttl-notices li", { hasText: text })).toBeVisible(); // from the replay cache
@@ -72,26 +72,38 @@ test("an expiring notice leaves open windows; later windows never get it", async
   await expect(c.locator("#ttl-banner")).not.toHaveText(banner);
 });
 
+// settledFlow waits until the window shows the model: its rows and the
+// summary's count match the server's visible rows.
+async function settledFlow(page) {
+  await expect(async () => {
+    const { visible } = await state(page, "flow");
+    expect(await page.locator("#order-rows li").count()).toBe(visible.length);
+    await expect(page.locator("#order-summary [data-orders]")).toHaveAttribute("data-orders", String(visible.length), { timeout: 100 });
+  }).toPass();
+}
+
 test("an order reaches the page through the mutation hook, middleware and a derived summary", async ({ viewer }) => {
   const page = await open(viewer, "flow");
   await expect(page.locator("#order-clock")).toContainText(/worker \d+ at/, { timeout: 5000 });
+  await settledFlow(page);
   const rows = page.locator("#order-rows li");
-  const before = await rows.count();
   await button(page, "Order coffee").click();
   const row = rows.first();
   await expect(row).toContainText("checked by orders:*");
   await expect(row).toContainText("coffee");
   await expect(page.locator("#audit-rows li").first()).toContainText("unchecked");
+  await settledFlow(page);
   await expect(page.locator("#order-summary")).toContainText("checked by orders:*");
   const { steps } = await state(page, "flow");
   expect(steps["derived summaries"]).toBeGreaterThan(0);
-  const summary = await page.locator("#order-summary").textContent();
+  const shown = await rows.allTextContents();
 
   await button(page, "Place a test order").click();
   await expect(page.locator("#audit-rows li").first()).toContainText("(test)");
-  await page.waitForTimeout(300);
-  expect(await rows.count()).toBe(Math.min(before + 1, 6));
-  await expect(page.locator("#order-summary")).toHaveText(summary);
+  await settledFlow(page);
+  const after = await rows.allTextContents();
+  expect(after.some((r) => r.includes("tea") && !shown.includes(r))).toBe(false); // the test row is held back
+  expect(after.every((r) => shown.includes(r))).toBe(true);
 });
 
 test("slow windows: rate-limited and coalescing end on the latest value, plain falls behind", async ({ viewer }) => {
