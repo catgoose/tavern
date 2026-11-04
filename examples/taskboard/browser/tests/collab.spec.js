@@ -15,6 +15,14 @@ async function open(viewer, who, options) {
   return page;
 }
 
+// addTask submits a title and waits for its card, so the form's reset after
+// one request cannot clear the next title being typed.
+async function addTask(page, title) {
+  await page.getByLabel("New task").fill(title);
+  await page.getByRole("button", { name: "Add task" }).click();
+  await expect(card(page, title)).toBeVisible();
+}
+
 // cardsIn lists the task titles in each column, in order.
 async function cardsIn(page) {
   return board(page).evaluate((el) =>
@@ -86,8 +94,7 @@ test("clearing finished tasks removes them everywhere, and a new viewer sees the
   const alice = await open(viewer, "alice");
   const bob = await open(viewer, "bob");
 
-  await bob.getByLabel("New task").fill("Short-lived");
-  await bob.getByRole("button", { name: "Add task" }).click();
+  await addTask(bob, "Short-lived");
   await card(bob, "Short-lived").getByRole("button", { name: "Done" }).click();
   await expect(column(alice, "done")).toContainText("Short-lived");
 
@@ -106,10 +113,8 @@ test("a reconnecting window rebuilds from the server without duplicates or delet
   const alice = await open(viewer, "alice", { expected: ["console error: [object Event]"] });
   const bob = await open(viewer, "bob");
 
-  await bob.getByLabel("New task").fill("Will be deleted");
-  await bob.getByRole("button", { name: "Add task" }).click();
-  await bob.getByLabel("New task").fill("Will be renamed");
-  await bob.getByRole("button", { name: "Add task" }).click();
+  await addTask(bob, "Will be deleted");
+  await addTask(bob, "Will be renamed");
   await expect(card(alice, "Will be renamed")).toBeVisible();
 
   await alice.getByText("Try a reconnect").click();
@@ -120,9 +125,7 @@ test("a reconnecting window rebuilds from the server without duplicates or delet
   await card(bob, "Will be renamed").getByRole("button", { name: "Edit" }).click();
   await bob.locator("#collab-editor input[name=title]").fill("Renamed while away");
   await bob.locator("#collab-editor").getByRole("button", { name: "Save" }).click();
-  await bob.getByLabel("New task").fill("Added while away");
-  await bob.getByRole("button", { name: "Add task" }).click();
-  await expect(card(bob, "Added while away")).toBeVisible();
+  await addTask(bob, "Added while away");
   // Alice's page still shows the old board.
   await expect(card(alice, "Will be deleted")).toBeVisible();
 
