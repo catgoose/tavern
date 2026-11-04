@@ -216,11 +216,18 @@ Close that gap the way the rest of the system already recovers:
   which fails with a conflict instead of overwriting.
 - **Periodic reconciliation.** Long-lived pages refetch on a timer, or
   compare versions in a lightweight status request.
-- **An outbox.** When a missed notification is not acceptable, write an
-  outbox row in the same transaction as the change and have a separate
-  worker publish rows after commit, deleting them once published. That
-  publishes at least once, so include the version and let clients ignore
-  versions they already have.
+- **An outbox.** To make sure every commit leads to a publish attempt,
+  write an outbox row in the same transaction as the change, and have a
+  worker publish rows after commit and then delete them. A crash between
+  the publish and the delete repeats the publish, so include the version
+  and let clients ignore versions they already have.
+
+An outbox guarantees attempts, not delivery. `Publish` returns nothing: a
+full subscriber queue drops the message, and with a backend, a failed or
+unhealthy backend is logged or skipped rather than reported to the caller.
+Viewers still need the version checks and reconciliation above. If another
+system must confirm that it received each change, use a durable transport
+with acknowledgements for that path; Tavern does not provide one.
 
 `Publish` reaches subscribers in this process. With several instances,
 configure a backend
@@ -252,23 +259,85 @@ ALTER TABLE records
   it, so a holder whose lease expired and was taken over cannot keep writing
   with their old claim, even if they reclaim it later.
 
-Use the database clock (`now()`) for every expiry check so that application
-servers with different clocks agree.
+### Checking a lease
 
-| Operation | Conditional update | No row matched |
+Whether a lease is live is decided once per operation, by the database,
+while the operation holds the record's row lock. Every claim operation runs
+in a short transaction:
+
+1. Lock the row: `SELECT 1 FROM records WHERE tenant_id = $1 AND id = $2 FOR UPDATE`.
+   Waiting for another operation on the record happens here.
+2. Run the conditional update, comparing expiry with `clock_timestamp()`.
+3. Commit. Never keep this transaction open longer than one request.
+
+```go
+// withRecordLock runs fn in a short transaction that holds the record's
+// row lock. Lease checks in fn see the current clock and the latest row.
+func (s *Store) withRecordLock(ctx context.Context, tenant, id string, fn func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL lock_timeout = '2s'`); err != nil {
+		return err
+	}
+	var locked int
+	err = tx.QueryRowContext(ctx,
+		`SELECT 1 FROM records WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+		tenant, id).Scan(&locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+```
+
+Why the extra step:
+
+- In Postgres, `now()` is the time the transaction started, and
+  `statement_timestamp()` is when the server received the statement
+  ([Postgres: Current Date/Time](https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-CURRENT)).
+  An update that checks `claim_expires > now()` compares with the start of
+  its transaction, and one that checks `statement_timestamp()` and then
+  waits for a row lock compares with the time before the wait. Either can
+  renew or write with a lease that has already expired.
+- Once the transaction holds the row lock, nothing else can change the row,
+  and `clock_timestamp()` reads the clock when the update runs. Version and
+  token comparisons need no lock: after waiting, Postgres rechecks them
+  against the latest row
+  ([Postgres: Read Committed](https://www.postgresql.org/docs/current/transaction-iso.html#XACT-READ-COMMITTED)).
+- Every operation that can take over or change a claim also locks the row
+  first, so it runs entirely before or entirely after a holder's write. A
+  holder's write that saw a live lease may commit a moment after the lease
+  runs out, but always before anyone else can claim the record.
+- `lock_timeout` makes a request that cannot get the lock fail rather than
+  wait indefinitely.
+
+The SQL assumes Postgres at the default `READ COMMITTED` level, one primary
+database, and a lease long compared with the renewal interval and a
+transaction. Under `SERIALIZABLE`, retry on serialization errors.
+
+| Operation | Update, run after locking the row | No row matched |
 |---|---|---|
-| **Acquire** | `SET claim_holder = $user, claim_token = claim_token + 1, claim_expires = now() + interval '2 minutes' WHERE id = $id AND (claim_holder IS NULL OR claim_expires <= now()) RETURNING claim_token` | Someone else holds a live claim |
-| **Renew** | `SET claim_expires = now() + interval '2 minutes' WHERE id = $id AND claim_holder = $user AND claim_token = $token AND claim_expires > now()` | The claim was lost; tell the user |
-| **Release** | `SET claim_holder = NULL, claim_expires = NULL WHERE id = $id AND claim_holder = $user AND claim_token = $token` | Already expired or taken over |
-| **Write under a claim** | `... WHERE id = $id AND version = $expected AND claim_holder = $user AND claim_token = $token AND claim_expires > now()` | Stale version or lost claim; load to tell which |
-| **Assign** | `SET assignee = $to, claim_holder = NULL, claim_expires = NULL, claim_token = claim_token + 1, version = version + 1 WHERE id = $id AND version = $expected` | Stale; show the current assignment |
+| **Acquire** | `SET claim_holder = $user, claim_token = claim_token + 1, claim_expires = clock_timestamp() + interval '2 minutes' WHERE ... AND (claim_holder IS NULL OR claim_expires <= clock_timestamp()) RETURNING claim_token` | Someone else holds a live claim |
+| **Renew** | `SET claim_expires = clock_timestamp() + interval '2 minutes' WHERE ... AND claim_holder = $user AND claim_token = $token AND claim_expires > clock_timestamp()` | The claim expired or was taken over; tell the user |
+| **Release** | `SET claim_holder = NULL, claim_expires = NULL WHERE ... AND claim_holder = $user AND claim_token = $token` | Someone else has claimed it since; an expired claim of your own still matches and is cleared |
+| **Write under a claim** | `SET ..., version = version + 1 WHERE ... AND version = $expected AND claim_holder = $user AND claim_token = $token AND claim_expires > clock_timestamp()` | Stale version or lost claim; load to tell which |
+| **Assign** | `SET assignee = $to, claim_holder = NULL, claim_expires = NULL, claim_token = claim_token + 1, version = version + 1 WHERE ... AND version = $expected` | Stale; show the current assignment |
 
-Two people who press "Claim" at once both run the acquire update. The
-database applies them one after the other, as with versioned saves: the
-first sets a holder, and the second rechecks against that row, finds a live
-claim and matches no row. The losing request should
-answer with who holds the claim now, read after the failed update, for
-display only.
+`WHERE ...` stands for `tenant_id = $tenant AND id = $id`.
+
+Two people who press "Claim" at once both wait for the row lock. The first
+sets a holder; the second then finds a live claim and matches no row. The
+losing request should answer with who holds the claim now, read after the
+failed update, for display only.
 
 Policy stays with the application. Whether a second tab of the same user
 takes over the claim, how long a lease lasts, who may break someone else's

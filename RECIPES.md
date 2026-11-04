@@ -2629,9 +2629,11 @@ rejected if a third save lands first.
 One person works on a ticket at a time. A claim is stored on the record,
 expires unless renewed, and every write checks it. The claim token changes
 on each new claim, so a holder whose lease expired and was taken over cannot
-write with it. See
-[Claims, leases and assignment](docs/multi-user-coordination.md#claims-leases-and-assignment)
-for the columns and the release, write and assign updates.
+write with it. `withRecordLock` and the release, write and assign updates
+are in
+[Claims, leases and assignment](docs/multi-user-coordination.md#claims-leases-and-assignment),
+which also explains why each update runs after locking the row and compares
+with `clock_timestamp()` rather than `now()`.
 
 ### Go store
 
@@ -2646,39 +2648,45 @@ const leaseTTL = 2 * time.Minute
 // Acquire claims the record if nobody holds a live claim. The token
 // identifies this claim in renewals and writes.
 func (s *Store) Acquire(ctx context.Context, tenant, id, user string) (token int64, err error) {
-	err = s.db.QueryRowContext(ctx, `
-		UPDATE records
-		SET claim_holder = $1, claim_token = claim_token + 1,
-		    claim_expires = now() + make_interval(secs => $2)
-		WHERE tenant_id = $3 AND id = $4
-		  AND (claim_holder IS NULL OR claim_expires <= now())
-		RETURNING claim_token`,
-		user, leaseTTL.Seconds(), tenant, id).Scan(&token)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrClaimed
-	}
+	err = s.withRecordLock(ctx, tenant, id, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `
+			UPDATE records
+			SET claim_holder = $1, claim_token = claim_token + 1,
+			    claim_expires = clock_timestamp() + make_interval(secs => $2)
+			WHERE tenant_id = $3 AND id = $4
+			  AND (claim_holder IS NULL OR claim_expires <= clock_timestamp())
+			RETURNING claim_token`,
+			user, leaseTTL.Seconds(), tenant, id).Scan(&token)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrClaimed
+		}
+		return err
+	})
 	return token, err
 }
 
 // Renew extends a live claim. It fails once the claim has expired, even if
 // nobody has taken it yet: the user must claim again.
 func (s *Store) Renew(ctx context.Context, tenant, id, user string, token int64) error {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE records SET claim_expires = now() + make_interval(secs => $1)
-		WHERE tenant_id = $2 AND id = $3
-		  AND claim_holder = $4 AND claim_token = $5 AND claim_expires > now()`,
-		leaseTTL.Seconds(), tenant, id, user, token)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrClaimLost
-	}
-	return nil
+	return s.withRecordLock(ctx, tenant, id, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE records SET claim_expires = clock_timestamp() + make_interval(secs => $1)
+			WHERE tenant_id = $2 AND id = $3
+			  AND claim_holder = $4 AND claim_token = $5
+			  AND claim_expires > clock_timestamp()`,
+			leaseTTL.Seconds(), tenant, id, user, token)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrClaimLost
+		}
+		return nil
+	})
 }
 ```
 
@@ -2694,7 +2702,11 @@ func claimRecord(store *Store, broker *tavern.SSEBroker) http.HandlerFunc {
 			return
 		}
 		token, claimErr := store.Acquire(r.Context(), user.TenantID, id, user.ID)
-		if claimErr != nil && !errors.Is(claimErr, ErrClaimed) {
+		switch {
+		case errors.Is(claimErr, ErrNotFound):
+			http.Error(w, "This record was deleted", http.StatusNotFound)
+			return
+		case claimErr != nil && !errors.Is(claimErr, ErrClaimed):
 			http.Error(w, "Could not claim the record", http.StatusInternalServerError)
 			return
 		}
@@ -2722,6 +2734,38 @@ func claimRecord(store *Store, broker *tavern.SSEBroker) http.HandlerFunc {
 }
 ```
 
+### Go handler (renew)
+
+```go
+func renewClaim(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+		id := r.PathValue("id")
+		if !canEdit(r.Context(), user, id) {
+			http.Error(w, "You cannot edit this record", http.StatusForbidden)
+			return
+		}
+		token, err := strconv.ParseInt(r.FormValue("claim"), 10, 64)
+		if err != nil {
+			http.Error(w, "Missing claim", http.StatusBadRequest)
+			return
+		}
+		err = store.Renew(r.Context(), user.TenantID, id, user.ID, token)
+		switch {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, ErrClaimLost):
+			w.WriteHeader(http.StatusConflict)
+			render(w, "notice-claim-lost", id) // the form and its draft stay
+		case errors.Is(err, ErrNotFound):
+			http.Error(w, "This record was deleted", http.StatusNotFound)
+		default:
+			http.Error(w, "Could not renew the claim", http.StatusInternalServerError)
+		}
+	}
+}
+```
+
 ### HTML (edit form while claimed)
 
 ```html
@@ -2730,22 +2774,30 @@ func claimRecord(store *Store, broker *tavern.SSEBroker) http.HandlerFunc {
   <input type="hidden" name="claim" value="42">
   <textarea name="body">…</textarea>
   <button>Save</button>
-</form>
 
-<!-- 204 while the claim is live; 409 with a "claim lost" notice otherwise. -->
-<div hx-post="/records/7/claim/renew"
-     hx-trigger="every 60s"
-     hx-include="#record-form [name=claim]"
-     hx-target="#record-notice"></div>
+  <!-- Inside the form so renewal ends with it; hx-params leaves out the draft. -->
+  <div hx-post="/records/7/claim/renew"
+       hx-trigger="every 60s"
+       hx-params="claim"
+       hx-target="#record-notice"></div>
+</form>
 ```
 
-Renewal runs only while the form is open; reconnecting the stream renews
-nothing. Add `sse:claim-changed` to the notice's `hx-trigger` from Recipe 33
-so other viewers see who holds the claim.
+htmx stops polling once the element leaves the page, so saving (which
+replaces the form), cancelling or closing the panel ends renewal. Have the
+cancel request release the claim as well. Reconnecting the stream neither
+claims nor renews anything.
 
-The save handler adds `claim_holder = $user AND claim_token = $claim AND
-claim_expires > now()` to its conditional update, using the session user,
-not a form field, as the holder. The token is not a credential; it only
+The 409 "claim lost" notice swaps only with the `responseHandling` setting
+from [Recipe 33](#33-versioned-save-with-conflict-recovery); without it,
+htmx discards the response and the user is not told. Add `sse:claim-changed`
+to the notice's `hx-trigger` from Recipe 33 so other viewers see who holds
+the claim.
+
+The save handler runs its conditional update inside `withRecordLock` and
+adds `claim_holder = $user AND claim_token = $claim AND
+claim_expires > clock_timestamp()`, using the session user, not a form
+field, as the holder. The token is not a credential; it only
 tells this claim apart from later ones. A dropped connection or an expired
 presence entry does not release the claim: it lasts until it is released,
 expires, or an authorized user breaks it. Each of those is a conditional
