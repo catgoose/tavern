@@ -27,11 +27,11 @@ type counterScenario struct {
 	// gate holds new subscriptions back while a drop is in progress, so the
 	// dropped window cannot reconnect before the value it should miss.
 	gate    sync.RWMutex
-	streams sync.Map // connection id → *counterStream, while its stream is open
+	streams sync.Map // connection id → *droppableStream, while its stream is open
 }
 
-// counterStream lets the demo end one window's stream.
-type counterStream struct {
+// droppableStream lets a demo control end one window's stream.
+type droppableStream struct {
 	unsubscribe func()
 	done        chan struct{} // closed after the stream has ended
 }
@@ -85,7 +85,7 @@ func (a *App) counterEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn := r.URL.Query().Get("conn")
-	cs := &counterStream{unsubscribe: unsub, done: make(chan struct{})}
+	cs := &droppableStream{unsubscribe: unsub, done: make(chan struct{})}
 	a.counter.streams.Store(conn, cs)
 	defer func() {
 		unsub()
@@ -116,7 +116,7 @@ func (a *App) counterDrop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "This tab has no live connection", http.StatusNotFound)
 		return
 	}
-	cs := v.(*counterStream)
+	cs := v.(*droppableStream)
 	a.counter.gate.Lock()
 	defer a.counter.gate.Unlock()
 	cs.unsubscribe() // closes the channel, so the stream ends cleanly

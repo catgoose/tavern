@@ -28,3 +28,14 @@ header nav a { margin-left: .5rem; }
 .region .state { font-weight: 600; }
 .counter { font-size: 1.5rem; }
 .events { font: .85rem ui-monospace, monospace; color: #444; }
+#collab-status span { display: none; font-weight: 600; }
+#collab-status[data-state="live"] .live { display: inline; color: #1a7f37; }
+#collab-status[data-state="down"] .down { display: inline; color: #b35900; }
+#collab-status[data-state="connecting"] .connecting { display: inline; color: #666; }
+.collab-board .column > div { min-height: 2rem; }
+.task.internal { border-left: 3px solid #8250df; }
+.badge { background: #8250df; color: #fff; border-radius: 3px; font-size: .7rem; padding: 0 .3rem; }
+.collab-side { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.notice { margin: .25rem 0; font-size: .9rem; }
+.editor:empty { display: none; }
+.editor { background: #f4f5f7; border-radius: 6px; padding: .5rem 1rem; }
