@@ -2779,7 +2779,8 @@ func renewClaim(store *Store) http.HandlerFunc {
   <div hx-post="/records/7/claim/renew"
        hx-trigger="every 60s"
        hx-params="claim"
-       hx-target="#record-notice"></div>
+       hx-target="#record-notice"
+       hx-swap="innerHTML"></div>
 </form>
 ```
 
@@ -2790,9 +2791,11 @@ claims nor renews anything.
 
 The 409 "claim lost" notice swaps only with the `responseHandling` setting
 from [Recipe 33](#33-versioned-save-with-conflict-recovery); without it,
-htmx discards the response and the user is not told. Add `sse:claim-changed`
-to the notice's `hx-trigger` from Recipe 33 so other viewers see who holds
-the claim.
+htmx discards the response and the user is not told. The poller's explicit
+`hx-swap="innerHTML"` keeps the notice container and its event listeners;
+it does not inherit the form's `outerHTML` swap. Add `sse:claim-changed` to
+the notice's `hx-trigger` from Recipe 33 so other viewers see who holds the
+claim.
 
 The save handler runs its conditional update inside `withRecordLock` and
 adds `claim_holder = $user AND claim_token = $claim AND
