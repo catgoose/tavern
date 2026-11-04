@@ -60,6 +60,7 @@ type App struct {
 	collab        *collab
 	collabStreams collabStreams
 	lab           *lab
+	shell         *shell
 }
 
 func NewApp(cfg Config, logger *slog.Logger) *App {
@@ -88,6 +89,7 @@ func NewApp(cfg Config, logger *slog.Logger) *App {
 	a.registerShowcase()
 	a.registerCollab()
 	a.registerLab()
+	a.registerShell()
 	return a
 }
 
@@ -99,6 +101,7 @@ func (a *App) Shutdown() {
 	a.broker.SetRetryAll(a.cfg.RetryOnClose)
 	close(a.done)
 	a.collabStreams.holds.close()
+	a.shell.holds.close()
 	a.collab.feed.close()
 	a.broker.Close()
 }

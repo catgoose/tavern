@@ -48,14 +48,14 @@
   - Plan: .agents/.local/plans/handoff-017-collaborative-taskboard-with-scoped-oob-updates.md
   - Review: https://github.com/catgoose/tavern/pull/241 (merged); reviewed head ee0dabf1c5a3a3833575c0c79d336dc817b5606f, merge commit a440e3811ac66701f08727b6636c5036fc5abd44.
 
-- [ ] Pass 003: Safe interaction and editing.
+- [x] Pass 003: Safe interaction and editing.
   - Requirements: Exercise programmatic and delegated commands, pointer capture/deduplication and keyboard access, hearth shorthand, and overlapping pointer/focus protection under DOM churn. Preserve active drafts and make conflicts visible using server-owned state. Prove reconciliation after a final suppressed update without another publish. Evaluate tavern-js #50 and #53 through concrete browser scenarios; create separate upstream packets for any necessary fixes, then consume reviewed pinned assets.
   - Plan: .agents/.local/plans/handoff-020-safe-commands-and-live-editing-in-the-showcase.md
-  - Review: pending.
+  - Review: https://github.com/catgoose/tavern/pull/242 (merged); reviewed head 2bf39f5053df202db3b65c40f9cf7c19cdf4eca3, merge commit a4cac9f744b7260a8b4331717d8b7e46eb4b88db. Includes reviewed tavern-js v0.0.24 from https://github.com/catgoose/tavern-js/pull/55.
 
 - [ ] Pass 004: Connection lifecycle and stream navigation.
   - Requirements: Demonstrate a stable app-shell lifeline and scoped streams that warm, promote, retire and fall back on navigation or failure; dynamic DOM binding and teardown; multi-topic/glob subscriptions and server-initiated topic changes. Surface transport, recovering, stale/live, region-updated and degradation events according to their actual meanings. Verify repeated navigation releases subscriptions and listeners without losing the lifeline.
-  - Plan: pending.
+  - Plan: .agents/.local/plans/handoff-023-lifeline-navigation-and-dynamic-topic-routing.md
   - Review: pending.
 
 - [ ] Pass 005: Replay, loss and recovery.
@@ -99,4 +99,4 @@
 
 ## Suggested Next Plan
 
-- Pass 003: commands and live editing under SSE updates, with explicit reconciliation after protection ends. Dispatch handoff-020 in roadmap-run mode. Leave later passes unplanned until their turn.
+- Pass 004: a persistent lifeline, scoped stream navigation, dynamic topic routing and teardown. Dispatch handoff-023 in roadmap-run mode. Leave later passes unplanned until their turn.
