@@ -23,14 +23,21 @@ type recEvent struct{ id, name, data string }
 // set, and returns its events.
 func recStream(t *testing.T, tb *testBoard, name, conn, lastID string) <-chan recEvent {
 	t.Helper()
+	return sseStream(t, tb, "/showcase/recovery/"+name+"/events?conn="+conn, lastID)
+}
+
+// sseStream opens path as an event stream and returns its events, until the
+// test ends.
+func sseStream(t *testing.T, tb *testBoard, path, lastID string) <-chan recEvent {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	req, err := http.NewRequestWithContext(ctx, "GET", tb.srv.URL+"/showcase/recovery/"+name+"/events?conn="+conn, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, "GET", tb.srv.URL+path, http.NoBody)
 	require.NoError(t, err)
 	if lastID != "" {
 		req.Header.Set("Last-Event-ID", lastID)
 	}
-	events := make(chan recEvent, 64)
+	events := make(chan recEvent, 256)
 	go func() {
 		defer close(events)
 		resp, err := tb.srv.Client().Do(req)
@@ -39,6 +46,7 @@ func recStream(t *testing.T, tb *testBoard, name, conn, lastID string) <-chan re
 		}
 		defer resp.Body.Close()
 		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		var ev recEvent
 		var data []string
 		for scanner.Scan() {
@@ -414,14 +422,18 @@ func TestRecoveryGapSnapshotIsNotOvertaken(t *testing.T) {
 			got := recUntilQuiet(recStream(t, tb, c.name, "a", snap.id), 400*time.Millisecond)
 			value, _ := lastValue(got, c.event)
 			assert.Equal(t, strconv.Itoa(tb.recValue(c.name, c.topic)), value, "frames: %v", got)
-			var ids []int
+			// Per topic (event name): a multi-topic stream has no order
+			// across its topics.
+			ids := map[string][]int{}
 			for _, ev := range got {
 				if ev.id != "" {
 					id, _ := strconv.Atoi(ev.id)
-					ids = append(ids, id)
+					ids[ev.name] = append(ids[ev.name], id)
 				}
 			}
-			assert.IsNonDecreasing(t, ids, "the stream's event IDs never go back")
+			for name, seq := range ids {
+				assert.IsNonDecreasing(t, seq, "%s: the topic's event IDs never go back", name)
+			}
 		})
 	}
 }
@@ -491,7 +503,7 @@ func TestRecoveryConnectionsAreReleased(t *testing.T) {
 	assert.Nil(t, s.owner("c2"))
 
 	// The limit, then shutdown.
-	for i := range recoveryMaxOpen {
+	for i := range maxOpenStreams {
 		recNext(t, recStream(t, tb, "resume", "n"+strconv.Itoa(i), ""))
 	}
 	resp, err := tb.srv.Client().Get(tb.srv.URL + "/showcase/recovery/resume/events?conn=over")

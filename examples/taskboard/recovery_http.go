@@ -68,7 +68,7 @@ func (a *App) recoveryEvents(w http.ResponseWriter, r *http.Request, s *scenario
 	}
 	// Reserve the connection ID before anything is published for it, so a
 	// second request with the same ID cannot take over its controls.
-	c := &recoveryConn{gate: &pauser{resume: make(chan struct{})}, done: make(chan struct{})}
+	c := newOwnedConn()
 	if err := s.reserve(conn, c); err != nil {
 		code := http.StatusConflict
 		if errors.Is(err, errConnsFull) {

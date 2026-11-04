@@ -366,6 +366,118 @@ How it is built:
   their own goroutines, and the store error handler, which runs
   synchronously during a publish, only appends to a bounded log that has
   its own lock.
+**Delivery lab** (`/showcase/delivery`) shows how Tavern shapes what it
+sends. Each page runs on its own broker, so its options and callbacks do
+not reach the rest of the app. Values and settings are shared by every
+window; **Hold back** and the slow panels act on one window only. **Show
+server state** lists the server's counters and what it saw.
+
+1. **Change-only and lazy rendering** (`render`): four fields published
+   only when their content changes (`PublishIfChangedOOB`,
+   `PublishIfChanged`, and for the red team `PublishIfChangedOOBTo` and
+   `PublishIfChangedTo`); setting the same value again is skipped, and
+   **Forget the last status** (`ClearDedup`) lets it through once.
+   **Add activity** prepends a server-rendered component
+   (`PrependComponent`, `PublishOOB`) and deletes the oldest beyond eight; a
+   component that fails to render is caught with `RenderComponentErr` and
+   not published. The report is rendered only while some window has its
+   panel open (`PublishLazyOOB`, `PublishLazyOOBTo` and the `IfChanged`
+   forms); the counters show refreshes asked, rendered and published.
+2. **Immediate, debounced and throttled** (`timing`): one burst of twenty
+   changes published at once, with `PublishDebounced` (300 ms of quiet) and
+   with `PublishThrottled` (the first at once, then the latest at most every
+   250 ms). All three end on the same value; the counts differ. Every change
+   goes through the same calls, so a delayed publish never carries an older
+   value than one already sent on its topic.
+3. **Expiring messages** (`ttl`): messages with a 3 s time-to-live and a
+   100 ms sweep (`WithMessageTTLSweep`). A notice (`PublishWithTTL` with
+   `WithAutoRemove`) disappears from open windows when it expires; the
+   banner (`PublishOOBWithTTL`) and the team notice (`PublishToWithTTL`)
+   stay on pages that show them. A window opened before expiry gets them
+   from the replay cache, one opened after gets nothing. At most five notices
+   show at once: the replay cache keeps five, and expiry removes only
+   entries still in it, so a notice pushed out by a sixth would never be
+   removed. A sixth is refused until one expires; the app learns that a
+   notice has gone by seeing the sweeper's removal publish. The status uses
+   `PublishIfChangedWithTTL`. Each window also subscribes to a topic of its
+   own, which the broker drops about a second after the window closes
+   (`WithTopicTTL`). The replay cache is per topic, not per scope, so the
+   team notice uses a topic that only the red team subscribes to (#245).
+4. **Batches and ordering** (`batch`): a batch of two board updates and a
+   feed item for everyone and one of each for the red team. `Flush` sends one
+   channel message per topic and scope, so the window's four subscriptions
+   get one each; `Discard` sends nothing. `PublishWithID` and
+   `PublishWithTTL` on a batch are not buffered: they are delivered before
+   the batch's buffered update. **Run
+   concurrent producers** has four producers publish 25 messages each to an
+   ordered topic (`SetOrdered`) and a plain one; the two subscribers of the
+   ordered topic see the same order. Each producer's messages stay in its
+   order on both; there is no order across topics.
+5. **Rate limits and coalescing** (`shaping`): fifty values in a quarter of
+   a second, to three slow panels (each write waits 60 ms). The plain panel
+   drops what does not fit and can miss the final value; the rate-limited
+   one (`SubWithRate`) gets the latest at most every 200 ms; the coalescing
+   one (`SubscribeWithCoalescing`) gets the latest whenever it is ready.
+   Replaced values are not drops. **The named forms** opens
+   `SubscribeWithRate` (per second), `SubscribeScopedWithRate` and
+   `SubscribeScopedWithCoalescing` panels; **metadata and filters** opens
+   `SubscribeWithMeta`, `SubscribeWithFilter` and
+   `SubscribeScopedWithFilter` panels, the filters passing every tenth
+   value.
+6. **Adaptive backpressure** (`pressure`): queues of four with
+   `WithAdaptiveBackpressure` (throttle after 2 consecutive drops, simplify
+   after 4, evict after 8; a successful send resets). Hold the window back,
+   make changes, release it: `OnBackpressureTierChange` lists the
+   transitions, simplified content (`SetSimplifiedRenderer`) still carries
+   the value, and the current value is republished after a drop until it is
+   delivered. Thirty changes evict the window, which reconnects to a
+   snapshot. Tier hints (`tavern-backpressure`, reported by tavern-js as
+   `tavern:stream-degraded` and `tavern:stream-restored`) are sent without
+   waiting, so one that finds the queue full is dropped; the server's list
+   has every change. **Publish a change and wait up to 300 ms** uses
+   `PublishBlocking` (`PublishBlockingTo` for the team) and shows
+   `ErrPublishTimeout` while the window is held back.
+7. **Reactive workflow** (`flow`): adding an order changes the model, then
+   calls `NotifyMutate`; the `OnMutate` handler publishes the row and an
+   audit entry, and an `After` hook on the list publishes the derived
+   summary as a separate step. `UseTopics("orders:*", …)` marks order rows
+   and summaries as checked and holds back test orders; the `audit:log`
+   topic does not match, so its entries stay unchecked. `Use` counts every
+   publish. `OnFirstSubscriber` and `OnLastUnsubscribe` start and stop a
+   worker that refreshes the summary's clock. Six orders and eight audit
+   entries are kept, and older ones are removed from the page. Each
+   mutation and its publishes, each summary, and each window's snapshot and
+   subscription take one publication lock, so a later order cannot be
+   published before an earlier one, a summary always shows the model as it
+   is when published, and a window opened or reloaded later starts from the
+   current rows, summary and audit log (passed through the same check as
+   the middleware) written once before any live update.
+8. **Scheduled sections** (`sched`): a `ScheduledPublisher`
+   (`WithBaseTick(50 ms)`, run with `RunPublisher`) renders a clock every
+   second and a load reading every 400 ms, only while some window is
+   subscribed. **Clock every 300 ms** calls `SetInterval`. Make the load
+   source fail: each failure reaches `OnRenderError` as a `RenderError`;
+   after two in a row the section's circuit (`CircuitBreakerConfig`) opens
+   and the fallback is shown; after 1.5 s it tries again and, once the
+   source works, returns to live readings.
+
+How it is built:
+
+- Every family's streams reserve the window's connection ID first (the
+  recovery lab's registry, now shared): a second stream with the same ID is
+  refused (409), and at most 32 streams are open per family. Pause gates,
+  subscriptions and reservations are released when a stream ends.
+- A window's subscriptions are merged into one response; if any of them
+  ends (an eviction, for example) the whole stream ends and the browser
+  reconnects.
+- Where a page starts from a snapshot, it is taken with the subscriptions
+  under the family's publication lock, which every publish also takes.
+- Bursts, ordering runs and the workflow worker are single, bounded
+  background tasks, stopped at shutdown before the brokers close.
+  Synchronous callbacks (`OnRenderError`, `OnPublishDrop`, middleware, the
+  mutation handler) only record, publish or schedule; none waits or
+  relocks a held model lock.
+
 ## How it works
 
 - **Canonical state lives on the server** (`board.go`). Columns and the
@@ -451,7 +563,22 @@ the fault clears (the window behind failed appends included, with nothing
 more changed), clearing replay, a change published while a gap snapshot is
 taken on one topic, two topics and the store, one owner per connection ID,
 release of connections however they end, controls that act on one window,
-and release of held windows at shutdown.
+and release of held windows at shutdown. `delivery_test.go` checks each
+delivery family over HTTP: change-only fields and dedup reset with scoped
+isolation, lazy rendering with and without an audience, components and a
+refused render, the burst's final values and counts, TTL delivery, replay
+expiry and auto-removal while a window stays connected, more notices than
+the replay cache keeps refused until one expires, idle topic cleanup,
+one channel message per topic and scope (read from a raw channel) and
+discard, the ordered topic's single order under concurrent producers,
+rate-limited and coalescing windows ending on the latest value while a
+plain one falls behind, adaptive tiers, blocking-publish timeouts,
+eviction and recovery, the mutation-to-summary chain with middleware
+filtering and a non-matching topic, windows opened after orders starting
+from the model, an order held in middleware while later ones wait, the
+bounded audit log, worker start and stop, scheduled
+sections with the circuit's fallback and recovery, one owner per
+connection ID, and shutdown.
 
 ## Browser tests
 
@@ -511,7 +638,20 @@ purpose declares it. The tests:
   store is repaired; a window left behind by failed appends recovering
   with nothing more changed; and custom gap fetches that return after a
   newer update, overlap, or keep failing, none of which replace the
-  newest value.
+  newest value;
+- in the delivery lab: each page reached from the showcase; a burst ending
+  on one value at once, debounced and throttled, with their counts; an
+  expiring notice leaving open windows while a banner stays, and windows
+  opened later getting nothing; an order reaching the page through the
+  mutation hook, middleware and derived summary, and a test order held
+  back; slow rate-limited and coalescing panels ending on the latest value
+  while the plain one falls behind; a held-back window throttled and
+  recovering, and one evicted and reconnecting to the current value; a
+  failing scheduled section falling back and recovering; change-only fields
+  and a report rendered only while its panel is open; a batch arriving as
+  one message per topic and scope; at most five notices showing, all
+  leaving when they expire; and a second workflow window, and a reloaded
+  one, showing the model's rows, summary and audit log.
 
 CI runs them on every pull request and on `main`
 (`.github/workflows/validate.yml`, job *reference app in a browser*).

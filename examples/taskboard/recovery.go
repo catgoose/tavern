@@ -53,8 +53,7 @@ type scenario struct {
 	values map[string]int // topic → canonical value
 	seq    int            // last event ID, shared by the scenario's topics
 
-	connMu sync.Mutex
-	conns  map[string]*recoveryConn // connection id → its open stream's owner
+	connRegistry // one owner per connection ID
 
 	// The log has its own lock: replay store errors are reported while a
 	// publish holds mu.
@@ -265,7 +264,6 @@ func newRecovery() *recovery {
 
 	add := func(s *scenario) *scenario {
 		s.values = map[string]int{}
-		s.conns = map[string]*recoveryConn{}
 		s.holds.ttl, s.holds.max = holdTTL, holdMax
 		r.scenarios[s.name] = s
 		r.order = append(r.order, s)
@@ -382,72 +380,4 @@ func (s *scenario) snapshot(topic string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.snapshotLocked(topic)
-}
-
-// recoveryConn owns one window's open stream: its pause gate and the means
-// to end it. A connection ID has at most one owner at a time.
-type recoveryConn struct {
-	gate        *pauser
-	done        chan struct{} // closed once the stream is torn down and released
-	unsubscribe func()        // set under connMu once subscribed
-}
-
-const recoveryMaxOpen = 32 // open streams per scenario
-
-var (
-	errConnInUse = errors.New("this connection already has an open stream")
-	errConnsFull = errors.New("too many open streams")
-)
-
-// reserve makes c the owner of conn, unless conn is already owned.
-func (s *scenario) reserve(conn string, c *recoveryConn) error {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
-	if _, ok := s.conns[conn]; ok {
-		return errConnInUse
-	}
-	if len(s.conns) >= recoveryMaxOpen {
-		return errConnsFull
-	}
-	s.conns[conn] = c
-	return nil
-}
-
-// release ends c's ownership of conn; a later owner is left alone.
-func (s *scenario) release(conn string, c *recoveryConn) {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
-	if s.conns[conn] == c {
-		delete(s.conns, conn)
-	}
-}
-
-// owner is conn's current owner, if any.
-func (s *scenario) owner(conn string) *recoveryConn {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
-	return s.conns[conn]
-}
-
-func (s *scenario) setUnsubscribe(c *recoveryConn, unsub func()) {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
-	c.unsubscribe = unsub
-}
-
-// subscribed is conn's owner and its unsubscribe, once it has subscribed.
-func (s *scenario) subscribed(conn string) (owner *recoveryConn, unsubscribe func()) {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
-	c := s.conns[conn]
-	if c == nil || c.unsubscribe == nil {
-		return nil, nil
-	}
-	return c, c.unsubscribe
-}
-
-func (s *scenario) openStreams() int {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
-	return len(s.conns)
 }
