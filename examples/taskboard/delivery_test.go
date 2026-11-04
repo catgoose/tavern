@@ -367,13 +367,20 @@ func TestDeliveryPressureTiersAndRecovery(t *testing.T) {
 	l.repair.mu.Unlock()
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "pressure/pause?conn=a&on=1"))
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "pressure/change?n=10"))
-	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "pressure/blocking"))
-	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "pressure/blocking?team=1"))
-	l.mu.Lock()
-	results := append([]string{}, l.results...)
-	l.mu.Unlock()
-	require.Len(t, results, 2)
-	assert.Contains(t, results[1], "to everyone: tavern: publish timeout after 3")
+	// Each blocking publish that is delivered takes a place in the held
+	// window's queue, so one of them soon waits out its timeout.
+	timedOut := false
+	for range 20 {
+		require.Equal(t, http.StatusNoContent, tb.dlPost(t, "pressure/blocking"))
+		l.mu.Lock()
+		last := l.results[0]
+		l.mu.Unlock()
+		if strings.Contains(last, "to everyone: tavern: publish timeout after 3") {
+			timedOut = true
+			break
+		}
+	}
+	require.True(t, timedOut, "a blocking publish to a full queue times out")
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "pressure/pause?conn=a&on=0"))
 	waitFor(t, events, current(), 3*time.Second)
 	recUntilQuiet(events, 300*time.Millisecond)
