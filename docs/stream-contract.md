@@ -173,6 +173,10 @@ move that topic to a scoped stream.
 - **Snapshot and replay** ([docs/snapshot-replay.md](snapshot-replay.md)):
   covers per-topic replay strategies. Both lifeline and scoped streams
   use these independently.
+- **Multi-user coordination** ([docs/multi-user-coordination.md](multi-user-coordination.md#placing-coordination-on-streams)):
+  which coordination signals go on each stream. A scoped stream here is a
+  connection tied to one view, separate from broker scoping
+  (`SubWithScope` / `PublishTo`).
 - **Topic semantics** ([docs/topic-semantics.md](topic-semantics.md)):
   defines topic naming conventions. Lifeline topics tend to be
   `notify/*`, `presence/*`, `nav/*` categories. Scoped stream topics

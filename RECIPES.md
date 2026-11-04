@@ -1535,6 +1535,11 @@ func documentSSE(broker *tavern.SSEBroker, tracker *presence.Tracker) echo.Handl
 </div>
 ```
 
+> The tracker keeps one entry per user and topic in this process. If the
+> same user has two tabs open, closing either one calls `Leave` and removes
+> them. Count connections per user and leave when the last one closes; see
+> [Presence and editing hints](docs/multi-user-coordination.md#presence-and-editing-hints).
+
 ---
 
 ## 25. Distributed fan-out -- multi-instance deployment
@@ -2497,3 +2502,251 @@ feed.addEventListener("tavern:reconnected", () => {
 > `GapFallbackToSnapshot` delivers a fresh snapshot on gap, which often
 > brings the region back to a usable state immediately. Without a fallback
 > policy, the region stays stale until normal publishes refresh it.
+
+---
+
+## 33. Versioned save with conflict recovery
+
+Two people edit the same record. The first save wins, the second gets a
+conflict instead of overwriting it, and nobody loses a draft. Live
+invalidations refresh a notice beside the form, never the form itself. The
+[Multi-User Coordination guide](docs/multi-user-coordination.md#arbitrated-writes)
+explains the sequence and shows `Store.Save` and the save handler, which
+answers a stale save with `409 Conflict` and the conflict fragment below.
+`currentUser`, `canView`, `render` and `recordTopic` are application code.
+
+### Go handler (record stream)
+
+```go
+func recordEvents(broker *tavern.SSEBroker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+		id := r.PathValue("id")
+		if !canView(r.Context(), user, id) {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
+		ch, unsub := broker.SubscribeWith(recordTopic(user.TenantID, id),
+			tavern.SubWithDisconnectOnLoss())
+		if ch == nil {
+			http.Error(w, "Too many connections, try again shortly", http.StatusServiceUnavailable)
+			return
+		}
+		defer unsub()
+		// "ready" is sent after the subscription exists, so the notice
+		// fetched on it cannot miss a save.
+		_ = tavern.StreamSSE(r.Context(), w, ch, func(s string) string { return s },
+			tavern.WithStreamSnapshot(func() string { return tavern.NewSSEMessage("ready", id).String() }),
+			tavern.WithStreamHeartbeat(15*time.Second),
+			tavern.WithStreamWriteTimeout(10*time.Second),
+		)
+	}
+}
+```
+
+### Go handler (notice)
+
+```go
+// recordNotice compares the version the form started from with the saved
+// one. It renders nothing while they match.
+func recordNotice(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+		id := r.PathValue("id")
+		if !canView(r.Context(), user, id) {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
+		seen, _ := strconv.ParseInt(r.URL.Query().Get("version"), 10, 64)
+		current, err := store.Load(r.Context(), user.TenantID, id)
+		if errors.Is(err, ErrNotFound) {
+			render(w, "notice-deleted", nil)
+			return
+		}
+		if err != nil {
+			http.Error(w, "Could not check for changes", http.StatusInternalServerError)
+			return
+		}
+		render(w, "notice", noticeView{Seen: seen, Current: current})
+	}
+}
+```
+
+### HTML
+
+```html
+<div hx-ext="sse" sse-connect="/records/7/events">
+  <form id="record-form" hx-post="/records/7" hx-swap="outerHTML">
+    <input type="hidden" name="version" value="8">
+    <textarea name="body">…</textarea>
+    <button>Save</button>
+  </form>
+
+  <div id="record-notice" aria-live="polite"
+       hx-get="/records/7/notice"
+       hx-trigger="sse:ready, sse:record-changed"
+       hx-include="#record-form [name=version]"></div>
+</div>
+
+<script>
+  // Swap the 409 conflict fragment; keep the defaults for everything else.
+  htmx.config.responseHandling = [
+    {code: "204", swap: false},
+    {code: "409", swap: true},
+    {code: "[23]..", swap: true},
+    {code: "[45]..", swap: false, error: true},
+  ];
+</script>
+```
+
+### Conflict fragment (Go template)
+
+```html
+{{define "conflict"}}
+<form id="record-form" hx-post="/records/{{.Current.ID}}" hx-swap="outerHTML">
+  <p role="alert">Version {{.Current.Version}} was saved while you were editing.
+    Your changes are below and have not been saved.</p>
+  <details open>
+    <summary>Saved version {{.Current.Version}}</summary>
+    <pre>{{.Current.Body}}</pre>
+  </details>
+  <input type="hidden" name="version" value="{{.Current.Version}}">
+  <textarea name="body">{{.Draft}}</textarea>
+  <button>Save my changes as the next version</button>
+  <a href="/records/{{.Current.ID}}">Discard my changes</a>
+</form>
+{{end}}
+```
+
+The hidden `version` now holds the saved version, so saving again is a
+deliberate edit of the version the user has just seen, and it is still
+rejected if a third save lands first.
+
+---
+
+## 34. Claim a record with an expiring lease
+
+One person works on a ticket at a time. A claim is stored on the record,
+expires unless renewed, and every write checks it. The claim token changes
+on each new claim, so a holder whose lease expired and was taken over cannot
+write with it. See
+[Claims, leases and assignment](docs/multi-user-coordination.md#claims-leases-and-assignment)
+for the columns and the release, write and assign updates.
+
+### Go store
+
+```go
+var (
+	ErrClaimed   = errors.New("record is claimed by someone else")
+	ErrClaimLost = errors.New("claim expired or was taken over")
+)
+
+const leaseTTL = 2 * time.Minute
+
+// Acquire claims the record if nobody holds a live claim. The token
+// identifies this claim in renewals and writes.
+func (s *Store) Acquire(ctx context.Context, tenant, id, user string) (token int64, err error) {
+	err = s.db.QueryRowContext(ctx, `
+		UPDATE records
+		SET claim_holder = $1, claim_token = claim_token + 1,
+		    claim_expires = now() + make_interval(secs => $2)
+		WHERE tenant_id = $3 AND id = $4
+		  AND (claim_holder IS NULL OR claim_expires <= now())
+		RETURNING claim_token`,
+		user, leaseTTL.Seconds(), tenant, id).Scan(&token)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrClaimed
+	}
+	return token, err
+}
+
+// Renew extends a live claim. It fails once the claim has expired, even if
+// nobody has taken it yet: the user must claim again.
+func (s *Store) Renew(ctx context.Context, tenant, id, user string, token int64) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE records SET claim_expires = now() + make_interval(secs => $1)
+		WHERE tenant_id = $2 AND id = $3
+		  AND claim_holder = $4 AND claim_token = $5 AND claim_expires > now()`,
+		leaseTTL.Seconds(), tenant, id, user, token)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrClaimLost
+	}
+	return nil
+}
+```
+
+### Go handler (claim)
+
+```go
+func claimRecord(store *Store, broker *tavern.SSEBroker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+		id := r.PathValue("id")
+		if !canEdit(r.Context(), user, id) {
+			http.Error(w, "You cannot claim this record", http.StatusForbidden)
+			return
+		}
+		token, claimErr := store.Acquire(r.Context(), user.TenantID, id, user.ID)
+		if claimErr != nil && !errors.Is(claimErr, ErrClaimed) {
+			http.Error(w, "Could not claim the record", http.StatusInternalServerError)
+			return
+		}
+		if claimErr == nil {
+			// The claim is committed; tell viewers who holds it now.
+			broker.Publish(recordTopic(user.TenantID, id), tavern.NewSSEMessage("claim-changed", id).String())
+		}
+		// After a failed claim this read is for display only.
+		current, err := store.Load(r.Context(), user.TenantID, id)
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "This record was deleted", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "Could not load the record", http.StatusInternalServerError)
+			return
+		}
+		if claimErr != nil {
+			w.WriteHeader(http.StatusConflict)
+			render(w, "claimed", current)
+			return
+		}
+		render(w, "edit-form", editView{Record: current, Claim: token})
+	}
+}
+```
+
+### HTML (edit form while claimed)
+
+```html
+<form id="record-form" hx-post="/records/7" hx-swap="outerHTML">
+  <input type="hidden" name="version" value="8">
+  <input type="hidden" name="claim" value="42">
+  <textarea name="body">…</textarea>
+  <button>Save</button>
+</form>
+
+<!-- 204 while the claim is live; 409 with a "claim lost" notice otherwise. -->
+<div hx-post="/records/7/claim/renew"
+     hx-trigger="every 60s"
+     hx-include="#record-form [name=claim]"
+     hx-target="#record-notice"></div>
+```
+
+Renewal runs only while the form is open; reconnecting the stream renews
+nothing. Add `sse:claim-changed` to the notice's `hx-trigger` from Recipe 33
+so other viewers see who holds the claim.
+
+The save handler adds `claim_holder = $user AND claim_token = $claim AND
+claim_expires > now()` to its conditional update, using the session user,
+not a form field, as the holder. The token is not a credential; it only
+tells this claim apart from later ones. A dropped connection or an expired
+presence entry does not release the claim: it lasts until it is released,
+expires, or an authorized user breaks it. Each of those is a conditional
+update followed by a `claim-changed` publish.

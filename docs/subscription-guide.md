@@ -194,4 +194,6 @@ See [snapshot-replay.md](snapshot-replay.md), [topic-semantics.md](topic-semanti
 
 Tavern delivers messages; the application owns authorization (derive scopes
 and topics from the authenticated identity before subscribing), canonical
-state, conflict and edit protection, and business-level recovery.
+state, conflict and edit protection, and business-level recovery. See
+[multi-user-coordination.md](multi-user-coordination.md) for versioned
+writes, claims and draft-safe recovery.
