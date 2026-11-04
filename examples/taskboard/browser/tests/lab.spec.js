@@ -103,6 +103,69 @@ test("a held vote converges after release outside the region, with no further up
   await expect(alice.locator("#lab-client-log")).toContainText("votes: protection ended, 1 held updates discarded");
 });
 
+// pressTitle holds the pointer down on a vote card's title, which is
+// inside the region but not a command.
+async function pressTitle(page, title) {
+  const target = voteCard(page, title).locator(".title");
+  await target.scrollIntoViewIfNeeded();
+  const box = await target.boundingBox();
+  await page.mouse.move(box.x + 5, box.y + 5);
+  await page.mouse.down();
+  await expect(page.locator("#lab-state-votes")).toHaveAttribute("data-state", "paused");
+}
+
+async function releaseOutside(page) {
+  await page.mouse.move(5, 5);
+  await page.mouse.up();
+}
+
+test("a second catch-up needed while the first request is open is still made", async ({ viewer }) => {
+  const alice = await openLab(viewer, "alice");
+  const bob = await openLab(viewer, "bob");
+  const title = await addTask(alice, `Overlap ${Date.now()}`);
+  await expect(voteCard(bob, title)).toBeVisible();
+
+  // The server handles every resync at once and sends its snapshot over
+  // SSE; only the first HTTP response is held back.
+  let resyncs = 0;
+  let releaseFirst;
+  const firstHeld = new Promise((resolve) => (releaseFirst = resolve));
+  await alice.route("**/showcase/lab/resync**", async (route) => {
+    resyncs++;
+    const response = await route.fetch();
+    if (resyncs === 1) await firstHeld;
+    await route.fulfill({ response });
+  });
+
+  try {
+    await pressTitle(alice, title);
+    await voteCard(bob, title).getByRole("button", { name: "Vote" }).click();
+    await expect(voteCard(bob, title).locator("[data-votes]")).toHaveText("1");
+    await releaseOutside(alice);
+    await expect(voteCard(alice, title).locator("[data-votes]")).toHaveText("1");
+    await expect(alice.locator("#lab-state-votes")).toHaveText("Up to date");
+
+    // While the first request is still open, another update is held.
+    await pressTitle(alice, title);
+    await voteCard(bob, title).getByRole("button", { name: "Vote" }).click();
+    await expect(voteCard(bob, title).locator("[data-votes]")).toHaveText("2");
+    await alice.waitForTimeout(200);
+    await expect(voteCard(alice, title).locator("[data-votes]")).toHaveText("1");
+    await releaseOutside(alice);
+    await expect(alice.locator("#lab-state-votes")).toHaveText("Catching up…");
+    expect(resyncs).toBe(1);
+  } finally {
+    releaseFirst();
+  }
+
+  // Nothing else changes; the second catch-up is made once the first ends.
+  await expect(voteCard(alice, title).locator("[data-votes]")).toHaveText("2");
+  await expect(alice.locator("#lab-state-votes")).toHaveText("Up to date");
+  await alice.waitForTimeout(500);
+  expect(resyncs).toBe(2);
+  await expect(voteCard(alice, title).locator("[data-votes]")).toHaveText("2");
+});
+
 test("a vote whose button is replaced during the gesture is sent once", async ({ viewer }) => {
   const alice = await openLab(viewer, "alice");
   const bob = await openLab(viewer, "bob");
@@ -236,10 +299,19 @@ test("saving a task deleted meanwhile keeps the draft and does not recreate it",
   await expect(voteCard(bob, title)).toHaveCount(0);
 });
 
-test("internal tasks stay with leads in every region", async ({ viewer }) => {
+test("internal tasks and their actions stay with leads in every region", async ({ viewer }) => {
   const alice = await openLab(viewer, "alice");
   const bob = await openLab(viewer, "bob");
   await expect(voteCard(alice, "Decide the budget")).toBeVisible();
   await expect(editCard(alice, "Decide the budget")).toBeVisible();
+
+  await voteCard(alice, "Decide the budget").getByRole("button", { name: "Vote" }).click();
+  await expect(alice.locator("#lab-log-list")).toContainText('Alice voted for "Decide the budget');
+  const shared = await addTask(alice, `Shared ${Date.now()}`);
+  await expect(bob.locator("#lab-log-list")).toContainText(`Alice added "${shared}"`);
+
   expect(await bob.content()).not.toContain("Decide the budget");
+  const fresh = await openLab(viewer, "bob");
+  await expect(fresh.locator("#lab-log-list")).toContainText(`Alice added "${shared}"`);
+  expect(await fresh.content()).not.toContain("Decide the budget");
 });

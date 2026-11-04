@@ -52,15 +52,64 @@ func TestLabCommandsValidateJSON(t *testing.T) {
 		{"burst count missing", "/showcase/lab/burst?as=alice", "application/json", `{}`, http.StatusBadRequest},
 		{"burst count too big", "/showcase/lab/burst?as=alice", "application/json", `{"count":"21"}`, http.StatusBadRequest},
 		{"burst count zero", "/showcase/lab/burst?as=alice", "application/json", `{"count":"0"}`, http.StatusBadRequest},
+		{"extra closing brace", vote, "application/json", `{"id":"1"}}`, http.StatusBadRequest},
+		{"extra closing bracket", vote, "application/json", `{"id":"1"}]`, http.StatusBadRequest},
+		{"oversized suffix", vote, "application/json", `{"id":"1"}}` + strings.Repeat(" ", 4096), http.StatusRequestEntityTooLarge},
+		{"oversized whitespace", vote, "application/json", `{"id":"1"}` + strings.Repeat(" ", 4096), http.StatusRequestEntityTooLarge},
+		{"null", vote, "application/json", `null`, http.StatusBadRequest},
+		{"array", vote, "application/json", `[{"id":"1"}]`, http.StatusBadRequest},
+		{"string", vote, "application/json", `"1"`, http.StatusBadRequest},
+		{"empty", vote, "application/json", ``, http.StatusBadRequest},
 	} {
 		status, _ := tb.command(t, c.path, c.ct, c.body)
 		assert.Equal(t, c.want, status, c.name)
 	}
 	assert.Zero(t, tb.labTask(t, 1).Votes, "no rejected command changed the task")
 
-	status, _ := tb.command(t, vote, "application/json; charset=utf-8", `{"id":"1"}`)
-	assert.Equal(t, http.StatusNoContent, status)
+	status, _ := tb.command(t, vote, "application/json; charset=utf-8", " \n"+`{"id":"1"}`+"  \n")
+	assert.Equal(t, http.StatusNoContent, status, "a charset and surrounding whitespace are fine")
 	assert.Equal(t, 1, tb.labTask(t, 1).Votes)
+}
+
+// TestLabLogFollowsVisibility checks the log stream, its snapshots and
+// resync snapshots: a contributor never receives a lead-only task's
+// actions, while public actions reach everyone.
+func TestLabLogFollowsVisibility(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	bob := openSSE(t, tb, "/showcase/lab/log/events?as=bob&conn=b")
+	alice := openSSE(t, tb, "/showcase/lab/log/events?as=alice&conn=a")
+	next(t, bob)
+	next(t, alice)
+
+	const internal = "Decide the budget"
+	status, _ := tb.command(t, "/showcase/lab/tasks/3/vote?as=alice", "application/json", `{"id":"3"}`)
+	require.Equal(t, http.StatusNoContent, status)
+	assert.Contains(t, next(t, alice).data, "Alice voted for &#34;"+internal)
+	require.Equal(t, http.StatusOK, tb.post(t, "/showcase/lab/tasks/3/title", url.Values{"as": {"alice"}, "rev": {"1"}, "title": {"Budget v2 (leads only)"}}))
+	assert.Contains(t, next(t, alice).data, "Budget v2")
+	none(t, bob)
+
+	status, _ = tb.command(t, "/showcase/lab/tasks/1/vote?as=alice", "application/json", `{"id":"1"}`)
+	require.Equal(t, http.StatusNoContent, status)
+	got := next(t, bob).data
+	assert.Contains(t, got, "Alice voted for &#34;Pick a release name&#34; (1)")
+	assert.NotContains(t, got, internal)
+	assert.NotContains(t, got, "Budget v2")
+	assert.Contains(t, next(t, alice).data, "Budget v2")
+
+	require.Equal(t, http.StatusOK, tb.post(t, "/showcase/lab/tasks/3/delete", url.Values{"as": {"alice"}}))
+	assert.Contains(t, next(t, alice).data, "Alice deleted &#34;Budget v2")
+	none(t, bob)
+
+	fresh := next(t, openSSE(t, tb, "/showcase/lab/log/events?as=bob&conn=b2")).data
+	assert.Contains(t, fresh, "Pick a release name")
+	assert.NotContains(t, fresh, "Budget")
+	status, _ = tb.command(t, "/showcase/lab/resync?as=bob&conn=b&region=log", "application/json", `{}`)
+	require.Equal(t, http.StatusNoContent, status)
+	resynced := next(t, bob)
+	assert.Equal(t, "lab-snapshot", resynced.name)
+	assert.NotContains(t, resynced.data, "Budget")
+	assert.Contains(t, next(t, openSSE(t, tb, "/showcase/lab/log/events?as=alice&conn=a2")).data, "Budget v2")
 }
 
 // TestLabSavesFromOneRevisionConflict races two saves from the same title

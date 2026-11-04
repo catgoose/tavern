@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -35,29 +36,32 @@ func (a *App) registerLab() {
 	a.mux.HandleFunc("POST /showcase/lab/resync", a.withPersona(a.labResync))
 }
 
-// decodeCommand reads a tavern-js command body into dst, rejecting other
-// content types, oversized or malformed bodies and unknown fields.
+// decodeCommand reads a tavern-js command body into dst. The whole body
+// must fit in labCommandMax (413 otherwise) and be one JSON object with no
+// unknown fields, optionally followed by whitespace (400 otherwise). Other
+// content types get 415.
 func decodeCommand(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct != "application/json" {
 		http.Error(w, "Send the command as JSON", http.StatusUnsupportedMediaType)
 		return false
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, labCommandMax))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, labCommandMax))
+	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
 			http.Error(w, "Command too large", http.StatusRequestEntityTooLarge)
 		} else {
-			http.Error(w, "Malformed command", http.StatusBadRequest)
+			http.Error(w, "Could not read the command", http.StatusBadRequest)
 		}
 		return false
 	}
-	if dec.More() {
+	trimmed := bytes.TrimSpace(body)
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	if len(trimmed) == 0 || trimmed[0] != '{' || dec.Decode(dst) != nil || dec.InputOffset() != int64(len(trimmed)) {
 		http.Error(w, "Malformed command", http.StatusBadRequest)
 		return false
 	}
-	_, _ = io.Copy(io.Discard, r.Body)
 	return true
 }
 

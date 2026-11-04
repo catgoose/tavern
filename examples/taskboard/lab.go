@@ -57,7 +57,7 @@ type lab struct {
 	broker *tavern.SSEBroker
 	nextID int
 	tasks  map[int]*labTask
-	log    []string            // newest first, bounded
+	log    []activityEntry     // newest first, bounded
 	conns  map[string]*labConn // stream key → connection, while open
 	burst  bool                // a simulated burst is running
 	done   <-chan struct{}     // closed at shutdown
@@ -171,17 +171,35 @@ type labView struct {
 	P *persona
 }
 
-func (l *lab) recordLocked(text string) {
-	l.log = append([]string{time.Now().Format("15:04:05") + "  " + text}, l.log...)
+// recordTaskLocked logs an action on t, shown only to roles that may see t.
+func (l *lab) recordTaskLocked(t *labTask, text string) {
+	entry := activityEntry{Text: text}
+	if !t.Internal {
+		entry.PublicText = text
+	}
+	l.recordLocked(entry)
+}
+
+// recordLocked logs an entry and sends each log stream its role's view,
+// skipping streams whose view did not change.
+func (l *lab) recordLocked(entry activityEntry) {
+	stamp := time.Now().Format("15:04:05") + "  "
+	entry.Text = stamp + entry.Text
+	if entry.PublicText != "" {
+		entry.PublicText = stamp + entry.PublicText
+	}
+	l.log = append([]activityEntry{entry}, l.log...)
 	if len(l.log) > labLogLimit {
 		l.log = l.log[:labLogLimit]
 	}
 	for key, c := range l.conns {
-		if c.region == labRegionLog {
-			l.broker.PublishTo(labTopic(labRegionLog), key, labUpdate(tavern.RenderFragments(tavern.Replace("lab-log-list", l.renderLogLocked()))))
+		if c.region == labRegionLog && entry.textFor(c.p.role) != "" {
+			l.broker.PublishTo(labTopic(labRegionLog), key, labUpdate(tavern.RenderFragments(tavern.Replace("lab-log-list", l.renderLogLocked(c.p.role)))))
 		}
 	}
 }
+
+func publicEntry(text string) activityEntry { return activityEntry{Text: text, PublicText: text} }
 
 func (l *lab) vote(p *persona, id int) error {
 	l.mu.Lock()
@@ -192,7 +210,7 @@ func (l *lab) vote(p *persona, id int) error {
 	}
 	t.Votes++
 	l.publishCardLocked(t)
-	l.recordLocked(fmt.Sprintf("%s voted for %q (%d)", p.name, t.Title, t.Votes))
+	l.recordTaskLocked(t, fmt.Sprintf("%s voted for %q (%d)", p.name, t.Title, t.Votes))
 	return nil
 }
 
@@ -223,7 +241,7 @@ func (l *lab) rename(p *persona, id, rev int, title string) (*labTask, error) {
 	t.Title = title
 	t.TitleRev++
 	l.publishCardLocked(t)
-	l.recordLocked(fmt.Sprintf("%s renamed a task to %q", p.name, t.Title))
+	l.recordTaskLocked(t, fmt.Sprintf("%s renamed a task to %q", p.name, t.Title))
 	cp := *t
 	return &cp, nil
 }
@@ -244,7 +262,7 @@ func (l *lab) add(p *persona, title string) error {
 		}
 		return []tavern.Fragment{tavern.Append("lab-edit-list", renderLab("edit-card", v))}
 	})
-	l.recordLocked(fmt.Sprintf("%s added %q", p.name, t.Title))
+	l.recordTaskLocked(t, fmt.Sprintf("%s added %q", p.name, t.Title))
 	return nil
 }
 
@@ -262,7 +280,7 @@ func (l *lab) remove(p *persona, id int) error {
 		}
 		return []tavern.Fragment{tavern.Delete(fmt.Sprintf("lab-edit-%d", t.ID))}
 	})
-	l.recordLocked(fmt.Sprintf("%s deleted %q", p.name, t.Title))
+	l.recordTaskLocked(t, fmt.Sprintf("%s deleted %q", p.name, t.Title))
 	return nil
 }
 
@@ -270,7 +288,7 @@ func (l *lab) clearLog(p *persona) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.log = nil
-	l.recordLocked(p.name + " cleared the log")
+	l.recordLocked(publicEntry(p.name + " cleared the log"))
 }
 
 // publishCardLocked replaces the task's card in both task regions.
@@ -296,7 +314,7 @@ func (l *lab) startBurst(by *persona, count int) error {
 		return fmt.Errorf("%w: a burst is already running", errConflict)
 	}
 	l.burst = true
-	l.recordLocked(fmt.Sprintf("%s started %d simulated votes", by.name, count))
+	l.recordLocked(publicEntry(fmt.Sprintf("%s started %d simulated votes", by.name, count)))
 	l.mu.Unlock()
 
 	go func() {
@@ -339,7 +357,7 @@ func (l *lab) snapshotLocked(p *persona, region string) string {
 	var b strings.Builder
 	switch region {
 	case labRegionLog:
-		b.WriteString(tavern.RenderFragments(tavern.Replace("lab-log-list", l.renderLogLocked())))
+		b.WriteString(tavern.RenderFragments(tavern.Replace("lab-log-list", l.renderLogLocked(p.role))))
 	default:
 		card, list := "vote-card", "lab-votes-list"
 		if region == labRegionEditor {
@@ -356,7 +374,16 @@ func (l *lab) snapshotLocked(p *persona, region string) string {
 	return tavern.NewSSEMessage("lab-snapshot", b.String()).String()
 }
 
-func (l *lab) renderLogLocked() string { return renderLab("log", l.log) }
+// renderLogLocked renders the entries r may see.
+func (l *lab) renderLogLocked(r *role) string {
+	var entries []string
+	for _, e := range l.log {
+		if text := e.textFor(r); text != "" {
+			entries = append(entries, text)
+		}
+	}
+	return renderLab("log", entries)
+}
 
 func renderLab(name string, data any) string {
 	var b strings.Builder

@@ -117,12 +117,29 @@ const labPageHTML = `<!doctype html>
 
   // Region state. tavern-js discards updates it held back; when any were
   // discarded, ask the server for a snapshot on this region's own stream,
-  // so nothing older can arrive after it.
+  // so nothing older can arrive after it. A snapshot that is applied is
+  // newer than every update held before it, so it clears the need. One
+  // request runs at a time; a need that arises meanwhile is asked for
+  // when that request settles, unless a snapshot has met it by then or the
+  // region is protected again (its release will ask).
   document.querySelectorAll(".lab-region").forEach(function (region) {
     var name = region.dataset.region;
     var state = document.getElementById("lab-state-" + name);
-    var behind = false, asking = false;
+    var behind = false, asking = false, again = false, protecting = false;
     function show(s, text) { state.dataset.state = s; state.textContent = text; }
+
+    function ask() {
+      if (asking) { again = true; return; }
+      asking = true;
+      again = false;
+      Tavern.command("/showcase/lab/resync?as=" + as + "&conn=" + conn + "&region=" + name, {})
+        .then(function () { note(name + ": asked for a snapshot"); })
+        .catch(function (err) { show("error", "Could not catch up: " + err.message); })
+        .finally(function () {
+          asking = false;
+          if (again && behind && !protecting) ask();
+        });
+    }
 
     region.addEventListener("htmx:sseMessage", function (e) {
       if (e.detail.type !== "lab-snapshot") return;
@@ -130,20 +147,17 @@ const labPageHTML = `<!doctype html>
       show("live", "Up to date");
     });
     region.addEventListener("tavern:policy-activated", function (e) {
+      protecting = true;
       show("paused", "Paused: updates held");
       note(name + ": " + e.detail.policy + " started");
     });
     region.addEventListener("tavern:policy-deactivated", function (e) {
+      protecting = false;
       note(name + ": protection ended, " + e.detail.flushed + " held updates discarded");
       if (e.detail.flushed > 0) behind = true;
       if (!behind) { show("live", "Up to date"); return; }
       show("refreshing", "Catching up…");
-      if (asking) return;
-      asking = true;
-      Tavern.command("/showcase/lab/resync?as=" + as + "&conn=" + conn + "&region=" + name, {})
-        .then(function () { note(name + ": asked for a snapshot"); })
-        .catch(function (err) { show("error", "Could not catch up: " + err.message); })
-        .finally(function () { asking = false; });
+      ask();
     });
   });
 

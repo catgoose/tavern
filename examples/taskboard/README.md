@@ -144,9 +144,10 @@ same tasks appear in three regions, each on its own stream:
   over theirs** or **Keep theirs**. Saving a deleted task keeps the draft and
   does not bring the task back.
 - **Server log** (`tavern-command-delegate="click"`,
-  `tavern-command-dedup="1000"`). **Simulate 8 votes** starts a finite burst
-  of updates (one at a time, 150 ms apart); a second request while one runs
-  is refused with 409, and the page shows the failure.
+  `tavern-command-dedup="1000"`). Each person sees only entries about tasks
+  they may see, live and in snapshots. **Simulate 8 votes** starts a finite
+  burst of updates (one at a time, 150 ms apart); a second request while one
+  runs is refused with 409, and the page shows the failure.
 
 **Catching up after held updates.** tavern-js discards the updates it held
 back. When its `tavern:policy-deactivated` event reports any (`flushed` >
@@ -155,10 +156,15 @@ it on that region's own stream, which is scoped to the window, so it
 arrives after every earlier change and before any later one. The region
 shows *Paused*, then *Catching up*, then *Up to date*, and never claims to be
 current while updates are held. This needs no further updates from anyone.
+One request runs at a time; if updates are held and discarded again while
+it is open, another snapshot is requested when it settles, unless a newer
+snapshot has already arrived or the region is protected again.
 
 Command bodies are JSON (`command-*` attributes as strings). The server
-accepts only `application/json`, at most 1 KB, one object, no unknown
-fields, and the task ID must match the URL. Browser dedup is per element and
+accepts only `application/json` (415 otherwise). The whole body must fit in
+1 KB (413 otherwise) and be exactly one object with no unknown fields,
+optionally surrounded by whitespace; anything after it is refused (400).
+The task ID must match the URL. Browser dedup is per element and
 URL; it is not server-side idempotency.
 
 ## How it works
