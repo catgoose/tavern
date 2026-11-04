@@ -69,11 +69,15 @@ func run(w io.Writer) error {
 	ctx := context.Background()
 	b := tavern.NewSSEBroker(tavern.WithMetrics())
 	defer b.Close()
+	// The exporter keeps labels for the topics with the most subscribers,
+	// so orders gets two.
 	orders, u1 := b.Subscribe("orders")
+	orders2, u3 := b.Subscribe("orders")
 	chat, u2 := b.Subscribe("chat")
 	for i := range 3 {
 		b.Publish("orders", fmt.Sprintf("order %d", i))
 		<-orders
+		<-orders2
 	}
 	b.Publish("chat", "hi")
 	<-chat
@@ -89,13 +93,14 @@ func run(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "collected after 3 orders and 1 chat (%d data points):\n", len(lines))
+	fmt.Fprintf(w, "collected after 3 orders to 2 subscribers and 1 chat to 1 (%d data points):\n", len(lines))
 	for _, l := range lines {
 		fmt.Fprintln(w, "  "+l)
 	}
 	unregister()
 	u1()
 	u2()
+	u3()
 	lines, err = collect(ctx, reader)
 	if err != nil {
 		return err

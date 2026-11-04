@@ -13,9 +13,9 @@ func TestRunCollectsAndUnregisters(t *testing.T) {
 	got := out.String()
 	t.Log("\n" + got)
 	for _, want := range []string{
-		"tavern.messages.published{topic=orders} 3",
+		"tavern.messages.published{topic=orders} 6", // deliveries: 3 messages, 2 subscribers
 		"tavern.messages.published{topic=other} 1",
-		"tavern.subscribers.active 2",
+		"tavern.subscribers.active 3",
 		"collected after unregister: 0 data points",
 		"meter provider shut down",
 	} {
