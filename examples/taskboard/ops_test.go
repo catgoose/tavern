@@ -414,3 +414,101 @@ func TestOpsShutdownReleasesEverything(t *testing.T) {
 	assert.Zero(t, c.broker.SubscriberCount())
 	assert.Nil(t, o.child.current(), "no child is left running")
 }
+
+// TestOpsChildShutdownEndsAStreamStillOpening shuts the child down while a
+// held stream has subscribed but not yet held its writes. The stream must
+// end with its generation, not whenever its client gives up.
+func TestOpsChildShutdownEndsAStreamStillOpening(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	l := tb.app.ops.child
+	c := l.current()
+	reached, release := make(chan struct{}), make(chan struct{})
+	l.opened = func(string) {
+		close(reached)
+		<-release
+	}
+	events, _ := childStream(t, tb, "held", "h")
+	<-reached
+	reports := make(chan map[string]any, 1)
+	go func() { reports <- l.shutdown() }()
+	require.Eventually(t, func() bool { return c.ctx.Err() != nil }, time.Second, time.Millisecond, "the generation is ending")
+	close(release) // the stream now holds its writes, after the release pass
+
+	select {
+	case report := <-reports:
+		assert.Equal(t, 1, report["streamsBefore"])
+		assert.Equal(t, 0, report["streamsLeft"], "the opening stream ended too")
+		assert.Equal(t, 0, report["subscriptionsLeft"])
+	case <-time.After(chDrainMax + time.Second):
+		t.Fatal("shutdown did not finish")
+	}
+	select {
+	case _, ok := <-events:
+		for ok {
+			_, ok = <-events
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the request is still open")
+	}
+	assert.Zero(t, c.reg.openStreams(), "its reservation is released")
+	assert.Zero(t, c.running())
+}
+
+func TestOpsAppShutdownSealsTheChild(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	l := tb.app.ops.child
+	tb.app.Shutdown()
+	assert.Nil(t, l.current())
+	assert.Equal(t, http.StatusServiceUnavailable, tb.post(t, "/showcase/ops/child/start", nil), "no child starts after shutdown")
+	assert.Nil(t, l.current())
+	assert.ErrorIs(t, l.start(), errLabClosed)
+	_, status := childStream(t, tb, "live", "late")
+	assert.Equal(t, http.StatusServiceUnavailable, status())
+}
+
+// TestOpsChildTransitionsRaceTheFinalClose starts and stops children while
+// the lab closes: every generation that was started is drained, and none
+// is left running.
+func TestOpsChildTransitionsRaceTheFinalClose(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	l := tb.app.ops.child
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				_ = l.start()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				l.shutdown()
+			}
+		}()
+	}
+	time.Sleep(5 * time.Millisecond)
+	l.close()
+	wg.Wait()
+	l.close() // returns at once, after any shutdown still draining
+	assert.Nil(t, l.current(), "nothing started after the close")
+	l.mu.Lock()
+	assert.Equal(t, l.gen, l.retired, "every generation was drained")
+	l.mu.Unlock()
+	assert.ErrorIs(t, l.start(), errLabClosed)
+}
+
+func TestLabRuntimeRefusesWorkAfterStop(t *testing.T) {
+	r := newLabRuntime()
+	ran := make(chan struct{})
+	require.True(t, r.goBounded(func(ctx context.Context) { <-ctx.Done(); close(ran) }))
+	r.stop()
+	<-ran
+	assert.False(t, r.goBounded(func(context.Context) { t.Error("work ran after stop") }))
+
+	tb := newTestBoard(t, DefaultConfig())
+	tb.app.Shutdown()
+	assert.False(t, tb.app.delivery.timing.burst(1), "a burst is refused once the lab stops")
+	assert.False(t, tb.app.delivery.timing.running.Load())
+}

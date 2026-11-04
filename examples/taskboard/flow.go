@@ -241,7 +241,7 @@ func (l *flowLab) startWorker() {
 	id := l.workerID
 	l.counts["worker starts"]++
 	l.log.add("first subscriber to %s: worker %d started", flSummary, id)
-	l.d.goBounded(func(context.Context) {
+	if !l.d.goBounded(func(context.Context) {
 		defer func() {
 			l.mu.Lock()
 			if l.workerID == id && l.worker != nil {
@@ -256,7 +256,10 @@ func (l *flowLab) startWorker() {
 			}
 			l.broker.PublishOOB(flSummary, tavern.Replace("order-clock", "worker "+strconv.Itoa(id)+" at "+time.Now().Format("15:04:05")))
 		}
-	})
+	}) {
+		l.worker = nil // the lab is stopping
+		cancel()
+	}
 }
 
 func (l *flowLab) stopWorker() {

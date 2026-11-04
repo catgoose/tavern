@@ -534,10 +534,16 @@ and failures do not reach the rest of the app.
    stops reading, is in the Go tests.
 5. **Shutting down a broker** (`child`): a child broker owned by the page,
    with a publisher (`RunPublisher`) and live, held back and slow streams.
-   Shutting it down stops new streams, sends a reconnect delay (`SetRetry`),
-   cancels the publisher, releases the held stream, closes the broker and
-   reports what was left (no streams or subscriptions). A new child is a
-   fresh broker; nothing from the old one reaches it.
+   Each stream is admitted by one generation of the child and ends with
+   it. Shutting it down stops admitting streams, sends a reconnect delay
+   (`SetRetry`), stops the publisher, releases the held stream and closes
+   the broker, so established streams write what is queued and end; half a
+   second later any stream still running, such as one that was still
+   opening, is cancelled. The report shows what was left (no streams or
+   subscriptions). A new child is a fresh broker; nothing from the old one
+   reaches it. When the app shuts down the lab is closed for good: no child
+   starts again, and every generation, including one still being shut
+   down, has drained before the app's shutdown returns.
 
 Commands, run with `make ops-demos` (no network or external service):
 
@@ -666,7 +672,10 @@ reconnect, every admission policy with partial and all-or-nothing
 multi-topic refusal and release at shutdown, the raw wire of both
 endpoints, synthetic write, flush and deadline failures, a real write
 timeout from a client that stops reading, the child broker's shutdown and
-restart, and shutdown of the whole lab.
+restart, a stream still opening when the child shuts down, no child
+starting after the app shuts down, starts and shutdowns racing the final
+close, background work refused once a lab stops, and shutdown of the whole
+lab.
 
 ## Browser tests
 

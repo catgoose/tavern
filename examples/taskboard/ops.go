@@ -30,7 +30,7 @@ func newOps() *ops {
 }
 
 func (o *ops) close() {
-	o.child.shutdown()
+	o.child.close()
 	o.admit.release()
 	o.presence.tracker.Close()
 	o.stop()

@@ -28,8 +28,11 @@ const (
 type labRuntime struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
-	wg      sync.WaitGroup
 	brokers []*tavern.SSEBroker
+
+	mu      sync.Mutex // guards stopped and additions to wg
+	stopped bool
+	wg      sync.WaitGroup
 }
 
 func newLabRuntime() labRuntime {
@@ -44,16 +47,27 @@ func (r *labRuntime) broker(opts ...tavern.BrokerOption) *tavern.SSEBroker {
 }
 
 // goBounded runs fn in the background until it returns or the lab stops.
-func (r *labRuntime) goBounded(fn func(ctx context.Context)) {
+// Once the lab has begun stopping it runs nothing and returns false.
+func (r *labRuntime) goBounded(fn func(ctx context.Context)) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return false
+	}
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		fn(r.ctx)
 	}()
+	return true
 }
 
-// stop cancels the background work and waits for it.
+// stop refuses new background work, cancels what is running and waits
+// for it.
 func (r *labRuntime) stop() {
+	r.mu.Lock()
+	r.stopped = true
+	r.mu.Unlock()
 	r.cancel()
 	r.wg.Wait()
 }
