@@ -53,14 +53,14 @@
   - Plan: .agents/.local/plans/handoff-020-safe-commands-and-live-editing-in-the-showcase.md
   - Review: https://github.com/catgoose/tavern/pull/242 (merged); reviewed head 2bf39f5053df202db3b65c40f9cf7c19cdf4eca3, merge commit a4cac9f744b7260a8b4331717d8b7e46eb4b88db. Includes reviewed tavern-js v0.0.24 from https://github.com/catgoose/tavern-js/pull/55.
 
-- [ ] Pass 004: Connection lifecycle and stream navigation.
+- [x] Pass 004: Connection lifecycle and stream navigation.
   - Requirements: Demonstrate a stable app-shell lifeline and scoped streams that warm, promote, retire and fall back on navigation or failure; dynamic DOM binding and teardown; multi-topic/glob subscriptions and server-initiated topic changes. Surface transport, recovering, stale/live, region-updated and degradation events according to their actual meanings. Verify repeated navigation releases subscriptions and listeners without losing the lifeline.
   - Plan: .agents/.local/plans/handoff-023-lifeline-navigation-and-dynamic-topic-routing.md
-  - Review: pending.
+  - Review: https://github.com/catgoose/tavern/pull/243 (merged); reviewed head 9c257fdc54ca4ac8e50fbea268617b5b72266793, merge commit 5d80f43849aa7d7b864714ec2e80b3ee53b2ae0f. Includes sequenced snapshots, quiet-loss repair, complete view readiness and pause-control teardown regressions.
 
 - [ ] Pass 005: Replay, loss and recovery.
   - Requirements: Provide deterministic controls for ID-backed replay, Last-Event-ID resume, gaps, fallback snapshots, truncation, reconnect callbacks/bundling, bounded replay retention and replay-store failures. Show gap action variants and client recovery feedback, loss-aware invalidations, queue overflow and eviction, including status/termination reasons. Prove eventual canonical state after failures; distinguish enqueued replay from confirmed browser application.
-  - Plan: pending.
+  - Plan: .agents/.local/plans/handoff-026-replay-loss-and-recovery-scenarios.md
   - Review: pending.
 
 - [ ] Pass 006: Delivery shaping and reactive workflows.
@@ -99,4 +99,4 @@
 
 ## Suggested Next Plan
 
-- Pass 004: a persistent lifeline, scoped stream navigation, dynamic topic routing and teardown. Dispatch handoff-023 in roadmap-run mode. Leave later passes unplanned until their turn.
+- Pass 005: deterministic replay, gaps, truncation, pressure loss and replay-store failure recovery. Dispatch handoff-026 in roadmap-run mode. Leave later passes unplanned until their turn.
