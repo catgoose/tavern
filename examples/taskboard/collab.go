@@ -23,7 +23,9 @@ import (
 //     change falls between the snapshot and the subscription.
 //   - Each role has an activity topic and a stats topic, published with
 //     PublishWithReplay as whole representations and served together by a
-//     DynamicGroup, so a new feed stream starts from the latest of each.
+//     DynamicGroup, so a new feed stream starts from the latest of each. The
+//     group's stream is not loss-aware, so a dropped feed update is repaired
+//     by republishing the current feed (see feedRepair).
 const (
 	topicCollab = "collab/board"
 	groupFeed   = "collab-feed"
@@ -132,9 +134,101 @@ type collab struct {
 	inbox    map[string][]notice // persona id → notices it receives, newest first, bounded
 	nextNote int
 
+	feed feedRepair
+
 	// beforeSnapshot, when set by tests, runs inside the snapshot while mu
 	// is held.
 	beforeSnapshot func()
+}
+
+// Feed repair delays: the first republish waits feedRepairBase, and each
+// republish that is itself dropped doubles the wait, up to feedRepairMax.
+const (
+	feedRepairBase = 200 * time.Millisecond
+	feedRepairMax  = 2 * time.Second
+)
+
+// feedRepair republishes the feed after a feed update is dropped. A drop
+// means some feed stream's queue was full, so its page may keep an old
+// activity list or counts with no later change to correct them. Republishing
+// the current feed replaces them once that stream drains; earlier queued
+// updates arrive first, so the newest state lands last. At most one
+// republish is pending, and they stop once one goes out without a drop.
+type feedRepair struct {
+	mu        sync.Mutex
+	base, max time.Duration
+	delay     time.Duration
+	timer     *time.Timer
+	repairing bool // a republish is in progress
+	dropped   bool // a feed update was dropped during it
+	closed    bool
+	republish func()
+}
+
+func (f *feedRepair) init(republish func()) {
+	f.base, f.max, f.delay, f.republish = feedRepairBase, feedRepairMax, feedRepairBase, republish
+}
+
+// onDrop is the broker's publish-drop callback. It runs in the publishing
+// goroutine, which holds collab.mu, so it only schedules.
+func (f *feedRepair) onDrop(topic string) {
+	if !strings.HasPrefix(topic, "collab/activity/") && !strings.HasPrefix(topic, "collab/stats/") {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.repairing {
+		f.dropped = true
+		return
+	}
+	f.scheduleLocked()
+}
+
+func (f *feedRepair) scheduleLocked() {
+	if f.closed || f.timer != nil {
+		return
+	}
+	f.timer = time.AfterFunc(f.delay, f.run)
+}
+
+func (f *feedRepair) run() {
+	f.mu.Lock()
+	f.timer = nil
+	if f.closed {
+		f.mu.Unlock()
+		return
+	}
+	f.repairing, f.dropped = true, false
+	f.mu.Unlock()
+
+	f.republish()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.repairing = false
+	if !f.dropped {
+		f.delay = f.base
+		return
+	}
+	f.delay = min(f.delay*2, f.max)
+	f.scheduleLocked()
+}
+
+// pending reports whether a republish is scheduled.
+func (f *feedRepair) pending() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.timer != nil
+}
+
+func (f *feedRepair) close() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = true
+	if f.timer != nil {
+		f.timer.Stop()
+		f.timer = nil
+	}
 }
 
 var (
@@ -145,6 +239,13 @@ var (
 
 func newCollab(b *tavern.SSEBroker) *collab {
 	c := &collab{broker: b, nextID: 1, tasks: map[int]*collabTask{}, inbox: map[string][]notice{}}
+	c.feed.init(func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.publishFeedLocked()
+	})
+	// The broker supports one drop callback; this app uses it only here.
+	b.OnPublishDrop(func(topic string, _ int) { c.feed.onDrop(topic) })
 	alice, _ := personaByID("alice")
 	bob, _ := personaByID("bob")
 	c.mu.Lock()

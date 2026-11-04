@@ -7,19 +7,123 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/catgoose/tavern"
 )
 
-// collabStreams tracks open collaboration streams so the demo can end one
-// and hold its reconnect.
+// collabStreams tracks open collaboration streams for the demo controls.
 type collabStreams struct {
-	streams sync.Map // connection id → *droppableStream, while its stream is open
-	holds   sync.Map // connection id → chan struct{}, closed on resume
+	streams     sync.Map // connection id → *droppableStream, while its stream is open
+	feedPausers sync.Map // connection id → *pauser, while its feed stream is open
+	holds       holds
+}
+
+// Reconnect holds last at most holdTTL and at most holdMax exist at once,
+// so windows that disconnect and never come back leave nothing behind.
+const (
+	holdTTL = time.Minute
+	holdMax = 32
+)
+
+var (
+	errHoldsFull   = errors.New("too many windows are held")
+	errHoldsClosed = errors.New("shutting down")
+)
+
+// holds keeps a window's reconnect waiting after the demo disconnects it.
+type holds struct {
+	mu     sync.Mutex
+	ttl    time.Duration
+	max    int
+	m      map[string]*hold
+	closed bool
+}
+
+// hold is released once: on resume, on expiry or at shutdown.
+type hold struct {
+	released chan struct{}
+	once     sync.Once
+	timer    *time.Timer
+}
+
+func (h *hold) release() {
+	h.once.Do(func() {
+		h.timer.Stop()
+		close(h.released)
+	})
+}
+
+// add holds conn's reconnects, or returns its existing hold.
+func (hs *holds) add(conn string) (*hold, error) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if hs.closed {
+		return nil, errHoldsClosed
+	}
+	if h, ok := hs.m[conn]; ok {
+		return h, nil
+	}
+	if len(hs.m) >= hs.max {
+		return nil, errHoldsFull
+	}
+	if hs.m == nil {
+		hs.m = map[string]*hold{}
+	}
+	h := &hold{released: make(chan struct{})}
+	h.timer = time.AfterFunc(hs.ttl, func() { hs.remove(conn, h) })
+	hs.m[conn] = h
+	return h, nil
+}
+
+// remove releases h and forgets it, unless conn has since been held anew.
+func (hs *holds) remove(conn string, h *hold) {
+	hs.mu.Lock()
+	if hs.m[conn] == h {
+		delete(hs.m, conn)
+	}
+	hs.mu.Unlock()
+	h.release()
+}
+
+func (hs *holds) get(conn string) *hold {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return hs.m[conn]
+}
+
+// take releases and forgets conn's hold.
+func (hs *holds) take(conn string) bool {
+	hs.mu.Lock()
+	h, ok := hs.m[conn]
+	delete(hs.m, conn)
+	hs.mu.Unlock()
+	if ok {
+		h.release()
+	}
+	return ok
+}
+
+func (hs *holds) len() int {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return len(hs.m)
+}
+
+// close releases every hold and refuses new ones.
+func (hs *holds) close() {
+	hs.mu.Lock()
+	all := hs.m
+	hs.m, hs.closed = nil, true
+	hs.mu.Unlock()
+	for _, h := range all {
+		h.release()
+	}
 }
 
 func (a *App) registerCollab() {
 	a.collab = newCollab(a.broker)
+	a.collabStreams.holds.ttl, a.collabStreams.holds.max = holdTTL, holdMax
 	a.broker.DynamicGroup(groupFeed, func(r *http.Request) []string {
 		p, ok := personaByID(r.FormValue("as"))
 		if !ok {
@@ -32,8 +136,14 @@ func (a *App) registerCollab() {
 	a.mux.HandleFunc("GET /showcase/collaboration", a.collabPage)
 	a.mux.HandleFunc("GET /showcase/collaboration/events", a.withPersona(a.collabEvents))
 	a.mux.Handle("GET /showcase/collaboration/feed", a.withPersona(func(w http.ResponseWriter, r *http.Request, _ *persona) {
-		feed.ServeHTTP(w, r)
+		conn := r.URL.Query().Get("conn")
+		gate := &pauser{resume: make(chan struct{})}
+		a.collabStreams.feedPausers.Store(conn, gate)
+		defer a.collabStreams.feedPausers.CompareAndDelete(conn, gate)
+		feed.ServeHTTP(pausableWriter{w, func() { gate.wait(r.Context(), a.done) }}, r)
 	}))
+	a.mux.HandleFunc("POST /showcase/collaboration/feed/pause", a.feedPaused(true))
+	a.mux.HandleFunc("POST /showcase/collaboration/feed/resume", a.feedPaused(false))
 	a.mux.HandleFunc("POST /showcase/collaboration/tasks", a.withPersona(a.collabCreate))
 	a.mux.HandleFunc("GET /showcase/collaboration/tasks/{id}/edit", a.withPersona(withTask(a.collabEditor)))
 	a.mux.HandleFunc("POST /showcase/collaboration/tasks/{id}/title", a.withPersona(withTask(a.collabRename)))
@@ -63,9 +173,11 @@ func (a *App) withPersona(h func(http.ResponseWriter, *http.Request, *persona)) 
 // is holding this window's reconnect, it waits first.
 func (a *App) collabEvents(w http.ResponseWriter, r *http.Request, p *persona) {
 	conn := r.URL.Query().Get("conn")
-	if v, held := a.collabStreams.holds.Load(conn); held {
+	if h := a.collabStreams.holds.get(conn); h != nil {
+		// Leaving early does not end the hold: the browser's next attempt
+		// waits again until resume, expiry or shutdown.
 		select {
-		case <-v.(chan struct{}):
+		case <-h.released:
 		case <-r.Context().Done():
 			return
 		case <-a.done:
@@ -106,7 +218,8 @@ func collabFrame(msg string) string {
 	return tavern.NewSSEMessage("board", msg).String()
 }
 
-// collabDrop ends a window's stream and holds its reconnect until resume.
+// collabDrop ends a window's stream and holds its reconnect until resume
+// or expiry.
 func (a *App) collabDrop(w http.ResponseWriter, r *http.Request) {
 	conn := r.URL.Query().Get("conn")
 	v, ok := a.collabStreams.streams.Load(conn)
@@ -115,7 +228,10 @@ func (a *App) collabDrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cs := v.(*droppableStream)
-	a.collabStreams.holds.LoadOrStore(conn, make(chan struct{}))
+	if _, err := a.collabStreams.holds.add(conn); err != nil {
+		http.Error(w, "Cannot disconnect now: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	cs.unsubscribe()
 	select {
 	case <-cs.done:
@@ -126,14 +242,40 @@ func (a *App) collabDrop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) collabResume(w http.ResponseWriter, r *http.Request) {
-	v, ok := a.collabStreams.holds.LoadAndDelete(r.URL.Query().Get("conn"))
-	if !ok {
+	if !a.collabStreams.holds.take(r.URL.Query().Get("conn")) {
 		http.Error(w, "This tab is not being held", http.StatusNotFound)
 		return
 	}
-	close(v.(chan struct{}))
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// feedPaused pauses or resumes writes on a window's feed stream, so its
+// queue really fills and updates are dropped.
+func (a *App) feedPaused(paused bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		v, ok := a.collabStreams.feedPausers.Load(r.URL.Query().Get("conn"))
+		if !ok {
+			http.Error(w, "This tab has no live feed", http.StatusNotFound)
+			return
+		}
+		v.(*pauser).set(paused)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// pausableWriter waits before each write. Unwrap lets the stream reach the
+// underlying writer's flush and write deadlines.
+type pausableWriter struct {
+	http.ResponseWriter
+	wait func()
+}
+
+func (pw pausableWriter) Write(b []byte) (int, error) {
+	pw.wait()
+	return pw.ResponseWriter.Write(b)
+}
+
+func (pw pausableWriter) Unwrap() http.ResponseWriter { return pw.ResponseWriter }
 
 func taskID(r *http.Request) (int, bool) {
 	id, err := strconv.Atoi(r.PathValue("id"))

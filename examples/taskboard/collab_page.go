@@ -45,7 +45,7 @@ const collabPageHTML = `<!doctype html>
      hx-on:htmx:sse-error="document.getElementById('collab-status').dataset.state = 'down'">
   <div sse-swap="board,inbox-assigned,inbox-completed" hx-swap="none"></div>
 </div>
-<div id="collab-feed-stream" sse-connect="/showcase/collaboration/feed?as={{.P.ID}}">
+<div id="collab-feed-stream" sse-connect="/showcase/collaboration/feed?as={{.P.ID}}&amp;conn={{.Conn}}">
   <div sse-swap="{{.FeedEvents}}" hx-swap="none"></div>
 </div>
 
@@ -70,9 +70,16 @@ const collabPageHTML = `<!doctype html>
 
 <details class="demo">
   <summary>Try a reconnect</summary>
-  <p>Disconnect ends this window's board stream and holds its reconnect. Make changes in the other window, then reconnect: this window starts again from a fresh snapshot of the board and your inbox.</p>
+  <p>Disconnect ends this window's board stream and holds its reconnect for up to a minute. Make changes in the other window, then reconnect: this window starts again from a fresh snapshot of the board and your inbox. After a minute it reconnects by itself.</p>
   <button hx-post="/showcase/collaboration/drop?conn={{.Conn}}" hx-swap="none">Disconnect this window</button>
   <button hx-post="/showcase/collaboration/resume?conn={{.Conn}}" hx-swap="none">Reconnect</button>
+</details>
+
+<details class="demo">
+  <summary>Try a slow feed</summary>
+  <p>Pause holds back this window's activity and counts on the server. Add tasks in the other window until its queue overflows and updates are dropped, then resume. Within a couple of seconds the server republishes the current feed, so the counts catch up without another change.</p>
+  <button hx-post="/showcase/collaboration/feed/pause?conn={{.Conn}}" hx-swap="none">Pause this window's feed</button>
+  <button hx-post="/showcase/collaboration/feed/resume?conn={{.Conn}}" hx-swap="none">Resume the feed</button>
 </details>
 </body>
 </html>

@@ -96,6 +96,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTT
 func (a *App) Shutdown() {
 	a.broker.SetRetryAll(a.cfg.RetryOnClose)
 	close(a.done)
+	a.collabStreams.holds.close()
+	a.collab.feed.close()
 	a.broker.Close()
 }
 

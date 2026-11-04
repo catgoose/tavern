@@ -60,8 +60,16 @@ Alice in one window and as Bob in another.
    filters them out.
 4. **Clear finished tasks** removes every finished task the person can see.
 5. **Try a reconnect** → **Disconnect this window** ends the window's
-   board stream and holds its reconnect. Change things in the other window,
-   then **Reconnect**: the board and inbox are rebuilt from the server.
+   board stream and holds its reconnect for up to a minute. Change things in
+   the other window, then **Reconnect**: the board and inbox are rebuilt
+   from the server. A hold that is never resumed expires and the window
+   reconnects by itself; at most 32 windows can be held at once, and
+   shutdown releases them all.
+6. **Try a slow feed** → **Pause this window's feed** holds back the
+   window's activity and counts on the server. Add tasks in the other window
+   until its feed queue overflows, stop, then **Resume the feed**: within a
+   couple of seconds the counts and activity are current again, with no
+   further change to the board.
 
 The person selector is a demo switch, not a login. Each request names a
 person; what that person may see comes from a fixed definition on the
@@ -94,8 +102,18 @@ How it is delivered:
   activity and counts topics, and `DynamicGroupHandler` serves both on a
   second stream, with the topic names as event names. Both are published
   whole with `PublishWithReplay`, so a new feed stream starts from the latest
-  of each, and a missed update is replaced by the next. The group handler
-  is not loss-aware.
+  of each.
+- **Repairing the feed after loss.** The group handler's stream does not
+  end when its queue is full; the update is dropped and the stream stays
+  open. Because each feed update is a whole representation, the app
+  repairs this itself: the broker's `OnPublishDrop` callback schedules a
+  republish of the current feed 200 ms later. A republish that is dropped
+  again schedules another, waiting twice as long up to 2 s, and they stop
+  once one goes out without a drop. Updates already queued are delivered
+  first, so the newest state arrives last. While a stream stays stuck, the
+  republish repeats at most every 2 s. A client that stops reading is ended
+  by the write timeout; a feed paused by the demo stays open until it is
+  resumed or the window closes.
 - **Clear finished tasks** uses `Batch`: each person's removals are flushed
   as one event. Batching joins messages for the same topic and scope into a
   single write. It is not a transaction: the board and the feed are separate
@@ -169,7 +187,11 @@ resume replays what it missed before `tavern-reconnected`. `collab_test.go` read
 collaboration streams: snapshots and live fragments per person, the inbox
 scope and filter, the feed group, one batched event for the bulk action, a
 change made while a snapshot is being taken, reconnect after changes, and
-malformed input.
+malformed input. `collab_recovery_test.go` drops a feed's final updates
+and checks that it still converges with no further change, and that it does
+not when repair is off; and covers reconnect holds that expire, outlive an
+abandoned attempt, hit the limit, end at shutdown, and are released by
+concurrent callers without disturbing a newer hold.
 
 ## Browser tests
 
@@ -197,9 +219,10 @@ purpose declares it. The tests:
 - in the collaboration scenario, as Alice and Bob in separate contexts:
   shared create, rename, move, assign and delete; escaped titles; internal
   tasks and notices reaching only their person; group counts and activity;
-  clearing finished tasks; a new viewer matching an existing one; and a
+  clearing finished tasks; a new viewer matching an existing one; a
   window reconnecting after deletes, renames and additions without
-  duplicate, missing or deleted cards.
+  duplicate, missing or deleted cards; and a paused feed that dropped
+  updates catching up after the board goes quiet.
 
 CI runs them on every pull request and on `main`
 (`.github/workflows/validate.yml`, job *reference app in a browser*).

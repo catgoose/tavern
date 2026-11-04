@@ -136,3 +136,32 @@ test("a reconnecting window rebuilds from the server without duplicates or delet
   const fresh = await open(viewer, "alice");
   expect(await cardsIn(alice)).toEqual(await cardsIn(fresh));
 });
+
+test("a feed that dropped updates catches up after the board goes quiet", async ({ viewer }) => {
+  const alice = await open(viewer, "alice");
+  const bob = await open(viewer, "bob");
+
+  await alice.getByText("Try a slow feed").click();
+  await alice.getByRole("button", { name: "Pause this window's feed" }).click();
+
+  // More changes than Alice's paused feed can queue, then nothing more.
+  const last = await bob.evaluate(async () => {
+    let title = "";
+    for (let i = 0; i < 40; i++) {
+      title = `Burst ${i}`;
+      const res = await fetch("/showcase/collaboration/tasks", {
+        method: "POST",
+        body: new URLSearchParams({ as: "bob", title }),
+      });
+      if (res.status !== 204) throw new Error(`create returned ${res.status}`);
+    }
+    return title;
+  });
+  await expect(card(alice, last)).toBeVisible(); // the board stream is not paused
+
+  await alice.getByRole("button", { name: "Resume the feed" }).click();
+  const fresh = await open(viewer, "alice");
+  const todo = await countOf(fresh, "todo");
+  await expect(count(alice, "todo")).toHaveText(String(todo), { timeout: 10_000 });
+  await expect(alice.locator("#collab-activity li").first()).toContainText(`Bob added "${last}"`);
+});
