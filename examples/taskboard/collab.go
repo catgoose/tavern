@@ -91,7 +91,10 @@ func personaByID(id string) (*persona, bool) {
 
 func (p *persona) sees(t *collabTask) bool { return p.role.sees(t) }
 
-func (r *role) sees(t *collabTask) bool { return !t.Internal || r.seesInternal }
+func (r *role) sees(t *collabTask) bool { return r.allows(t.Internal) }
+
+// allows reports whether the role may see something marked internal.
+func (r *role) allows(internal bool) bool { return !internal || r.seesInternal }
 
 type collabTask struct {
 	ID       int

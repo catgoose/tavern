@@ -111,7 +111,7 @@ func TestShowcasePages(t *testing.T) {
 	assert.Contains(t, tb.get(t, "/showcase"), `href="/showcase/connection"`)
 	page := tb.get(t, "/showcase/connection")
 	assert.Contains(t, page, `sse-connect="/showcase/connection/events?conn=`)
-	for _, asset := range []string{"/static/htmx-2.0.11.min.js", "/static/htmx-ext-sse-2.2.4.min.js", "/static/tavern-0.0.23.min.js"} {
+	for _, asset := range []string{"/static/htmx-2.0.11.min.js", "/static/htmx-ext-sse-2.2.4.min.js", "/static/tavern-0.0.24.min.js"} {
 		assert.Contains(t, page, asset)
 		resp, err := tb.srv.Client().Get(tb.srv.URL + asset)
 		require.NoError(t, err)

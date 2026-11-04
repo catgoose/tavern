@@ -289,6 +289,8 @@ func respond(w http.ResponseWriter, err error) {
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, errInvalid):
 		http.Error(w, strings.TrimPrefix(err.Error(), errInvalid.Error()+": "), http.StatusBadRequest)
+	case errors.Is(err, errConflict):
+		http.Error(w, strings.TrimPrefix(err.Error(), errConflict.Error()+": "), http.StatusConflict)
 	case errors.Is(err, errForbidden):
 		http.Error(w, strings.TrimPrefix(err.Error(), errForbidden.Error()+": "), http.StatusForbidden)
 	case errors.Is(err, errNotFound):

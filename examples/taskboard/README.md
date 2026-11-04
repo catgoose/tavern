@@ -122,6 +122,57 @@ How it is delivered:
 The page therefore holds two event streams, one for the board and one for
 the feed.
 
+**Interaction lab** (`/showcase/lab`) uses tavern-js to keep clicks and
+typing safe while a list keeps changing. Open it as Alice and as Bob. The
+same tasks appear in three regions, each on its own stream:
+
+- **Votes** (`tavern-hearth`, `tavern-command-dedup="400"`,
+  `tavern-hot-policy="pause-on-pointerdown"`). **Vote** is a tavern-js
+  command sent on pointerdown, with `{id}` in its URL filled from
+  `command-id`. A click, Enter on the focused button, or a quick double
+  click each send one command. While the pointer is down, updates are held;
+  releasing it anywhere ends the hold.
+- **Editor** (`pause-on-pointerdown defer-on-focus`). **Edit** opens a form
+  in the list. While anything in the region has focus or the pointer is
+  down, updates are held; they resume only when both end. An open editor
+  keeps what you typed, and where the cursor is, through every update: an
+  application guard on `htmx:oobBeforeSwap` leaves it in place and says when
+  the task changed or was deleted on the server. Saving sends the title
+  revision the editor started from; the server compares it under its lock,
+  so of two saves from one revision only the first wins. The other gets a
+  409 showing the current title, keeps the draft, and offers **Save mine
+  over theirs** or **Keep theirs**. Saving a deleted task keeps the draft and
+  does not bring the task back.
+- **Server log** (`tavern-command-delegate="click"`,
+  `tavern-command-dedup="1000"`). Each person sees only entries about tasks
+  they may see, live and in snapshots. **Simulate 8 votes** starts a finite
+  burst of updates (one at a time, 150 ms apart); a second request while one
+  runs is refused with 409, and the page shows the failure.
+
+**Catching up after held updates.** tavern-js discards the updates it held
+back. When its `tavern:policy-deactivated` event reports any (`flushed` >
+0), the page calls `Tavern.command` to ask for a snapshot. The server sends
+it on that region's own stream, which is scoped to the window, so it
+arrives after every earlier change and before any later one. The region
+shows *Paused*, then *Catching up*, then *Up to date*, and never claims to be
+current while updates are held. This needs no further updates from anyone.
+One request runs at a time; if updates are held and discarded again while
+it is open, another snapshot is requested when it settles, unless a newer
+snapshot has already arrived or the region is protected again.
+
+Each command's status line goes from *Sending* to *Accepted* (the server
+took it; the regions then update from their streams) or *Failed* with the
+reason. tavern-js delivers the outcome even when the live update has already
+replaced the button: from the button while it is connected, otherwise from
+the region, with `detail.element` naming the button.
+
+Command bodies are JSON (`command-*` attributes as strings). The server
+accepts only `application/json` (415 otherwise). The whole body must fit in
+1 KB (413 otherwise) and be exactly one object with no unknown fields,
+optionally surrounded by whitespace; anything after it is refused (400).
+The task ID must match the URL. Browser dedup is per element and
+URL; it is not server-side idempotency.
+
 ## How it works
 
 - **Canonical state lives on the server** (`board.go`). Columns and the
@@ -187,7 +238,9 @@ resume replays what it missed before `tavern-reconnected`. `collab_test.go` read
 collaboration streams: snapshots and live fragments per person, the inbox
 scope and filter, the feed group, one batched event for the bulk action, a
 change made while a snapshot is being taken, reconnect after changes, and
-malformed input. `collab_recovery_test.go` drops a feed's final updates
+malformed input. `lab_test.go` checks the lab's JSON commands, races two saves from one
+revision, saves a deleted task, scopes resync to its window, and bounds
+bursts. `collab_recovery_test.go` drops a feed's final updates
 and checks that it still converges with no further change, and that it does
 not when repair is off; and covers reconnect holds that expire, outlive an
 abandoned attempt, hit the limit, end at shutdown, and are released by
@@ -222,7 +275,16 @@ purpose declares it. The tests:
   clearing finished tasks; a new viewer matching an existing one; a
   window reconnecting after deletes, renames and additions without
   duplicate, missing or deleted cards; and a paused feed that dropped
-  updates catching up after the board goes quiet.
+  updates catching up after the board goes quiet;
+- in the interaction lab: one vote per click, Enter and double click; a
+  vote whose button is replaced mid-gesture sent once; a refused command
+  reported; pointer release outside the region and a cancelled touch; an
+  update held during a press converging after release with nothing more
+  sent; a vote accepted after its button was replaced and a vote refused
+  after its task was deleted, each reported once; an editor keeping its text and selection while focus moves inside
+  the region and until both protections end; a stale save refused with the
+  draft kept; a deleted task's save refused without recreating it; and
+  internal tasks hidden from Bob.
 
 CI runs them on every pull request and on `main`
 (`.github/workflows/validate.yml`, job *reference app in a browser*).
@@ -233,7 +295,7 @@ CI runs them on every pull request and on `main`
 |---|---|---|---|
 | `htmx-2.0.11.min.js` | htmx 2.0.11 | npm registry, integrity verified | 0BSD (`LICENSE.htmx`) |
 | `htmx-ext-sse-2.2.4.min.js` | htmx-ext-sse 2.2.4 | npm registry, integrity verified | 0BSD (`LICENSE.htmx-ext-sse`) |
-| `tavern-0.0.23.min.js` | tavern-js v0.0.23 (tag object `82d3ad8`, commit `f3166d8e781b250cf604e0f5ed44c306284d33ff`) | `tavern.min.js` asset of the [v0.0.23 release](https://github.com/catgoose/tavern-js/releases/tag/v0.0.23) | MIT (`LICENSE.tavern-js`, from that commit) |
+| `tavern-0.0.24.min.js` | tavern-js v0.0.24 (tag object `eaa3433`, commit `066f573f584ecd6eff0b576552dd2ea573d01bee`) | `tavern.min.js` asset of the [v0.0.24 release](https://github.com/catgoose/tavern-js/releases/tag/v0.0.24); byte-identical to `dist/tavern.min.js` at the reviewed merge `c765585`, so its header comment still says 0.0.23 | MIT (`LICENSE.tavern-js`, from that commit) |
 
 `vendor.sha256` records their digests. Scripts load in this order: htmx,
 the SSE extension, then tavern-js, which binds to the extension's events.

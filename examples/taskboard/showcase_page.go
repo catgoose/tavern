@@ -16,6 +16,7 @@ const showcaseHTML = `<!doctype html>
 <p>Working scenarios for Tavern and tavern-js. Each one runs against this server.</p>
 <ul class="scenarios">
   <li><a href="/showcase/connection">Connection and live updates</a>: tavern-js connection state, a live counter, and reconnecting with replay.</li>
+  <li><a href="/showcase/lab">Interaction lab</a>: commands that survive live updates, editing that keeps your draft, stale saves refused, and catching up after held updates.</li>
   <li><a href="/showcase/collaboration">Collaboration</a>: two people editing one board, with OOB updates, per-person delivery, a topic group and a bulk action.</li>
 </ul>
 <p class="note">The task board itself shows invalidation streams, loss-aware subscriptions and graceful shutdown.</p>
@@ -35,7 +36,7 @@ const connectionHTML = `<!doctype html>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/htmx-2.0.11.min.js"></script>
 <script src="/static/htmx-ext-sse-2.2.4.min.js"></script>
-<script src="/static/tavern-0.0.23.min.js"></script>
+<script src="/static/tavern-0.0.24.min.js"></script>
 </head>
 <body>
 <header>

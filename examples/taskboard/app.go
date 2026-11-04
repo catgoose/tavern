@@ -59,6 +59,7 @@ type App struct {
 
 	collab        *collab
 	collabStreams collabStreams
+	lab           *lab
 }
 
 func NewApp(cfg Config, logger *slog.Logger) *App {
@@ -86,6 +87,7 @@ func NewApp(cfg Config, logger *slog.Logger) *App {
 	a.mux.HandleFunc("POST /demo/sample", a.sample)
 	a.registerShowcase()
 	a.registerCollab()
+	a.registerLab()
 	return a
 }
 

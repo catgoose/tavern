@@ -39,3 +39,12 @@ header nav a { margin-left: .5rem; }
 .notice { margin: .25rem 0; font-size: .9rem; }
 .editor:empty { display: none; }
 .editor { background: #f4f5f7; border-radius: 6px; padding: .5rem 1rem; }
+.lab { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.lab-region { background: #f4f5f7; border-radius: 6px; padding: .5rem; min-height: 4rem; }
+.lab-state { font-size: .85rem; font-weight: 600; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* one line, so a state change never moves the region under the pointer */
+.lab-state[data-state="live"] { color: #1a7f37; }
+.lab-state[data-state="paused"], .lab-state[data-state="refreshing"] { color: #b35900; }
+.lab-state[data-state="error"] { color: #cf222e; }
+.lab-editor { display: grid; gap: .3rem; }
+.lab-editor-notice { margin: 0; font-size: .85rem; color: #b35900; }
+.lab-editor-notice:empty { display: none; }
