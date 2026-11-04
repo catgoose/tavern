@@ -23,12 +23,36 @@ Requirements: Go 1.27.3 or later. The browser files are vendored in
 3. Stop the server with Ctrl-C: windows show *Reconnecting…* and reconnect
    when it is back. The in-memory board starts empty again.
 
+All state is in memory and shared by every window: the board, every
+showcase scenario's values and settings, and the labs' fault switches. A
+reset button in one window resets it for everyone. To start everything
+afresh, stop the server and run it again.
+
 ## Showcase
 
 **Showcase** in the board's header lists working scenarios for Tavern and
 [tavern-js](https://github.com/catgoose/tavern-js). [COVERAGE.md](COVERAGE.md)
-lists every capability of both libraries, what demonstrates it, and what is
-still planned.
+lists every capability of both libraries, what demonstrates it and the
+tests that check it, and the few limits that remain.
+
+| Page | Shows | Source |
+|---|---|---|
+| `/showcase/connection` | connection state, replay on reconnect | `showcase*.go` |
+| `/showcase/collaboration` | two personas, scoped delivery, OOB updates, groups, batches | `collab*.go` |
+| `/showcase/lab` | commands, interaction protection, drafts and conflicts | `lab*.go` |
+| `/showcase/shell` | a lifeline with views swapped in and out, topic changes, globs, groups | `shell*.go` |
+| `/showcase/recovery` | resume, gaps, truncation, full queues, replay store failures | `recovery*.go` |
+| `/showcase/delivery` | change-only and lazy rendering, timing, expiry, batches, rate, pressure, hooks, scheduling | `delivery.go` and the family files |
+| `/showcase/ops` | presence, connections and metrics, admission, transport, shutdown | `ops*.go` |
+| `/showcase/client` | tavern-js lifecycle calls, registry, updated class, debug logging | `client*.go` |
+
+Runnable commands (`make ops-demos` runs them all; none needs a network):
+`go run ./examples/primitives` (scoped topic names, option validation,
+globs, multi-topic termination, the slow-subscriber callback, scoped replay
+storage), `go run ./examples/taverntest` (the test helpers; `go test
+./examples/taverntest` for their assertions), `go run ./examples/backends`,
+and the exporter commands in `tavernprom/cmd/promdemo` and
+`tavernotel/cmd/oteldemo`.
 
 **Connection and live updates** (`/showcase/connection`) is a counter
 published with event IDs (`PublishWithID`, kept by `SetReplayPolicy`) and
@@ -539,8 +563,8 @@ and failures do not reach the rest of the app.
    Each stream is admitted by one generation of the child and ends with
    it. Shutting it down stops admitting streams, sends a reconnect delay
    (`SetRetry`), stops the publisher, releases the held stream and closes
-   the broker, so established streams write what is queued and end; half a
-   second later any stream still running, such as one that was still
+   the broker, so established streams write what is queued and end; two
+   seconds later any stream still running, such as one that was still
    opening, is cancelled. The report shows what was left (no streams or
    subscriptions). A new child is a fresh broker; nothing from the old one
    reaches it. When the app shuts down the lab is closed for good: no child
@@ -564,6 +588,26 @@ Commands, run with `make ops-demos` (no network or external service):
 The exporters stay in their own modules; the task board and the root module
 do not depend on them. Replay storage, retention and its failures are in
 the recovery lab.
+
+**tavern-js lifecycle** (`/showcase/client`) adds and removes regions from
+the page and calls tavern-js's lifecycle functions from buttons. Each region
+is its own stream on a broker of the page's own; **Server subscriptions**
+counts them.
+
+1. **Add a region**: tavern-js's observer binds it; it goes live and flashes
+   (`tavern-updated-class`, 400 ms) on each **Send an update**.
+2. **Tavern.bind() the first region again** and **Tavern.init()**: binding
+   twice does nothing, so each update is still counted once.
+3. **Tavern.destroy()**, then **Add a region**: htmx still streams the new
+   region, but tavern-js does not bind it; **Tavern.scanAndBind()** or
+   **Tavern.init()** does. A region bound after its connection opened does
+   not see it open, so it is not marked live until it reconnects.
+4. **Add a scoped region** lists it in tavern-js's registry;
+   **Tavern.destroy()** empties the registry but leaves bound regions and
+   their connections alone. **Remove all regions** swaps them out through
+   htmx, whose cleanup closes their connections.
+5. `/showcase/client?debug=1` sets `tavern-debug` on new regions, and
+   tavern-js logs to the browser console.
 
 ## How it works
 
@@ -678,7 +722,10 @@ timeout from a client that stops reading, the child broker's shutdown and
 restart, a stream still opening when the child shuts down, no child
 starting after the app shuts down, starts and shutdowns racing the final
 close, background work refused once a lab stops, and shutdown of the whole
-lab.
+lab. `testcontrols_test.go` checks that the `/test/` endpoints exist only
+with `-test-controls`, and that a held burst is refused until released.
+`examples/primitives`, `examples/taverntest` and `examples/backends` each
+test their own output.
 
 ## Browser tests
 
@@ -691,8 +738,12 @@ make browser-test
 TASKBOARD_BROWSER_CHANNEL=chrome make browser-test   # use installed Google Chrome
 ```
 
-The tests build the app, start it on a free local port, and stop it
-afterwards. Each window gets its own browser context. Every page fails its
+The tests build the app, start it on a free local port with
+`-test-controls`, and stop it afterwards. That flag adds endpoints under
+`/test/` that let a test order events a browser cannot: hold back one
+window's lab stream (an EventSource cannot be intercepted), keep a lab burst
+running, and hold the pressure page's repair. They are not registered
+without the flag. Each window gets its own browser context. Every page fails its
 test on a page error, a console error, a failed request, a 4xx or 5xx
 response, or a request to any other host; a test that causes an error on
 purpose declares it. The tests:
@@ -762,7 +813,17 @@ purpose declares it. The tests:
   another window is unaffected; admission refusals, a 503 stream request
   and room returning; the raw wire of both endpoints and a synthetic flush
   failure; and the child broker's streams ending at shutdown and a new
-  child serving new ones.
+  child serving new ones;
+- in the tavern-js lifecycle page: regions bound by the observer, going
+  live and flashing on each update; binding and initializing again adding
+  no listeners; regions added after destroy streaming unbound until scanned
+  or initialized; destroy emptying the registry while connections stay;
+  removed regions' connections closing with no accumulation over five
+  rounds; and debug logging only where `tavern-debug` is set;
+- also: a lab delete in both orders (the window's response first, and the
+  stream's delete first), the refused burst held running by a test control,
+  the restored backpressure hint reaching tavern-js, the gap banner's
+  configured text, and the stale class during a gap.
 
 CI runs them on every pull request and on `main`
 (`.github/workflows/validate.yml`, job *reference app in a browser*).

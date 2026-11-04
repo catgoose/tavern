@@ -22,6 +22,7 @@ func main() {
 	flag.DurationVar(&cfg.Heartbeat, "heartbeat", cfg.Heartbeat, "keepalive interval on idle streams")
 	flag.DurationVar(&cfg.WriteTimeout, "write-timeout", cfg.WriteTimeout, "limit for writing one frame to a client")
 	flag.IntVar(&cfg.MaxSubscribers, "max-subscribers", cfg.MaxSubscribers, "admission limit on open windows; 0 = unlimited")
+	flag.BoolVar(&cfg.TestControls, "test-controls", false, "add the /test/ endpoints the browser tests use; not for real use")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))

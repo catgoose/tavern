@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -36,10 +37,15 @@ type pressureLab struct {
 	value   int
 	results []string // blocking publish results, newest first
 	log     obsLog
+
+	// holdRepair, with test controls, makes the repair wait before it
+	// republishes; stop releases it when the lab stops.
+	holdRepair *pauser
+	stop       context.Context
 }
 
 func newPressureLab(d *delivery) *pressureLab {
-	l := &pressureLab{broker: d.broker(tavern.WithBufferSize(4), tavern.WithAdaptiveBackpressure(prThresholds))}
+	l := &pressureLab{broker: d.broker(tavern.WithBufferSize(4), tavern.WithAdaptiveBackpressure(prThresholds)), stop: d.ctx}
 	l.broker.SetSimplifiedRenderer(prTopic, simplifyGauge)
 	l.broker.OnBackpressureTierChange(func(sub *tavern.SubscriberInfo, oldTier, newTier tavern.BackpressureTier) {
 		l.log.add("%s: %s → %s", sub.ID, oldTier, newTier)
@@ -105,6 +111,9 @@ func (l *pressureLab) change(n int) {
 
 // republish sends the current value again, to everyone and to the team.
 func (l *pressureLab) republish() {
+	if l.holdRepair != nil {
+		l.holdRepair.wait(l.stop, nil)
+	}
 	l.pubMu.Lock()
 	defer l.pubMu.Unlock()
 	l.mu.Lock()

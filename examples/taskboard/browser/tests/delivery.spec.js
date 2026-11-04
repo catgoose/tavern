@@ -320,3 +320,37 @@ test("workflow windows opened later, or reloaded, show the model's rows and summ
   expect(await first.locator("#order-rows li").allTextContents()).toEqual(rows);
   expect(await first.locator("#audit-rows li").allTextContents()).toEqual(audit);
 });
+
+// The reset hint is sent without waiting, right after the first message that
+// fits again. With the repair held until the released window has drained,
+// that message lands in an empty queue, so the hint arrives and tavern-js
+// reports the stream restored.
+test("a window that recovers from backpressure gets the restored hint", async ({ viewer }) => {
+  const page = await open(viewer, "pressure");
+  await expect(page.locator("#gauge [data-value]")).toBeAttached();
+  const control = (path) => page.evaluate((p) => fetch(p, { method: "POST" }).then((r) => r.status), path);
+  expect(await control("/test/pressure/repair?hold=1")).toBe(204);
+  try {
+    await button(page, "Hold back this window").click();
+    // The first burst fills the held window's pipeline (one of its sends
+    // can still fit while it fills); the second can only be dropped, so the
+    // window ends the bursts in a raised tier. Six drops at most stay short
+    // of eviction at eight.
+    await button(page, "Make 6 changes").click();
+    await page.waitForTimeout(300);
+    await button(page, "Make 6 changes").click();
+    const conn = await page.evaluate(() => new URL(document.querySelector("#pressure-region").getAttribute("sse-connect"), location.href).searchParams.get("conn"));
+    await expect.poll(async () => {
+      const mine = (await state(page, "pressure")).tiers.filter((t) => t.includes(`${conn}:`));
+      return mine.length > 0 && !mine[0].endsWith("→ normal");
+    }).toBe(true);
+    await button(page, "Release it").click();
+    await page.waitForTimeout(500); // the backlog is written; the queue is empty
+  } finally {
+    await control("/test/pressure/repair?hold=0");
+  }
+  await expect(page.locator("#delivery-events")).toContainText('tavern-backpressure {"tier":"normal"');
+  await expect(page.locator("#delivery-events")).toContainText("tavern:stream-restored");
+  const { value } = await state(page, "pressure");
+  await expect(page.locator("#gauge [data-value]")).toHaveAttribute("data-value", String(value));
+});

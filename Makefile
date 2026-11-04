@@ -72,10 +72,13 @@ browser-install:
 browser-test:
 	cd $(BROWSER_DIR) && npx playwright test
 
-# ops-demos runs the backend and exporter commands; each prints what it
-# observed. They need no network or external service.
+# ops-demos runs the runnable exercises: the backend, primitives, test
+# helper and exporter commands. Each prints what it observed; none needs a
+# network or an external service.
 ops-demos:
 	go run ./examples/backends
+	go run ./examples/primitives
+	go run ./examples/taverntest
 	cd tavernprom && go run ./cmd/promdemo
 	cd tavernotel && go run ./cmd/oteldemo
 

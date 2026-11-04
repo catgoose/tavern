@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html/template"
@@ -61,6 +62,12 @@ type lab struct {
 	conns  map[string]*labConn // stream key → connection, while open
 	burst  bool                // a simulated burst is running
 	done   <-chan struct{}     // closed at shutdown
+
+	// Test controls: holdBurst keeps a finished burst running until it is
+	// released; holds holds back a window's stream writes. Both are nil
+	// unless the app runs with test controls.
+	holdBurst *pauser
+	holds     *sync.Map // connection id → *pauser
 }
 
 func newLab(b *tavern.SSEBroker, done <-chan struct{}) *lab {
@@ -319,6 +326,9 @@ func (l *lab) startBurst(by *persona, count int) error {
 
 	go func() {
 		defer func() {
+			if l.holdBurst != nil {
+				l.holdBurst.wait(context.Background(), l.done)
+			}
 			l.mu.Lock()
 			l.burst = false
 			l.mu.Unlock()

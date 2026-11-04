@@ -22,8 +22,11 @@ const (
 	chTopic    = "ops:child"
 	chTick     = 500 * time.Millisecond
 	chSlow     = 300 * time.Millisecond
-	chDrainMax = 2 * time.Second
-	chGrace    = 500 * time.Millisecond // for streams to write what is queued, such as the retry
+	// chGrace lets established streams write what is queued, such as the
+	// retry: the slow stream's full queue takes about 1.8 s at 300 ms a
+	// frame. Streams still running after it are cancelled.
+	chGrace    = 2 * time.Second
+	chDrainMax = 4 * time.Second
 	chRetry    = 4 * time.Second        // reconnect delay sent before shutting down
 )
 
@@ -320,7 +323,7 @@ func holdFirst(reg *connRegistry, open func(string) (<-chan tavern.TopicMessage,
 }
 
 var childPage = deliveryPage("child", `{{define "main"}}
-<p class="note">The child broker belongs to this page, not to the server. A publisher on it ticks every 500 ms. Open three streams on it: one live, one held back (its writes wait, so it does not even send its response headers) and one slow (each write waits 300 ms). Shutting it down stops new streams, sends the streams a 4 s reconnect delay (SetRetry), stops the publisher, releases the held stream and closes the broker; streams that have not ended half a second later, such as one still opening, are cancelled. The report shows what was left. While it is down its streams are refused. Starting a new child makes a fresh broker for the next streams.</p>
+<p class="note">The child broker belongs to this page, not to the server. A publisher on it ticks every 500 ms. Open three streams on it: one live, one held back (its writes wait, so it does not even send its response headers) and one slow (each write waits 300 ms). Shutting it down stops new streams, sends the streams a 4 s reconnect delay (SetRetry), stops the publisher, releases the held stream and closes the broker; streams that have not ended two seconds later, such as one still opening, are cancelled. The report shows what was left. While it is down its streams are refused. Starting a new child makes a fresh broker for the next streams.</p>
 <table id="child-streams">
   <tr><th>Stream</th><th>State</th><th>Last tick</th></tr>
   {{range .Modes}}<tr data-mode="{{.}}"><td>{{.}}</td><td data-state>not open</td><td data-tick></td></tr>

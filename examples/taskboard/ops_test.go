@@ -429,10 +429,13 @@ func TestOpsChildShutdownEndsAStreamStillOpening(t *testing.T) {
 	}
 	events, _ := childStream(t, tb, "held", "h")
 	<-reached
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
 	reports := make(chan map[string]any, 1)
 	go func() { reports <- l.shutdown() }()
-	require.Eventually(t, func() bool { return c.ctx.Err() != nil }, time.Second, time.Millisecond, "the generation is ending")
-	close(release) // the stream now holds its writes, after the release pass
+	require.Eventually(t, func() bool { return c.ctx.Err() != nil }, chGrace+time.Second, time.Millisecond, "the generation is ending")
+	unblock() // the stream now holds its writes, after the release pass
 
 	select {
 	case report := <-reports:

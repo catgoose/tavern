@@ -47,7 +47,8 @@ const recoveryPageHTML = `<!doctype html>
 <section id="recovery-region" class="region" hx-ext="sse"
          sse-connect="/showcase/recovery/{{.S.Name}}/events?conn={{.Conn}}"
          tavern-live-class="is-live" tavern-stale-class="is-stale" tavern-reconnecting-class="is-reconnecting"
-         {{with .Action}}tavern-gap-action="{{.}}"{{end}}>
+         {{with .Action}}tavern-gap-action="{{.}}"{{end}}
+         tavern-gap-banner-text="Some updates were missed while this window was away.">
   <p class="state" aria-live="polite">
     <span class="connecting">Connecting…</span>
     <span tavern-status-live hidden>Live</span>

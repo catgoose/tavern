@@ -79,7 +79,19 @@ func (a *App) labEvents(w http.ResponseWriter, r *http.Request, p *persona) {
 		return
 	}
 	defer unsub()
-	err := tavern.StreamSSE(r.Context(), w, ch, func(msg string) string { return msg },
+	out := http.ResponseWriter(w)
+	if a.lab.holds != nil {
+		// With test controls, a window's writes can be held back; the hold
+		// is looked up on each write, so one set after the stream opened
+		// still applies.
+		conn := r.URL.Query().Get("conn")
+		out = pausableWriter{w, func() {
+			if v, ok := a.lab.holds.Load(conn); ok {
+				v.(*pauser).wait(r.Context(), a.done)
+			}
+		}}
+	}
+	err := tavern.StreamSSE(r.Context(), out, ch, func(msg string) string { return msg },
 		tavern.WithStreamHeartbeat(a.cfg.Heartbeat),
 		tavern.WithStreamWriteTimeout(a.cfg.WriteTimeout),
 		tavern.WithStreamWriteErrors(),
