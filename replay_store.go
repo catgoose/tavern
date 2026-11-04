@@ -2,6 +2,7 @@ package tavern
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -36,6 +37,24 @@ type ReplayStore interface {
 	SetMaxEntries(ctx context.Context, topic string, n int) error
 }
 
+// ScopedReplayStore is an optional interface for a [ReplayStore] that keeps
+// [ReplayEntry.Scope]: it stores the field with each entry and returns it
+// unchanged from [ReplayStore.AfterID] and [ReplayStore.Latest]. The broker
+// writes scoped entries ([SSEBroker.PublishToWithTTL]) only to a store whose
+// StoresScope reports true; for any other store a scoped entry is delivered
+// live but not stored, and the append is reported to the replay store error
+// handler with [ErrReplayScopeUnsupported]. Unscoped entries are written to
+// every store, as before.
+type ScopedReplayStore interface {
+	ReplayStore
+	StoresScope() bool
+}
+
+// ErrReplayScopeUnsupported is the cause reported when a scoped replay entry
+// is not written to a [ReplayStore] that does not implement
+// [ScopedReplayStore].
+var ErrReplayScopeUnsupported = errors.New("tavern: replay store does not keep entry scopes")
+
 // MemoryReplayStore is an in-memory implementation of [ReplayStore]. It stores
 // entries in ordered slices per topic with a configurable maximum size.
 // All methods are safe for concurrent use.
@@ -52,6 +71,10 @@ func NewMemoryReplayStore() *MemoryReplayStore {
 		maxSize: make(map[string]int),
 	}
 }
+
+// StoresScope reports that MemoryReplayStore keeps [ReplayEntry.Scope]; it
+// implements [ScopedReplayStore].
+func (s *MemoryReplayStore) StoresScope() bool { return true }
 
 // Append stores a replay entry for a topic. If the number of entries exceeds
 // the configured maximum for the topic, the oldest entries are discarded.
