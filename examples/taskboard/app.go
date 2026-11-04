@@ -62,6 +62,7 @@ type App struct {
 	lab           *lab
 	shell         *shell
 	recovery      *recovery
+	delivery      *delivery
 }
 
 func NewApp(cfg Config, logger *slog.Logger) *App {
@@ -92,6 +93,7 @@ func NewApp(cfg Config, logger *slog.Logger) *App {
 	a.registerLab()
 	a.registerShell()
 	a.registerRecovery()
+	a.registerDelivery()
 	// The broker supports one drop callback. Each repair checks the topic
 	// and only schedules, so this is safe in the publishing goroutine.
 	a.broker.OnPublishDrop(func(topic string, _ int) {
@@ -112,6 +114,7 @@ func (a *App) Shutdown() {
 	a.shell.holds.close()
 	a.shell.repair.close()
 	a.recovery.close()
+	a.delivery.close()
 	a.collab.feed.close()
 	a.broker.Close()
 }

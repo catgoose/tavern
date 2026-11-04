@@ -58,14 +58,14 @@
   - Plan: .agents/.local/plans/handoff-023-lifeline-navigation-and-dynamic-topic-routing.md
   - Review: https://github.com/catgoose/tavern/pull/243 (merged); reviewed head 9c257fdc54ca4ac8e50fbea268617b5b72266793, merge commit 5d80f43849aa7d7b864714ec2e80b3ee53b2ae0f. Includes sequenced snapshots, quiet-loss repair, complete view readiness and pause-control teardown regressions.
 
-- [ ] Pass 005: Replay, loss and recovery.
+- [x] Pass 005: Replay, loss and recovery.
   - Requirements: Provide deterministic controls for ID-backed replay, Last-Event-ID resume, gaps, fallback snapshots, truncation, reconnect callbacks/bundling, bounded replay retention and replay-store failures. Show gap action variants and client recovery feedback, loss-aware invalidations, queue overflow and eviction, including status/termination reasons. Prove eventual canonical state after failures; distinguish enqueued replay from confirmed browser application.
   - Plan: .agents/.local/plans/handoff-026-replay-loss-and-recovery-scenarios.md
-  - Review: pending.
+  - Review: https://github.com/catgoose/tavern/pull/244 (merged); reviewed head b295643a26bcc250896e1241e80056c8e1859d4b, merge commit 3dee9e25a5a2976c1a832f0d1139b72314a879be. Includes ordered gap snapshots, revision-aware reconciliation, connection reservations and idle failed-append recovery; 42 browser cases pass. Full queues can also drop replay control notices; server enqueue statistics and application repair are shown separately from browser confirmation.
 
 - [ ] Pass 006: Delivery shaping and reactive workflows.
   - Requirements: Build focused, observable scenarios for publish-if-changed, debounce, throttle, TTL/OOB expiry, batching, ordering/deduplication, subscriber rate limiting, latest-value coalescing and adaptive pressure. Include After dependencies, mutation hooks, publish middleware, scheduled publishers, render failures and circuit breakers. Compare produced versus observed messages with bounded state and deterministic controls, using only compatible subscription options and accurate TTL/batch/ordering semantics.
-  - Plan: pending.
+  - Plan: .agents/.local/plans/handoff-028-delivery-shaping-and-reactive-workflow-scenarios.md
   - Review: pending.
 
 - [ ] Pass 007: Presence and operational diagnostics.
@@ -99,4 +99,4 @@
 
 ## Suggested Next Plan
 
-- Pass 005: deterministic replay, gaps, truncation, pressure loss and replay-store failure recovery. Dispatch handoff-026 in roadmap-run mode. Leave later passes unplanned until their turn.
+- Pass 006: delivery shaping, pressure adaptation, mutation dependencies and scheduled rendering. Dispatch handoff-028 in roadmap-run mode. Leave later passes unplanned until their turn.
