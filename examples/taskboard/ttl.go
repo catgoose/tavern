@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -27,7 +28,7 @@ const (
 	ttTTL     = 3 * time.Second
 	ttSweep   = 100 * time.Millisecond
 	ttIdle    = time.Second // WithTopicTTL
-	ttKept    = 5           // notices kept for replay
+	ttKept    = 5           // notices showing at once, all kept for replay
 )
 
 type ttlLab struct {
@@ -36,17 +37,32 @@ type ttlLab struct {
 
 	mu        sync.Mutex
 	seq       int
-	statusSet map[string]int // "published" / "skipped"
+	showing   map[string]bool // notices posted and not yet removed by expiry
+	statusSet map[string]int  // "published" / "skipped"
 	log       obsLog
 }
 
 func newTTLLab(d *delivery) *ttlLab {
 	l := &ttlLab{
 		broker:    d.broker(tavern.WithBufferSize(16), tavern.WithMessageTTLSweep(ttSweep), tavern.WithTopicTTL(ttIdle)),
+		showing:   map[string]bool{},
 		statusSet: map[string]int{},
 	}
 	l.broker.SetReplayPolicy(ttNotices, ttKept)
-	l.broker.SetReplayPolicy(ttTeam, ttKept)
+	// The sweeper publishes a notice's removal when it expires; seeing that
+	// publish is how the app knows the notice has gone.
+	l.broker.Use(func(next tavern.PublishFunc) tavern.PublishFunc {
+		return func(topic, msg string) {
+			if topic == ttNotices {
+				if m := removedNotice.FindStringSubmatch(msg); m != nil {
+					l.mu.Lock()
+					delete(l.showing, m[1])
+					l.mu.Unlock()
+				}
+			}
+			next(topic, msg)
+		}
+	})
 	return l
 }
 
@@ -59,15 +75,31 @@ func (l *ttlLab) next() int {
 
 func stamp() string { return time.Now().Format("15:04:05") }
 
+var removedNotice = regexp.MustCompile(`^<div id="(notice-\d+)" hx-swap-oob="delete"></div>$`)
+
 // notice posts an element that removes itself from every window that shows
-// it when it expires.
-func (l *ttlLab) notice() {
-	n := l.next()
+// it when it expires. The replay cache keeps ttKept entries, and an entry
+// pushed out of it by a newer one is never swept, so its element would
+// never be removed. A notice is therefore refused while ttKept are showing.
+func (l *ttlLab) notice() (posted bool) {
+	l.mu.Lock()
+	if len(l.showing) >= ttKept {
+		l.mu.Unlock()
+		l.log.add("notice refused: %d are showing", ttKept)
+		return false
+	}
+	l.seq++
+	n := l.seq
 	id := fmt.Sprintf("notice-%d", n)
+	l.showing[id] = true
+	// Publishing under mu keeps the count and the cache in step; the
+	// middleware above takes mu only for removals, which this publish is not.
 	l.broker.PublishWithTTL(ttNotices,
 		tavern.RenderFragments(tavern.Prepend("ttl-notices", fmt.Sprintf(`<li id=%q>Notice %d, posted %s</li>`, id, n, stamp()))),
 		ttTTL, tavern.WithAutoRemove(id))
+	l.mu.Unlock()
 	l.log.add("notice %d posted, expires in %s", n, ttTTL)
+	return true
 }
 
 // banner replaces the banner. It expires from the replay cache, but windows
@@ -92,13 +124,14 @@ func (l *ttlLab) status(value string) bool {
 	return ok
 }
 
-// team posts a notice for the red team only. Only red subscriptions are
-// made to this topic: the replay cache is per topic, not per scope, so any
-// other subscriber would be replayed the team's notices (#245).
+// team replaces the red team's notice. Only red subscriptions are made to
+// this topic: the replay cache is per topic, not per scope, so any other
+// subscriber would be replayed the team's notice (#245). It stays on pages
+// that show it after it expires.
 func (l *ttlLab) team() {
 	n := l.next()
 	l.broker.PublishToWithTTL(ttTeam, deliveryTeam,
-		tavern.RenderFragments(tavern.Prepend("ttl-team", fmt.Sprintf(`<li>Team notice %d, posted %s</li>`, n, stamp()))), ttTTL)
+		tavern.RenderFragments(tavern.Replace("ttl-team", fmt.Sprintf("Team notice %d, posted %s", n, stamp()))), ttTTL)
 	l.log.add("team notice %d posted, expires from replay in %s", n, ttTTL)
 }
 
@@ -140,7 +173,14 @@ func (a *App) registerTTL() {
 			w.WriteHeader(http.StatusNoContent)
 		})
 	}
-	post("notice", l.notice)
+	a.mux.HandleFunc("POST /showcase/delivery/ttl/notice", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if !l.notice() {
+			fmt.Fprintf(w, "%d notices are showing; wait for one to expire.", ttKept)
+			return
+		}
+		fmt.Fprint(w, "Posted.")
+	})
 	post("banner", l.banner)
 	post("team", l.team)
 	a.mux.HandleFunc("POST /showcase/delivery/ttl/status", func(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +201,7 @@ func (a *App) registerTTL() {
 }
 
 var ttlPage = deliveryPage("ttl", `{{define "main"}}
-<p class="note">Everything here expires after 3 seconds. A window open when a message is posted gets it at once. A window opened later gets it only until it expires. A notice also disappears from open windows when it expires; the banner and team notices stay on pages that show them.</p>
+<p class="note">Everything here expires after 3 seconds. A window open when a message is posted gets it at once. A window opened later gets it only until it expires. A notice also disappears from open windows when it expires; the banner and team notice stay on pages that show them. At most five notices show at once: the replay cache keeps five, and a notice pushed out of it would never be removed, so a sixth waits until one expires.</p>
 <section id="ttl-region" sse-connect="/showcase/delivery/ttl/events?conn={{.Conn}}">
   <div sse-swap="oob" hx-swap="none"></div>
   <h2>Notices</h2>
@@ -170,11 +210,11 @@ var ttlPage = deliveryPage("ttl", `{{define "main"}}
   <p id="ttl-banner">No banner.</p>
   <h2>Status</h2>
   <p id="ttl-status">No status.</p>
-  <h2>Team notices (red team)</h2>
-  <ul id="ttl-team"></ul>
+  <h2>Team notice (red team)</h2>
+  <p id="ttl-team">No team notice.</p>
 </section>
 <p>
-  <button hx-post="/showcase/delivery/ttl/notice" hx-swap="none">Post a notice</button>
+  <button hx-post="/showcase/delivery/ttl/notice" hx-target="#ttl-notice-result">Post a notice</button> <span id="ttl-notice-result"></span>
   <button hx-post="/showcase/delivery/ttl/banner" hx-swap="none">Post a banner</button>
   <button hx-post="/showcase/delivery/ttl/team" hx-swap="none">Post a team notice</button>
   {{range .Values}}<button hx-post="/showcase/delivery/ttl/status?value={{.}}" hx-swap="none">Status {{.}}</button> {{end}}

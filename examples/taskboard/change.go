@@ -236,7 +236,7 @@ func (l *changeLab) snapshot() string {
 	for _, seq := range l.acts {
 		items += fmt.Sprintf(`<li id="act-%d">#%d</li>`, seq, seq)
 	}
-	frags = append(frags, tavern.Replace("render-activity", items))
+	frags = append(frags, listContents("render-activity", items))
 	l.mu.Unlock()
 	frags = append(frags, tavern.Replace("render-counters", l.countersHTML()))
 	return tavern.NewSSEMessage("oob", tavern.RenderFragments(frags...)).String()

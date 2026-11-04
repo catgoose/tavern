@@ -3,8 +3,11 @@ package main
 import (
 	"maps"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -182,7 +185,7 @@ func TestDeliveryTTL(t *testing.T) {
 	blue, unblue := l.broker.SubscribeScoped(ttTeam, "blue")
 	defer unblue()
 
-	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/notice"))
+	require.Equal(t, http.StatusOK, tb.dlPost(t, "ttl/notice"))
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/banner"))
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/team"))
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/status?value=amber"))
@@ -403,6 +406,7 @@ func TestDeliveryReactiveWorkflow(t *testing.T) {
 	tb := newTestBoard(t, DefaultConfig())
 	l := tb.app.delivery.flow
 	events := dlStream(t, tb, "flow", "a")
+	waitFor(t, events, `id="audit-rows"`, time.Second) // the snapshot
 	require.Eventually(t, func() bool { return l.log.has("worker 1 started") }, time.Second, 5*time.Millisecond, "the first subscriber starts the worker")
 
 	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "flow/order?item=tea"))
@@ -533,4 +537,166 @@ func TestDeliveryShutdownReleasesEverything(t *testing.T) {
 	for _, b := range d.brokers {
 		assert.Zero(t, b.SubscriberCount())
 	}
+}
+
+// TestDeliveryNoticesStayWithinRetention posts more notices than the replay
+// cache keeps. A notice pushed out of the cache would never be removed by
+// expiry, so the sixth is refused while five show; all five then leave the
+// open window when they expire, and posting works again.
+func TestDeliveryNoticesStayWithinRetention(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	l := tb.app.delivery.ttl
+	events := dlStream(t, tb, "ttl", "a")
+	require.Eventually(t, func() bool { return l.broker.HasSubscribers(ttNotices) }, time.Second, 5*time.Millisecond)
+	for range ttKept {
+		assert.True(t, l.notice())
+	}
+	assert.False(t, l.notice(), "a sixth notice is refused while five show")
+	assert.True(t, l.log.has("notice refused: 5 are showing"))
+	for range 3 {
+		require.Equal(t, http.StatusNoContent, tb.dlPost(t, "ttl/team"))
+	}
+	later := recUntilQuiet(dlStream(t, tb, "ttl", "b"), 300*time.Millisecond)
+	assert.Equal(t, []int{1, 2, 3, 4, 5}, liveIDs(later, "notice"), "a later window gets the five showing")
+	team := containing(later, "Team notice")
+	require.Len(t, team, 1, "the team notice is one slot")
+	assert.Contains(t, team[0], "Team notice 8")
+
+	got := recUntilQuiet(events, ttTTL+time.Second)
+	assert.Empty(t, liveIDs(got, "notice"), "every notice has left the open window")
+	assert.True(t, l.notice(), "once they expire, notices can be posted again")
+	l.mu.Lock()
+	assert.Len(t, l.showing, 1)
+	l.mu.Unlock()
+}
+
+var (
+	insertedID = regexp.MustCompile(`<li id="([a-z]+)-(\d+)"`)
+	deletedID  = regexp.MustCompile(`<div id="([a-z]+)-(\d+)" hx-swap-oob="delete">`)
+)
+
+// liveIDs replays inserts and deletes of prefix-N elements and returns the
+// IDs left, in order.
+func liveIDs(events []recEvent, prefix string) []int {
+	live := map[int]bool{}
+	for _, ev := range events {
+		for _, m := range insertedID.FindAllStringSubmatch(ev.data, -1) {
+			if m[1] == prefix {
+				n, _ := strconv.Atoi(m[2])
+				live[n] = true
+			}
+		}
+		for _, m := range deletedID.FindAllStringSubmatch(ev.data, -1) {
+			if m[1] == prefix {
+				n, _ := strconv.Atoi(m[2])
+				delete(live, n)
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(live))
+}
+
+func modelIDs(l *flowLab) (visible []int, summary string) {
+	l.mu.Lock()
+	for _, o := range l.orders {
+		if !o.Test {
+			visible = append(visible, o.ID)
+		}
+	}
+	l.mu.Unlock()
+	slices.Sort(visible)
+	return visible, l.summaryHTML()
+}
+
+// TestDeliveryWorkflowWindowsStartFromTheModel opens windows after orders
+// were placed: each starts from the model's rows, summary and audit log.
+func TestDeliveryWorkflowWindowsStartFromTheModel(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	l := tb.app.delivery.flow
+	for range 3 {
+		require.Equal(t, http.StatusNoContent, tb.dlPost(t, "flow/order?item=tea"))
+	}
+	require.Equal(t, http.StatusNoContent, tb.dlPost(t, "flow/order?item=cake&test=1"))
+	require.Eventually(t, func() bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return l.counts["derived summaries"] == 3
+	}, time.Second, 5*time.Millisecond)
+	for _, conn := range []string{"late", "reconnected"} {
+		snap := recNext(t, dlStream(t, tb, "flow", conn))
+		assert.Equal(t, []int{1, 2, 3}, liveIDs([]recEvent{snap}, "order"), "%s: the visible rows, without the test order", conn)
+		assert.Contains(t, snap.data, checked)
+		assert.Contains(t, snap.data, "3 orders shown: tea 3")
+		assert.Equal(t, []int{1, 2, 3, 4}, liveIDs([]recEvent{snap}, "audit"), "%s: the audit log", conn)
+		assert.Contains(t, snap.data, "order #4 added (test) "+unchecked, "the audit log is not an order topic")
+	}
+}
+
+// TestDeliveryWorkflowMutationsStayInOrder holds the first order's row in
+// middleware while more orders are placed. A later mutation must not
+// publish first: the first row would then be inserted after its removal.
+func TestDeliveryWorkflowMutationsStayInOrder(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	l := tb.app.delivery.flow
+	events := dlStream(t, tb, "flow", "a")
+	waitFor(t, events, `id="audit-rows"`, time.Second)
+
+	reached, release := make(chan struct{}), make(chan struct{})
+	var held atomic.Bool
+	l.broker.Use(func(next tavern.PublishFunc) tavern.PublishFunc {
+		return func(topic, msg string) {
+			if strings.Contains(msg, `<li id="order-1"`) && held.CompareAndSwap(false, true) {
+				close(reached)
+				<-release
+			}
+			next(topic, msg)
+		}
+	})
+	first, rest := make(chan struct{}), make(chan struct{})
+	go func() { defer close(first); l.add("tea", false) }()
+	<-reached
+	go func() {
+		defer close(rest)
+		for range flKept {
+			l.add("cake", false)
+		}
+	}()
+	select {
+	case <-rest:
+	case <-time.After(200 * time.Millisecond): // the later orders wait for the first
+	}
+	close(release)
+	<-first
+	<-rest
+	require.Eventually(t, func() bool { // one summary per list publish, removals included
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return l.counts["derived summaries"] == l.seen[flList]
+	}, 2*time.Second, 5*time.Millisecond)
+
+	got := recUntilQuiet(events, 300*time.Millisecond)
+	visible, summary := modelIDs(l)
+	assert.Equal(t, []int{2, 3, 4, 5, 6, 7}, visible)
+	assert.Equal(t, visible, liveIDs(got, "order"), "the window's rows match the model")
+	summaries := containing(got, `id="order-summary"`)
+	require.NotEmpty(t, summaries)
+	want, _ := checkOrders(summary)
+	assert.Contains(t, summaries[len(summaries)-1], want, "the last summary is the model's")
+}
+
+func TestDeliveryWorkflowAuditIsBounded(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	l := tb.app.delivery.flow
+	events := dlStream(t, tb, "flow", "a")
+	waitFor(t, events, `id="audit-rows"`, time.Second)
+	for range flAuditMax + 2 {
+		require.Equal(t, http.StatusNoContent, tb.dlPost(t, "flow/order?item=tea"))
+	}
+	got := recUntilQuiet(events, 300*time.Millisecond)
+	assert.Equal(t, []int{3, 4, 5, 6, 7, 8, 9, 10}, liveIDs(got, "audit"))
+	assert.Equal(t, []int{5, 6, 7, 8, 9, 10}, liveIDs(got, "order"))
+	l.mu.Lock()
+	assert.Len(t, l.audit, flAuditMax)
+	assert.Len(t, l.orders, flKept)
+	l.mu.Unlock()
 }

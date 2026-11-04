@@ -221,3 +221,71 @@ test("a batch arrives as one message per topic and scope", async ({ viewer }) =>
   await button(page, "Run concurrent producers").click();
   await expect(page.locator('#order-result [data-topic="delivery/order/ordered"]')).toHaveAttribute("data-same", "true");
 });
+
+test("at most five notices show; they all leave when they expire, and later windows get only those", async ({ viewer }) => {
+  const page = await open(viewer, "ttl");
+  await expect.poll(async () => (await state(page, "ttl")).windowTopics.length).toBeGreaterThan(0);
+  await expect(page.locator("#ttl-notices li")).toHaveCount(0, { timeout: 5000 }); // earlier tests' notices expire
+  for (let i = 0; i < 6; i++) await button(page, "Post a notice").click();
+  await expect(page.locator("#ttl-notice-result")).toHaveText("5 notices are showing; wait for one to expire.");
+  await expect(page.locator("#ttl-notices li")).toHaveCount(5);
+  for (let i = 0; i < 3; i++) {
+    const posted = page.waitForResponse((r) => r.url().endsWith("/ttl/team"));
+    await button(page, "Post a team notice").click();
+    await posted;
+  }
+  // The last update arrives over the stream after its POST returns.
+  let team = "";
+  await expect(async () => {
+    const before = await page.locator("#ttl-team").textContent();
+    await page.waitForTimeout(300);
+    team = await page.locator("#ttl-team").textContent();
+    expect(team).toBe(before);
+  }).toPass();
+  expect(team).toMatch(/^Team notice \d+/);
+  const later = await open(viewer, "ttl");
+  await expect(later.locator("#ttl-notices li")).toHaveCount(5); // from the replay cache
+  await expect(later.locator("#ttl-team")).toHaveText(team);
+
+  await expect(page.locator("#ttl-notices li")).toHaveCount(0, { timeout: 5000 });
+  await expect(later.locator("#ttl-notices li")).toHaveCount(0);
+  await page.waitForTimeout(500);
+  await expect(page.locator("#ttl-notices li")).toHaveCount(0);
+  await expect(page.locator("#ttl-team")).toHaveText(team); // the team notice stays after expiry
+  await button(page, "Post a notice").click();
+  await expect(page.locator("#ttl-notice-result")).toHaveText("Posted.");
+  await expect(page.locator("#ttl-notices li")).toHaveCount(1);
+});
+
+test("workflow windows opened later, or reloaded, show the model's rows and summary", async ({ viewer }) => {
+  const first = await open(viewer, "flow");
+  await expect(first.locator("#order-summary")).toContainText("orders shown");
+  for (const item of ["tea", "coffee", "cake"]) {
+    await button(first, `Order ${item}`).click();
+  }
+  // Settled: this window shows exactly the model's rows and summary.
+  const model = async () => (await state(first, "flow")).visible.length;
+  await expect(async () => {
+    const rows = await first.locator("#order-rows li").count();
+    expect(rows).toBe(await model());
+    await expect(first.locator("#order-summary [data-orders]")).toHaveAttribute("data-orders", String(rows), { timeout: 100 });
+  }).toPass();
+  await first.waitForTimeout(300);
+  const rows = await first.locator("#order-rows li").allTextContents();
+  const summary = await first.locator("#order-summary").textContent();
+  const audit = await first.locator("#audit-rows li").allTextContents();
+  expect(rows.length).toBe(await model());
+  expect(rows.length).toBeLessThanOrEqual(6);
+  expect(audit.length).toBeLessThanOrEqual(8);
+  expect(rows.every((r) => r.includes("checked by orders:*"))).toBe(true);
+
+  const second = await open(viewer, "flow");
+  await expect(second.locator("#order-summary")).toHaveText(summary);
+  expect(await second.locator("#order-rows li").allTextContents()).toEqual(rows);
+  expect(await second.locator("#audit-rows li").allTextContents()).toEqual(audit);
+
+  await first.reload();
+  await expect(first.locator("#order-summary")).toHaveText(summary);
+  expect(await first.locator("#order-rows li").allTextContents()).toEqual(rows);
+  expect(await first.locator("#audit-rows li").allTextContents()).toEqual(audit);
+});

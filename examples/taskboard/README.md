@@ -392,13 +392,17 @@ server state** lists the server's counters and what it saw.
 3. **Expiring messages** (`ttl`): messages with a 3 s time-to-live and a
    100 ms sweep (`WithMessageTTLSweep`). A notice (`PublishWithTTL` with
    `WithAutoRemove`) disappears from open windows when it expires; the
-   banner (`PublishOOBWithTTL`) and team notices (`PublishToWithTTL`) stay on
-   pages that show them. A window opened before expiry gets them from the
-   replay cache, one opened after gets nothing. The status uses
+   banner (`PublishOOBWithTTL`) and the team notice (`PublishToWithTTL`)
+   stay on pages that show them. A window opened before expiry gets them
+   from the replay cache, one opened after gets nothing. At most five notices
+   show at once: the replay cache keeps five, and expiry removes only
+   entries still in it, so a notice pushed out by a sixth would never be
+   removed. A sixth is refused until one expires; the app learns that a
+   notice has gone by seeing the sweeper's removal publish. The status uses
    `PublishIfChangedWithTTL`. Each window also subscribes to a topic of its
    own, which the broker drops about a second after the window closes
-   (`WithTopicTTL`). The replay cache is per topic, not per scope, so team
-   notices use a topic that only the red team subscribes to (#245).
+   (`WithTopicTTL`). The replay cache is per topic, not per scope, so the
+   team notice uses a topic that only the red team subscribes to (#245).
 4. **Batches and ordering** (`batch`): a batch of two board updates and a
    feed item for everyone and one of each for the red team. `Flush` sends one
    channel message per topic and scope, so the window's four subscriptions
@@ -440,7 +444,14 @@ server state** lists the server's counters and what it saw.
    and summaries as checked and holds back test orders; the `audit:log`
    topic does not match, so its entries stay unchecked. `Use` counts every
    publish. `OnFirstSubscriber` and `OnLastUnsubscribe` start and stop a
-   worker that refreshes the summary's clock.
+   worker that refreshes the summary's clock. Six orders and eight audit
+   entries are kept, and older ones are removed from the page. Each
+   mutation and its publishes, each summary, and each window's snapshot and
+   subscription take one publication lock, so a later order cannot be
+   published before an earlier one, a summary always shows the model as it
+   is when published, and a window opened or reloaded later starts from the
+   current rows, summary and audit log (passed through the same check as
+   the middleware) written once before any live update.
 8. **Scheduled sections** (`sched`): a `ScheduledPublisher`
    (`WithBaseTick(50 ms)`, run with `RunPublisher`) renders a clock every
    second and a load reading every 400 ms, only while some window is
@@ -556,13 +567,16 @@ and release of held windows at shutdown. `delivery_test.go` checks each
 delivery family over HTTP: change-only fields and dedup reset with scoped
 isolation, lazy rendering with and without an audience, components and a
 refused render, the burst's final values and counts, TTL delivery, replay
-expiry and auto-removal while a window stays connected, idle topic cleanup,
+expiry and auto-removal while a window stays connected, more notices than
+the replay cache keeps refused until one expires, idle topic cleanup,
 one channel message per topic and scope (read from a raw channel) and
 discard, the ordered topic's single order under concurrent producers,
 rate-limited and coalescing windows ending on the latest value while a
 plain one falls behind, adaptive tiers, blocking-publish timeouts,
 eviction and recovery, the mutation-to-summary chain with middleware
-filtering and a non-matching topic, worker start and stop, scheduled
+filtering and a non-matching topic, windows opened after orders starting
+from the model, an order held in middleware while later ones wait, the
+bounded audit log, worker start and stop, scheduled
 sections with the circuit's fallback and recovery, one owner per
 connection ID, and shutdown.
 
@@ -634,8 +648,10 @@ purpose declares it. The tests:
   while the plain one falls behind; a held-back window throttled and
   recovering, and one evicted and reconnecting to the current value; a
   failing scheduled section falling back and recovering; change-only fields
-  and a report rendered only while its panel is open; and a batch arriving
-  as one message per topic and scope.
+  and a report rendered only while its panel is open; a batch arriving as
+  one message per topic and scope; at most five notices showing, all
+  leaving when they expire; and a second workflow window, and a reloaded
+  one, showing the model's rows, summary and audit log.
 
 CI runs them on every pull request and on `main`
 (`.github/workflows/validate.yml`, job *reference app in a browser*).

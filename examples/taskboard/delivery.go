@@ -186,12 +186,17 @@ func deliveryFrame(m tavern.TopicMessage) string {
 // subscriptions, an optional delay before each write (a slow client), and
 // an optional hook that sees each channel message.
 type ownedStream struct {
-	reg    *connRegistry
-	open   func(conn string) (msgs <-chan tavern.TopicMessage, unsubscribe func(), err error)
-	slow   time.Duration
-	frame  func(m tavern.TopicMessage) string // deliveryFrame when nil
-	onRead func(conn string, m tavern.TopicMessage)
-	ended  func(conn string)
+	reg  *connRegistry
+	open func(conn string) (msgs <-chan tavern.TopicMessage, unsubscribe func(), err error)
+	// openSnapshot, when set, is used instead of open. Its snapshot is
+	// written as the first frame, before any message from the merged
+	// subscriptions; a per-subscription snapshot could be overtaken by
+	// another subscription's live message.
+	openSnapshot func(conn string) (msgs <-chan tavern.TopicMessage, unsubscribe func(), snapshot string, err error)
+	slow         time.Duration
+	frame        func(m tavern.TopicMessage) string // deliveryFrame when nil
+	onRead       func(conn string, m tavern.TopicMessage)
+	ended        func(conn string)
 }
 
 var errNoSubscription = errors.New("the broker refused the subscription")
@@ -224,7 +229,15 @@ func (a *App) serveOwned(w http.ResponseWriter, r *http.Request, s ownedStream) 
 			s.ended(conn)
 		}
 	}()
-	ch, u, err := s.open(conn)
+	var ch <-chan tavern.TopicMessage
+	var u func()
+	var snapshot string
+	var err error
+	if s.openSnapshot != nil {
+		ch, u, snapshot, err = s.openSnapshot(conn)
+	} else {
+		ch, u, err = s.open(conn)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -249,6 +262,7 @@ func (a *App) serveOwned(w http.ResponseWriter, r *http.Request, s ownedStream) 
 		}
 	}
 	err = tavern.StreamSSE(r.Context(), pw, ch, frame,
+		tavern.WithStreamSnapshot(func() string { return snapshot }),
 		tavern.WithStreamHeartbeat(a.cfg.Heartbeat),
 		tavern.WithStreamWriteTimeout(a.cfg.WriteTimeout),
 		tavern.WithStreamWriteErrors(),
