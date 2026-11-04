@@ -38,10 +38,10 @@
 
 ## Passes
 
-- [ ] Pass 001: Showcase foundation and browser integration.
+- [x] Pass 001: Showcase foundation and browser integration.
   - Requirements: Evolve the existing taskboard with a navigable showcase entry point, an honest feature coverage matrix for both libraries, locally pinned tavern-js with provenance/license, and a small working connection/update scenario using the real server and client. Establish reproducible browser testing in local commands and shared CI. Preserve the existing taskboard, loss-recovery demonstration and proxy validation. Navigation exposes implemented scenarios; planned coverage stays in documentation.
   - Plan: .agents/.local/plans/handoff-016-showcase-foundation-and-real-browser-integration.md
-  - Review: pending.
+  - Review: https://github.com/catgoose/tavern/pull/239 (merged); reviewed head 099c04bbac255655893ca7aafa903b997fa2f4cb, merge commit 09e8e3eeb5fed82745ac3ae6f11cc0f95dd62ae2.
 
 - [ ] Pass 002: Collaborative server-rendered taskboard.
   - Requirements: Demonstrate task CRUD, actual OOB replace/append/delete, snapshot plus live updates, lazy/component rendering where supported, and clearly distinguished invalidation/refetch behavior. Exercise scoped per-viewer delivery, groups and subscriber filters with two browser identities. Demonstrate bulk publishing without implying application transactions or atomic cross-region rendering. Keep application authorization separate from routing.
