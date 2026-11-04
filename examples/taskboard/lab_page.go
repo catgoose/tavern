@@ -34,7 +34,7 @@ const labPageHTML = `<!doctype html>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/htmx-2.0.11.min.js"></script>
 <script src="/static/htmx-ext-sse-2.2.4.min.js"></script>
-<script src="/static/tavern-0.0.23.min.js"></script>
+<script src="/static/tavern-0.0.24.min.js"></script>
 </head>
 <body hx-ext="sse" hx-vals='{"as": "{{.P.ID}}"}'>
 <header>
@@ -193,17 +193,22 @@ const labPageHTML = `<!doctype html>
     });
   });
 
-  // Success and error are dispatched on the command's element, so they are
-  // not seen here when a live update has already replaced it.
+  // Command outcomes reach the document even when a live update has already
+  // replaced the command's element; detail.element names it. "Accepted"
+  // means the server took the command; the regions update from their streams.
+  function describe(e) {
+    return (e.detail.element.textContent.trim() || "Command") + " (" + e.detail.url + ")";
+  }
   document.addEventListener("tavern:command-sent", function (e) {
-    status.textContent = "Sending " + e.detail.url;
+    status.textContent = "Sending " + describe(e);
     note("sent " + e.detail.url);
   });
   document.addEventListener("tavern:command-success", function (e) {
-    status.textContent = "Done: " + e.detail.url;
+    status.textContent = "Accepted: " + describe(e);
+    note("accepted " + e.detail.url);
   });
   document.addEventListener("tavern:command-error", function (e) {
-    status.textContent = "Failed: " + e.detail.error.message;
+    status.textContent = "Failed: " + describe(e) + ": " + e.detail.error.message;
     note("failed " + e.detail.url + ": " + e.detail.error.message);
   });
 })();

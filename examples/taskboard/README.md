@@ -160,6 +160,12 @@ One request runs at a time; if updates are held and discarded again while
 it is open, another snapshot is requested when it settles, unless a newer
 snapshot has already arrived or the region is protected again.
 
+Each command's status line goes from *Sending* to *Accepted* (the server
+took it; the regions then update from their streams) or *Failed* with the
+reason. tavern-js delivers the outcome even when the live update has already
+replaced the button: from the button while it is connected, otherwise from
+the region, with `detail.element` naming the button.
+
 Command bodies are JSON (`command-*` attributes as strings). The server
 accepts only `application/json` (415 otherwise). The whole body must fit in
 1 KB (413 otherwise) and be exactly one object with no unknown fields,
@@ -274,7 +280,8 @@ purpose declares it. The tests:
   vote whose button is replaced mid-gesture sent once; a refused command
   reported; pointer release outside the region and a cancelled touch; an
   update held during a press converging after release with nothing more
-  sent; an editor keeping its text and selection while focus moves inside
+  sent; a vote accepted after its button was replaced and a vote refused
+  after its task was deleted, each reported once; an editor keeping its text and selection while focus moves inside
   the region and until both protections end; a stale save refused with the
   draft kept; a deleted task's save refused without recreating it; and
   internal tasks hidden from Bob.
@@ -288,7 +295,7 @@ CI runs them on every pull request and on `main`
 |---|---|---|---|
 | `htmx-2.0.11.min.js` | htmx 2.0.11 | npm registry, integrity verified | 0BSD (`LICENSE.htmx`) |
 | `htmx-ext-sse-2.2.4.min.js` | htmx-ext-sse 2.2.4 | npm registry, integrity verified | 0BSD (`LICENSE.htmx-ext-sse`) |
-| `tavern-0.0.23.min.js` | tavern-js v0.0.23 (tag object `82d3ad8`, commit `f3166d8e781b250cf604e0f5ed44c306284d33ff`) | `tavern.min.js` asset of the [v0.0.23 release](https://github.com/catgoose/tavern-js/releases/tag/v0.0.23) | MIT (`LICENSE.tavern-js`, from that commit) |
+| `tavern-0.0.24.min.js` | tavern-js v0.0.24 (tag object `eaa3433`, commit `066f573f584ecd6eff0b576552dd2ea573d01bee`) | `tavern.min.js` asset of the [v0.0.24 release](https://github.com/catgoose/tavern-js/releases/tag/v0.0.24); byte-identical to `dist/tavern.min.js` at the reviewed merge `c765585`, so its header comment still says 0.0.23 | MIT (`LICENSE.tavern-js`, from that commit) |
 
 `vendor.sha256` records their digests. Scripts load in this order: htmx,
 the SSE extension, then tavern-js, which binds to the extension's events.

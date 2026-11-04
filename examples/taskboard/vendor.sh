@@ -12,9 +12,9 @@
 set -euo pipefail
 
 TAVERN_JS_REPO=catgoose/tavern-js
-TAVERN_JS_TAG=v0.0.23
-TAVERN_JS_COMMIT=f3166d8e781b250cf604e0f5ed44c306284d33ff
-TAVERN_JS_FILE=tavern-0.0.23.min.js
+TAVERN_JS_TAG=v0.0.24
+TAVERN_JS_COMMIT=066f573f584ecd6eff0b576552dd2ea573d01bee
+TAVERN_JS_FILE=tavern-0.0.24.min.js
 
 dir="$(cd "$(dirname "$0")" && pwd)"
 static="$dir/static"

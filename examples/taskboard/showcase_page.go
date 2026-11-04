@@ -36,7 +36,7 @@ const connectionHTML = `<!doctype html>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/htmx-2.0.11.min.js"></script>
 <script src="/static/htmx-ext-sse-2.2.4.min.js"></script>
-<script src="/static/tavern-0.0.23.min.js"></script>
+<script src="/static/tavern-0.0.24.min.js"></script>
 </head>
 <body>
 <header>

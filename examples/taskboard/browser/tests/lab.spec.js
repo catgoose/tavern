@@ -22,6 +22,32 @@ async function addTask(page, title) {
   return title;
 }
 
+// recordOutcomes notes every command outcome the document sees: its type,
+// where it was dispatched, whether it names the element that sent the
+// command, and whether that element was still connected. Bounded to 20.
+async function recordOutcomes(page) {
+  await page.evaluate(() => {
+    window.__outcomes = [];
+    let sent = null;
+    document.addEventListener("tavern:command-sent", (e) => (sent = e.detail.element));
+    for (const type of ["tavern:command-success", "tavern:command-error"]) {
+      document.addEventListener(type, (e) => {
+        if (window.__outcomes.length >= 20) return;
+        window.__outcomes.push({
+          type,
+          url: e.detail.url,
+          sameElement: e.detail.element === sent,
+          connected: e.detail.element.isConnected,
+          origin: e.target === e.detail.element ? "element" : e.target.id || e.target.nodeName,
+          error: e.detail.error ? e.detail.error.message : null,
+          status: e.detail.response ? e.detail.response.status : null,
+        });
+      });
+    }
+  });
+  return () => page.evaluate(() => window.__outcomes);
+}
+
 // commandsTo counts the command POSTs the page sends to URLs matching re.
 function commandsTo(page, re) {
   const seen = [];
@@ -70,9 +96,109 @@ test("a refused command is reported, and click commands are deduplicated", async
   expect(sent).toHaveLength(1);
 
   await alice.waitForTimeout(1_050);
+  const outcomes = await recordOutcomes(alice);
   await simulate.click(); // the burst is still running
-  await expect(alice.locator("#lab-command-status")).toHaveText("Failed: Tavern.command: 409 Conflict");
+  await expect(alice.locator("#lab-command-status")).toHaveText(
+    "Failed: Simulate 8 votes (/showcase/lab/burst?as=alice): Tavern.command: 409 Conflict",
+  );
   expect(sent).toHaveLength(2);
+  // The button stayed, so the outcome comes from it, once.
+  expect(await outcomes()).toEqual([
+    {
+      type: "tavern:command-error",
+      url: "/showcase/lab/burst?as=alice",
+      sameElement: true,
+      connected: true,
+      origin: "element",
+      error: "Tavern.command: 409 Conflict",
+      status: null,
+    },
+  ]);
+});
+
+test("a vote's success is reported after its button was replaced", async ({ viewer }) => {
+  const alice = await openLab(viewer, "alice");
+  const title = await addTask(alice, `Accepted ${Date.now()}`);
+  const outcomes = await recordOutcomes(alice);
+
+  // The server handles the vote and publishes the new card at once; only
+  // the HTTP response waits until the original button is gone.
+  let releaseResponse;
+  const held = new Promise((resolve) => (releaseResponse = resolve));
+  const handled = new Promise((resolve) => {
+    alice.route(/\/vote\?as=alice$/, async (route) => {
+      const response = await route.fetch();
+      resolve();
+      await held;
+      await route.fulfill({ response });
+    });
+  });
+  const original = await voteCard(alice, title).getByRole("button", { name: "Vote" }).elementHandle();
+  try {
+    await original.click();
+    await handled;
+    await expect(voteCard(alice, title).locator("[data-votes]")).toHaveText("1");
+    await expect.poll(() => original.evaluate((el) => el.isConnected)).toBe(false);
+    await expect(alice.locator("#lab-command-status")).toHaveText(/^Sending Vote /);
+  } finally {
+    releaseResponse();
+  }
+
+  await expect(alice.locator("#lab-command-status")).toHaveText(/^Accepted: Vote \(\/showcase\/lab\/tasks\/\d+\/vote\?as=alice\)$/);
+  await alice.waitForTimeout(200);
+  expect(await outcomes()).toEqual([
+    expect.objectContaining({ type: "tavern:command-success", sameElement: true, connected: false, origin: "lab-votes", status: 204 }),
+  ]);
+});
+
+test("a vote's failure is reported after its task was deleted", async ({ viewer }) => {
+  const alice = await openLab(viewer, "alice", {
+    expected: [
+      /^404 http:\/\/127\.0\.0\.1:\d+\/showcase\/lab\/tasks\/\d+\/vote\?as=alice$/,
+      "console error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    ],
+  });
+  const bob = await openLab(viewer, "bob");
+  const title = await addTask(alice, `Vanishing ${Date.now()}`);
+  await expect(editCard(bob, title)).toBeVisible();
+  const outcomes = await recordOutcomes(alice);
+
+  // Alice's vote waits in the browser while Bob deletes the task; then it
+  // reaches the server, which no longer has the task.
+  let sendVote;
+  const waiting = new Promise((resolve) => (sendVote = resolve));
+  const intercepted = new Promise((resolve) => {
+    alice.route(/\/vote\?as=alice$/, async (route) => {
+      resolve();
+      await waiting;
+      await route.continue();
+    });
+  });
+  const original = await voteCard(alice, title).getByRole("button", { name: "Vote" }).elementHandle();
+  try {
+    await original.click();
+    await intercepted;
+    await editCard(bob, title).getByRole("button", { name: "Delete" }).click();
+    await expect(voteCard(alice, title)).toHaveCount(0);
+    expect(await original.evaluate((el) => el.isConnected)).toBe(false);
+  } finally {
+    sendVote();
+  }
+
+  await expect(alice.locator("#lab-command-status")).toHaveText(
+    /^Failed: Vote \(\/showcase\/lab\/tasks\/\d+\/vote\?as=alice\): Tavern\.command: 404 Not Found$/,
+  );
+  await alice.waitForTimeout(200);
+  expect(await outcomes()).toEqual([
+    expect.objectContaining({
+      type: "tavern:command-error",
+      sameElement: true,
+      connected: false,
+      origin: "lab-votes",
+      error: "Tavern.command: 404 Not Found",
+    }),
+  ]);
+  await expect(voteCard(bob, title)).toHaveCount(0);
 });
 
 test("a held vote converges after release outside the region, with no further updates", async ({ viewer }) => {
