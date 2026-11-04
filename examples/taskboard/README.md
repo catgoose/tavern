@@ -478,6 +478,85 @@ How it is built:
   mutation handler) only record, publish or schedule; none waits or
   relocks a held model lock.
 
+**Operations lab** (`/showcase/ops`) shows what the server observes and
+how it bounds and cleans up. Each page has its own brokers, so their limits
+and failures do not reach the rest of the app.
+
+1. **Presence across tabs** (`presence`): the room's presence, with the
+   `presence` package (`New`, `Join`, `Update`, `Heartbeat`, `Leave`,
+   `List`, `Get`, `Close`), a custom render function, target ID and topic
+   suffix, and the join, update and leave callbacks. Open it as Alice and
+   Bob, and as Alice twice. The tracker keys presence by user, so the app
+   counts each user's tabs: the first tab joins, the last to close leaves,
+   and the status is shared by a user's tabs. Each tab sends heartbeats
+   while its stream is open; **Stop this tab's heartbeats** is not noticed
+   while another of that user's tabs sends them, and with none the user is
+   removed as stale within about two seconds and joins again when they
+   resume. Every presence publish is re-rendered in order from the current
+   list by middleware on the presence topic, and a new tab starts from a
+   snapshot taken under the same lock, so an older render is never sent
+   after a newer one. A refused stream never counts as a tab. Personas
+   are a demo choice, not authentication, and presence is per process.
+2. **Connections and metrics** (`conns`): each window subscribes to a
+   feed, named with its connection ID and persona (`SubWithMeta`), and to
+   the connection-event topic (`WithConnectionEvents`), whose events report
+   other topics' subscribes, unsubscribes and disconnects with the count
+   after the change (they do not name the subscriber, and the event topic
+   does not report itself). **Show server state** lists `Subscribers`,
+   `HasSubscribers`, `SubscriberCount`, `TopicCounts` and `Stats`, all of
+   which count subscriptions rather than windows, and the broker's
+   `Metrics` and `Observability` snapshot: cumulative deliveries
+   (`Published` counts one per subscription per message), drops, peak
+   subscribers, publish latency percentiles, queue depth and message rate
+   samples, durations of closed connections and evictions. **Disconnect
+   this window** calls `Disconnect` with the window's ID; the browser
+   reconnects with the same ID and other windows are unaffected.
+3. **Admission limits** (`admit`): three brokers, one with
+   `WithMaxSubscribers(3)`, one with `WithMaxSubscribersPerTopic(2)` and
+   one with `WithAdmissionControl`. The page holds subscriptions on them on
+   request, so a limit can be filled, refused with its reason, and freed. A
+   subscription to two topics at once (`SubscribeMulti`) skips a full topic
+   and keeps the other; with `SubWithTerminateOnInnerClose` it is refused
+   as a whole and leaves nothing behind. **Request a stream** sends a
+   request to `SSEHandler` on the global broker, which answers 503 while it
+   is full.
+4. **Transport lifetimes and write failures** (`wire`): one topic served by
+   `SSEHandler` (`WithMaxConnectionDuration(3 s)`, `WithReconnectDelay`,
+   `WithWriteTimeout`, `WithWriteErrorHandler`, `WithSSEWriter`) and by
+   `StreamSSE` (`WithStreamHeartbeat`, `WithStreamWriteTimeout`,
+   `WithStreamWriteErrors`, `WithStreamWriter`), on a broker with
+   `WithKeepalive`. Comments are invisible to an EventSource, so the capture
+   buttons read each endpoint's raw response over a real local connection:
+   keepalive and heartbeat comments, a tick with its own `WithRetry`, and
+   SSEHandler's `retry: 1500` and end after its lifetime. The write-failure
+   buttons run `StreamSSE` against a writer that fails on purpose and show
+   the `WriteError` step and cause; a real write timeout, from a client that
+   stops reading, is in the Go tests.
+5. **Shutting down a broker** (`child`): a child broker owned by the page,
+   with a publisher (`RunPublisher`) and live, held back and slow streams.
+   Shutting it down stops new streams, sends a reconnect delay (`SetRetry`),
+   cancels the publisher, releases the held stream, closes the broker and
+   reports what was left (no streams or subscriptions). A new child is a
+   fresh broker; nothing from the old one reaches it.
+
+Commands, run with `make ops-demos` (no network or external service):
+
+- `go run ./examples/backends`: two brokers over the in-process
+  `backend/memory` bus (`Fork`): a message reaches both, a scoped message
+  only its scope, an unhealthy backend (`HealthAwareBackend`) stops
+  forwarding while local delivery continues and resumes after
+  `OnReconnect`, and a wrapper reports `ObservableBackend.Stats`. It shows
+  how a broker uses a backend, not a distributed delivery guarantee.
+- `cd tavernprom && go run ./cmd/promdemo`: registers a broker with a
+  Prometheus registry, scrapes it, prints the `tavern` series (one topic
+  labelled, the rest under `other`) and shows them gone after unregister.
+- `cd tavernotel && go run ./cmd/oteldemo`: the same with an OpenTelemetry
+  meter provider and an in-process manual reader, then provider shutdown.
+
+The exporters stay in their own modules; the task board and the root module
+do not depend on them. Replay storage, retention and its failures are in
+the recovery lab.
+
 ## How it works
 
 - **Canonical state lives on the server** (`board.go`). Columns and the
@@ -578,7 +657,16 @@ filtering and a non-matching topic, windows opened after orders starting
 from the model, an order held in middleware while later ones wait, the
 bounded audit log, worker start and stop, scheduled
 sections with the circuit's fallback and recovery, one owner per
-connection ID, and shutdown.
+connection ID, and shutdown. `ops_test.go` checks presence across tabs
+(one entry per person, the last tab leaving, a new tab starting from the
+current list), stale removal only when no tab of a person sends heartbeats,
+renders matching the list after concurrent updates, a refused tab never
+counted, connection events and introspection with a targeted disconnect and
+reconnect, every admission policy with partial and all-or-nothing
+multi-topic refusal and release at shutdown, the raw wire of both
+endpoints, synthetic write, flush and deadline failures, a real write
+timeout from a client that stops reading, the child broker's shutdown and
+restart, and shutdown of the whole lab.
 
 ## Browser tests
 
@@ -651,7 +739,16 @@ purpose declares it. The tests:
   and a report rendered only while its panel is open; a batch arriving as
   one message per topic and scope; at most five notices showing, all
   leaving when they expire; and a second workflow window, and a reloaded
-  one, showing the model's rows, summary and audit log.
+  one, showing the model's rows, summary and audit log;
+- in the operations lab: tabs of two people and two tabs of one, with
+  status updates, one tab closing and the last one leaving, and a later tab
+  starting from the current list; stale removal only once no tab of a
+  person sends heartbeats, and rejoining; a window's subscriptions,
+  connection events, metrics and a targeted disconnect and reconnect while
+  another window is unaffected; admission refusals, a 503 stream request
+  and room returning; the raw wire of both endpoints and a synthetic flush
+  failure; and the child broker's streams ending at shutdown and a new
+  child serving new ones.
 
 CI runs them on every pull request and on `main`
 (`.github/workflows/validate.yml`, job *reference app in a browser*).

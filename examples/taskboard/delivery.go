@@ -23,13 +23,50 @@ const (
 	deliveryTeam     = "red" // the scope used by the scoped variants
 )
 
-// delivery holds the lab's families, their brokers and the context that
-// stops their background work.
-type delivery struct {
+// labRuntime owns a lab's brokers and background work: the context that
+// stops the work, and the group it waits for.
+type labRuntime struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
-	wg      sync.WaitGroup // bursts and other background producers
+	wg      sync.WaitGroup
 	brokers []*tavern.SSEBroker
+}
+
+func newLabRuntime() labRuntime {
+	ctx, cancel := context.WithCancel(context.Background())
+	return labRuntime{ctx: ctx, cancel: cancel}
+}
+
+func (r *labRuntime) broker(opts ...tavern.BrokerOption) *tavern.SSEBroker {
+	b := tavern.NewSSEBroker(opts...)
+	r.brokers = append(r.brokers, b)
+	return b
+}
+
+// goBounded runs fn in the background until it returns or the lab stops.
+func (r *labRuntime) goBounded(fn func(ctx context.Context)) {
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		fn(r.ctx)
+	}()
+}
+
+// stop cancels the background work and waits for it.
+func (r *labRuntime) stop() {
+	r.cancel()
+	r.wg.Wait()
+}
+
+func (r *labRuntime) closeBrokers() {
+	for _, b := range r.brokers {
+		b.Close()
+	}
+}
+
+// delivery holds the lab's families and their runtime.
+type delivery struct {
+	labRuntime
 
 	change   *changeLab
 	timing   *timingLab
@@ -42,8 +79,7 @@ type delivery struct {
 }
 
 func newDelivery() *delivery {
-	d := &delivery{}
-	d.ctx, d.cancel = context.WithCancel(context.Background())
+	d := &delivery{labRuntime: newLabRuntime()}
 	d.change = newChangeLab(d)
 	d.timing = newTimingLab(d)
 	d.ttl = newTTLLab(d)
@@ -55,28 +91,10 @@ func newDelivery() *delivery {
 	return d
 }
 
-func (d *delivery) broker(opts ...tavern.BrokerOption) *tavern.SSEBroker {
-	b := tavern.NewSSEBroker(opts...)
-	d.brokers = append(d.brokers, b)
-	return b
-}
-
-// goBounded runs fn in the background until it returns or the lab stops.
-func (d *delivery) goBounded(fn func(ctx context.Context)) {
-	d.wg.Add(1)
-	go func() {
-		defer d.wg.Done()
-		fn(d.ctx)
-	}()
-}
-
 func (d *delivery) close() {
-	d.cancel()
-	d.wg.Wait()
+	d.stop()
 	d.pressure.repair.close()
-	for _, b := range d.brokers {
-		b.Close()
-	}
+	d.closeBrokers()
 }
 
 // sleepCtx waits for d or for ctx to end, reporting which.
@@ -173,11 +191,14 @@ func mergeSubs(subs ...keyedSub) (msgs <-chan tavern.TopicMessage, unsubscribe f
 }
 
 // deliveryFrame turns a message into an SSE frame. Messages that are already
-// frames (including Tavern's control events) pass through; raw OOB HTML is
-// sent as an "oob" event, which the page swaps out of band.
+// frames pass through: events, Tavern's control events, retry directives
+// (SetRetry) and comments. Raw OOB HTML is sent as an "oob" event, which the
+// page swaps out of band.
 func deliveryFrame(m tavern.TopicMessage) string {
-	if strings.HasPrefix(m.Data, "event: ") || strings.HasPrefix(m.Data, "data: ") || strings.HasPrefix(m.Data, "id: ") {
-		return m.Data
+	for _, prefix := range []string{"event: ", "data: ", "id: ", "retry: ", ":"} {
+		if strings.HasPrefix(m.Data, prefix) {
+			return m.Data
+		}
 	}
 	return tavern.NewSSEMessage("oob", m.Data).String()
 }
@@ -345,6 +366,9 @@ func (a *App) deliveryIndex(w http.ResponseWriter, _ *http.Request) {
 // renderDeliveryPage renders one family's page with a new connection ID.
 func (a *App) renderDeliveryPage(w http.ResponseWriter, t *template.Template, data map[string]any) {
 	data["Conn"] = newConnID()
+	if data["Base"] == nil {
+		data["Base"], data["Lab"] = "/showcase/delivery", "Delivery lab"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := t.Execute(w, data); err != nil {
 		a.logger.Error("render delivery page", "err", err)
@@ -397,7 +421,7 @@ const deliveryLayoutHTML = `<!doctype html>
 <body hx-ext="sse">
 <header>
   <h1>{{.Title}}</h1>
-  <nav><a href="/showcase/delivery">Delivery lab</a> · <a href="/showcase">Showcase</a></nav>
+  <nav><a href="{{.Base}}">{{.Lab}}</a> · <a href="/showcase">Showcase</a></nav>
 </header>
 {{template "main" .}}
 <section>
@@ -409,7 +433,7 @@ const deliveryLayoutHTML = `<!doctype html>
 </section>
 <script>
 (function () {
-  var family = "{{.Family}}", conn = "{{.Conn}}";
+  var base = "{{.Base}}", family = "{{.Family}}", conn = "{{.Conn}}";
   var log = document.getElementById("delivery-events");
   window.deliveryNote = function (text) {
     var li = document.createElement("li");
@@ -438,7 +462,7 @@ const deliveryLayoutHTML = `<!doctype html>
     document.addEventListener(type, function (e) { window.deliveryNote(type + " " + JSON.stringify(e.detail)); });
   });
   document.getElementById("delivery-inspect").addEventListener("click", function () {
-    fetch("/showcase/delivery/" + family + "/state?conn=" + conn)
+    fetch(base + "/" + family + "/state?conn=" + conn)
       .then(function (r) { return r.json(); })
       .then(function (s) { document.getElementById("delivery-state").textContent = JSON.stringify(s, null, 2); });
   });

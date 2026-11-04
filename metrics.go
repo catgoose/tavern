@@ -8,8 +8,8 @@ import (
 // TopicMetrics holds per-topic counters. All fields are cumulative since the
 // broker was created (except PeakSubscribers which is a high-water mark).
 type TopicMetrics struct {
-	// Published is the total number of messages successfully delivered to at
-	// least one subscriber on this topic.
+	// Published is the total number of successful deliveries on this topic:
+	// one for each subscriber that accepted each message.
 	Published int64
 	// Dropped is the total number of delivery failures (subscriber buffer full)
 	// on this topic.

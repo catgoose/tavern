@@ -386,3 +386,31 @@ func TestSubscribeMultiFromID_EmptyTopicList(t *testing.T) {
 func containsReconnected(msg string) bool {
 	return strings.Contains(msg, "event: tavern-reconnected")
 }
+
+func TestSubscribeMultiSkipsRefusedTopics(t *testing.T) {
+	b := NewSSEBroker(WithMaxSubscribersPerTopic(1))
+	defer b.Close()
+	_, holdA := b.Subscribe("a")
+	defer holdA()
+
+	ch, unsub := b.SubscribeMulti("a", "b")
+	if ch == nil {
+		t.Fatal("expected a subscription covering the admitted topic")
+	}
+	if got := b.TopicCounts(); got["a"] != 1 || got["b"] != 1 {
+		t.Fatalf("counts = %v, want a=1 (the earlier subscriber) and b=1", got)
+	}
+	b.Publish("b", "hello")
+	select {
+	case m := <-ch:
+		if m.Topic != "b" || m.Data != "hello" {
+			t.Fatalf("got %+v", m)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no message from the admitted topic")
+	}
+	unsub() // must not panic on the refused topic
+	if got := b.TopicCounts(); got["a"] != 1 || got["b"] != 0 {
+		t.Fatalf("after unsubscribe counts = %v, want a=1, b=0", got)
+	}
+}

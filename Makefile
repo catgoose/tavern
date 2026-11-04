@@ -14,7 +14,7 @@ export GOTOOLCHAIN := local
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 ACTIONLINT := go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 
-.PHONY: ci check check-module tidy-check vet test lint lint-workflows test-scripts verify-assets proxy-smoke browser-install browser-test capacity
+.PHONY: ci check check-module tidy-check vet test lint lint-workflows test-scripts verify-assets proxy-smoke browser-install browser-test ops-demos capacity
 
 # ci checks every module, the workflows, the scripts and the vendored assets.
 # The proxy and browser tests need Docker and a browser; run them separately.
@@ -71,6 +71,13 @@ browser-install:
 # browser-test runs the task board and showcase in a real browser.
 browser-test:
 	cd $(BROWSER_DIR) && npx playwright test
+
+# ops-demos runs the backend and exporter commands; each prints what it
+# observed. They need no network or external service.
+ops-demos:
+	go run ./examples/backends
+	cd tavernprom && go run ./cmd/promdemo
+	cd tavernotel && go run ./cmd/oteldemo
 
 # capacity runs every load preset; see examples/capacity/README.md.
 capacity:

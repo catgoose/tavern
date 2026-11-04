@@ -88,3 +88,13 @@ func (r *connRegistry) openStreams() int {
 	defer r.connMu.Unlock()
 	return len(r.conns)
 }
+
+// each calls fn for every current owner, under the registry's lock; fn
+// must not call back into the registry.
+func (r *connRegistry) each(fn func(conn string, c *ownedConn)) {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	for conn, c := range r.conns {
+		fn(conn, c)
+	}
+}
