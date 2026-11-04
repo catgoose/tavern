@@ -1,0 +1,15 @@
+{
+  "name": "taskboard-browser-tests",
+  "private": true,
+  "description": "Real-browser tests for the task board and showcase. Developer tooling only; the app itself needs no Node.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
+  }
+}

@@ -77,5 +77,34 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Lint workflows and test release script
-        run: make lint-workflows test-scripts
+      - name: Lint workflows, test scripts and verify vendored assets
+        run: make lint-workflows test-scripts verify-assets
+
+  browser:
+    name: reference app in a browser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: examples/taskboard/browser/package-lock.json
+
+      - name: Install the browser and test dependencies
+        run: make browser-install PLAYWRIGHT_INSTALL_FLAGS=--with-deps
+
+      - name: Run the browser tests
+        run: make browser-test

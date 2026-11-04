@@ -17,3 +17,14 @@ header { display: flex; align-items: baseline; justify-content: space-between; }
 .empty { color: #888; }
 .activity { font-size: .9rem; color: #444; }
 .demo { margin-top: 2rem; border-top: 1px solid #ddd; padding-top: 1rem; }
+header nav a { margin-left: .5rem; }
+[hidden] { display: none !important; }
+.region { border: 2px solid #ccc; border-radius: 6px; padding: .5rem 1rem; transition: border-color .3s, background-color .3s; }
+.region.is-live { border-color: #1a7f37; }
+.region.is-stale { border-color: #b35900; }
+.region.is-reconnecting { border-color: #b35900; background: #fff8ef; }
+.region.is-updated { background: #eef6ff; }
+.region:is(.is-live, .is-stale, .is-reconnecting) .connecting { display: none; }
+.region .state { font-weight: 600; }
+.counter { font-size: 1.5rem; }
+.events { font: .85rem ui-monospace, monospace; color: #444; }
