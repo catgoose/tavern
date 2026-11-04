@@ -16,6 +16,7 @@ const showcaseHTML = `<!doctype html>
 <p>Working scenarios for Tavern and tavern-js. Each one runs against this server.</p>
 <ul class="scenarios">
   <li><a href="/showcase/connection">Connection and live updates</a>: tavern-js connection state, a live counter, and reconnecting with replay.</li>
+  <li><a href="/showcase/recovery">Recovery lab</a>: resume with Last-Event-ID, gaps and snapshots, truncated replay, full queues, eviction and replay store failures, each recovering to the current value.</li>
   <li><a href="/showcase/shell">App shell</a>: one lifeline that stays up while views with their own streams come and go; topics added and removed on the server; multi-topic, glob and group subscriptions.</li>
   <li><a href="/showcase/lab">Interaction lab</a>: commands that survive live updates, editing that keeps your draft, stale saves refused, and catching up after held updates.</li>
   <li><a href="/showcase/collaboration">Collaboration</a>: two people editing one board, with OOB updates, per-person delivery, a topic group and a bulk action.</li>

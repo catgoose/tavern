@@ -266,6 +266,106 @@ is open and belongs to the person. Shared actions (posting notices and
 channel posts, role notes, board tasks, feed items and ops events) take
 only the person. `ScopedTopic` only builds
 colon-separated topic names; glob patterns match slash-separated paths.
+
+**Recovery lab** (`/showcase/recovery`) shows what happens to a window
+that misses updates, and how it gets back to the current value. Each
+scenario is a page with one value shared by every window; the buttons that
+cause a loss act on your window's connection only. **Show what the server
+saw** lists the server's observations (reconnects, gaps, store failures,
+streams that ended), and the page logs each tavern-js event it sees.
+
+1. **Resume with Last-Event-ID** (`resume`): **Disconnect and miss 3
+   changes** ends this window's stream, holds its reconnect while three
+   changes are made, then lets the browser reconnect with the last ID it
+   saw. The server replays the three and confirms with `tavern-reconnected
+   {"replayDelivered":3,"replayDropped":0}`. **Miss 8** is longer than the
+   five values kept, so it is a gap: `tavern-replay-gap`, then the current
+   value as a snapshot, then the confirmation. The index links the same
+   page with each gap action: **banner** shows tavern-js's banner,
+   **reload** reloads the page once (the new page starts from a snapshot,
+   so it does not reload again), and **custom event** has the page fetch
+   the current value. The fetch is applied only if its revision (the event
+   ID the values were published with) is newer than the last one the
+   stream delivered, so a slow response cannot replace a newer update. A
+   newer gap cancels an older fetch, and a failing one is tried three times
+   and then left to the stream.
+2. **Gap without a snapshot** (`resume-silent`) is the same with
+   `GapSilent`: after a long absence the window goes live with an old value
+   and stays behind until the next change. Only the server sees the gap.
+   Silent continuation is not reconciliation.
+3. **Two topics on one resume** (`multi`): `SubscribeMultiFromID` resumes
+   two topics from one `Last-Event-ID`. Each change publishes both values
+   with the same ID, so the ID is in both logs; each topic replays, reports
+   gaps and confirms on its own, and there is no order between them. One
+   topic's replay is bundled into a single write (`SetBundleOnReconnect`).
+4. **Replay larger than the queue** (`truncation`): queues of four, sixteen
+   values kept. **Miss 10** replays four and drops six; the reconnected
+   and truncated notices queue after the replay and are dropped too, so
+   tavern-js never gets a confirmation and the region stays in
+   *Reconnecting*. The server sees the counts in `OnReconnect` and
+   republishes the current value until it is delivered. **Reconnect now**
+   resumes with nothing missed, which the server confirms, and the region
+   goes live.
+5. **Full queues** (`drop-newest`, `drop-oldest`, `evict`, `loss-aware`):
+   **Hold back this window**, **Make 10 changes** twice, **Release it**.
+   Each is its own broker with queues of four. Dropping the newest loses
+   the final value, so the server republishes it after a drop
+   (`OnPublishDrop`); `WithDropOldest` keeps the newest without help;
+   `WithSlowSubscriberEviction(3)` closes the subscription after three
+   drops in a row; `SubWithDisconnectOnLoss` ends it at the first drop.
+   The last two record the first termination reason (`evicted`,
+   `queue-loss`) and the browser reconnects to a snapshot.
+6. **Replay store failures** (`store`, `store-strict`): replay kept in a
+   `ReplayStore`, an in-memory one wrapped so that appends and reads can be
+   made to fail (the store is shared by both pages and every window).
+   Failures reach `WithReplayStoreErrorHandler` as a `ReplayStoreError`
+   with its operation and cause. By default a failed read is treated as a
+   gap: the window gets the gap event and a snapshot. Failed appends are
+   lost without a gap: the window's ID is still stored and nothing after it
+   was kept, so the resume looks complete and only the handler saw it.
+   That window recovers, with nothing more changed, once its history is
+   gone: **Repair the store**, **Clear replay history**, then **Reconnect
+   now**. The resume no longer finds its ID, so it is a gap answered with a
+   snapshot.
+   With `SubWithTerminateOnReplayError` a failed read ends the subscription
+   (`replay-failure`) instead; the app then serves a `SubscribeWithSnapshot`
+   subscription on the same response, so the window still reaches the
+   current value, but no reconnected notice is sent, so it stays in
+   *Reconnecting* until a resume succeeds: **Repair the store**, then
+   **Reconnect now**. **Clear replay history** calls `ClearReplay`, which
+   also removes the topic's replay, gap and bundling policies; the app sets
+   them again.
+
+How it is built:
+
+- Every scenario runs on its own broker, created in `newRecovery`, so
+  buffer size, drop policy, eviction and the replay store never touch the
+  app broker or its publish-drop callback. All are closed at shutdown.
+- A fresh window starts from a snapshot carrying the latest event ID, and
+  no replay. A window resuming with `Last-Event-ID` gets
+  `SubscribeFromIDWith` with its connection ID as subscriber ID, so the
+  server's reconnect and gap observations name it.
+- Each scenario holds one publication lock across every publish (including
+  repair) and across each subscribe, with its replay and gap snapshot. A
+  change made while a snapshot is taken is queued after it, so a snapshot
+  never replaces a newer value or moves the window's event ID back. The gap
+  snapshot callback, which the broker calls during the subscribe, takes
+  only the model lock.
+- A connection ID has one open stream at a time. It is reserved before the
+  stream's pause gate is published or its subscription is made; a second
+  stream with the same ID is refused (409) and the first keeps its
+  controls. The reservation is released when the stream ends, before a
+  held reconnect is let through. At most 32 streams are open per scenario.
+- **Disconnect** ends the window's own stream and holds its reconnect
+  (the collaboration scenario's bounded holds) while the changes are made,
+  so the absence is exactly that many changes. Holds end on release,
+  expiry, cancel and shutdown.
+- **Hold back** pauses that window's writes (the shell's pause gate) until
+  its queue overflows.
+- Callbacks only record or schedule: `OnReconnect` and `OnReplayGap` run in
+  their own goroutines, and the store error handler, which runs
+  synchronously during a publish, only appends to a bounded log that has
+  its own lock.
 ## How it works
 
 - **Canonical state lives on the server** (`board.go`). Columns and the
@@ -341,7 +441,17 @@ bursts. `collab_recovery_test.go` drops a feed's final updates
 and checks that it still converges with no further change, and that it does
 not when repair is off; and covers reconnect holds that expire, outlive an
 abandoned attempt, hit the limit, end at shutdown, and are released by
-concurrent callers without disturbing a newer hold.
+concurrent callers without disturbing a newer hold. `recovery_test.go`
+reads the recovery streams: a short resume, a gap with a snapshot and a
+silent gap, two topics on one resume, a truncated replay repaired (and
+staying behind with repair off) and then confirmed, full queues with each
+drop policy (with a no-repair control), eviction and loss termination, store
+read and append failures with and without strict mode and recovery once
+the fault clears (the window behind failed appends included, with nothing
+more changed), clearing replay, a change published while a gap snapshot is
+taken on one topic, two topics and the store, one owner per connection ID,
+release of connections however they end, controls that act on one window,
+and release of held windows at shutdown.
 
 ## Browser tests
 
@@ -389,7 +499,19 @@ purpose declares it. The tests:
   after its task was deleted, each reported once; an editor keeping its text and selection while focus moves inside
   the region and until both protections end; a stale save refused with the
   draft kept; a deleted task's save refused without recreating it; and
-  internal tasks hidden from Bob.
+  internal tasks hidden from Bob;
+- in the recovery lab: a short disconnect resumed and confirmed; an absence
+  beyond retention answered with a gap and a snapshot; a silent gap live
+  with an old value until the next change; the banner, custom event and
+  reload gap actions each ending on the current value, with one reload
+  only; two topics resumed from one ID; a truncated replay repaired but not
+  confirmed until a real resume; full queues with each drop policy,
+  eviction and loss termination ending on the current value; replay
+  store read failures in default and strict mode, recovering once the
+  store is repaired; a window left behind by failed appends recovering
+  with nothing more changed; and custom gap fetches that return after a
+  newer update, overlap, or keep failing, none of which replace the
+  newest value.
 
 CI runs them on every pull request and on `main`
 (`.github/workflows/validate.yml`, job *reference app in a browser*).
