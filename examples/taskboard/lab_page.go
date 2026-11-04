@@ -130,14 +130,14 @@ const labPageHTML = `<!doctype html>
       show("live", "Up to date");
     });
     region.addEventListener("tavern:policy-activated", function (e) {
-      show("paused", "Paused while you interact; updates are held");
+      show("paused", "Paused: updates held");
       note(name + ": " + e.detail.policy + " started");
     });
     region.addEventListener("tavern:policy-deactivated", function (e) {
       note(name + ": protection ended, " + e.detail.flushed + " held updates discarded");
       if (e.detail.flushed > 0) behind = true;
       if (!behind) { show("live", "Up to date"); return; }
-      show("refreshing", "Catching up with the server…");
+      show("refreshing", "Catching up…");
       if (asking) return;
       asking = true;
       Tavern.command("/showcase/lab/resync?as=" + as + "&conn=" + conn + "&region=" + name, {})

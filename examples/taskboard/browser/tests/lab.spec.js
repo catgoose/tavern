@@ -82,7 +82,9 @@ test("a held vote converges after release outside the region, with no further up
   await expect(voteCard(bob, title)).toBeVisible();
 
   // Alice holds the pointer down on the card (not on its button).
-  const box = await voteCard(alice, title).locator(".title").boundingBox();
+  const target = voteCard(alice, title).locator(".title");
+  await target.scrollIntoViewIfNeeded();
+  const box = await target.boundingBox();
   await alice.mouse.move(box.x + 5, box.y + 5);
   await alice.mouse.down();
   await expect(alice.locator("#lab-state-votes")).toHaveAttribute("data-state", "paused");
@@ -107,7 +109,9 @@ test("a vote whose button is replaced during the gesture is sent once", async ({
   const title = await addTask(alice, `Replaced ${Date.now()}`);
   const sent = commandsTo(alice, /\/vote\?as=alice$/);
 
-  const box = await voteCard(alice, title).getByRole("button", { name: "Vote" }).boundingBox();
+  const target = voteCard(alice, title).getByRole("button", { name: "Vote" });
+  await target.scrollIntoViewIfNeeded();
+  const box = await target.boundingBox();
   await alice.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await alice.mouse.down(); // the command is sent now
   await voteCard(bob, title).getByRole("button", { name: "Vote" }).click();
@@ -125,7 +129,9 @@ test("a cancelled touch releases the pointer protection", async ({ viewer }) => 
   const title = await addTask(alice, `Touch ${Date.now()}`);
   await expect(voteCard(bob, title)).toBeVisible();
 
-  const box = await voteCard(alice, title).locator(".title").boundingBox();
+  const target = voteCard(alice, title).locator(".title");
+  await target.scrollIntoViewIfNeeded();
+  const box = await target.boundingBox();
   const cdp = await alice.context().newCDPSession(alice);
   await cdp.send("Input.dispatchTouchEvent", {
     type: "touchStart",
