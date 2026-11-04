@@ -24,6 +24,8 @@ connection demo). **Connection** is `/showcase/connection` (an ID-backed
 counter with tavern-js connection state). **Collaboration** is
 `/showcase/collaboration` (two personas on a shared board with OOB updates,
 per-persona delivery, a topic group and a bulk action; `collab*.go`).
+**Lab** is `/showcase/lab` (tavern-js commands and interaction protection
+over three live regions, live editing and stale-save refusal; `lab*.go`).
 
 ## Tavern
 
@@ -32,7 +34,7 @@ per-persona delivery, a topic group and a bulk action; `collab*.go`).
 | Broker setup | `NewSSEBroker`, `WithBufferSize`, `WithLogger`; `WithDropOldest`, `WithKeepalive` | Board (`app.go`) | Board tests | Partial: `WithDropOldest`, `WithKeepalive` planned (pass 005, 007) |
 | Admission | `WithMaxSubscribers`; `WithMaxSubscribersPerTopic`, `WithAdmissionControl` | Board: 503 when full | `TestAdmissionLimit` | Partial: per-topic and custom admission planned (pass 007) |
 | Plain publish | `Publish`, `NewSSEMessage` | Board invalidations | `TestMutationsReachEveryViewer`; browser board test | Browser |
-| Scoped publish | `PublishTo`, `SubWithScope`; `SubscribeScoped`, `ScopedTopic` | Collaboration: each persona's stream is scoped to that persona; board changes and inbox notices are published to the scopes allowed to see them | `TestCollabCRUDReachesEachViewer`, `TestCollabInboxIsScopedAndFiltered`; `browser/tests/collab.spec.js` | Partial: `SubscribeScoped` and `ScopedTopic` planned (pass 004) |
+| Scoped publish | `PublishTo`, `SubWithScope`; `SubscribeScoped`, `ScopedTopic` | Collaboration: each persona's stream is scoped to that persona; board changes and inbox notices are published to the scopes allowed to see them. Lab: each region stream is scoped to its connection, so a resync snapshot reaches only that window | `TestCollabCRUDReachesEachViewer`, `TestCollabInboxIsScopedAndFiltered`; `browser/tests/collab.spec.js` | Partial: `SubscribeScoped` and `ScopedTopic` planned (pass 004) |
 | Blocking publish | `PublishBlocking`, `PublishBlockingTo` | — | — | Planned (pass 006) |
 | ID-backed replay | `PublishWithID`, `SetReplayPolicy`, `SubscribeFromIDWith` | Connection: fresh streams replay the kept values; a reconnect resumes after `Last-Event-ID` | `TestCounterReachesEveryViewer`, `TestDropReplaysWhatTheWindowMissed`; browser reconnect test; capacity reconnect burst | Browser |
 | Reconnect confirmation | `tavern-reconnected` with `replayDelivered`/`replayDropped` | Connection: drop, then increment while away | Browser reconnect test asserts `replayDelivered: 1` | Browser |
@@ -80,8 +82,9 @@ per-persona delivery, a topic group and a bulk action; `collab*.go`).
 | Gap handling | `tavern-gap-action` (`reload`, `banner`, custom event), `tavern-gap-banner-text`, `tavern:replay-gap`, `tavern:replay-truncated` | — | — | Planned (pass 005) |
 | Topic changes | `tavern:topics-changed` | — | — | Planned (pass 004) |
 | Degradation | `tavern:stream-degraded`, `tavern:stream-restored` | — | — | Planned (pass 006) |
-| Commands | `Tavern.command`, `tavern-command-delegate`, `tavern-command-target`, `tavern-command-dedup`, URL token expansion, `tavern:command-sent`, `-success`, `-error`, `tavern-hearth` | — | — | Planned (pass 003) |
-| Interaction protection | `tavern-hot-policy` (`pause-on-pointerdown`, `defer-on-focus`), `tavern:policy-activated`, `tavern:policy-deactivated` | — | — | Planned (pass 003; [tavern-js#50](https://github.com/catgoose/tavern-js/issues/50), [tavern-js#53](https://github.com/catgoose/tavern-js/issues/53)) |
+| Commands | `tavern-hearth` (pointerdown with its click fallback), `tavern-command-delegate="click"` with `tavern-command-target`, `tavern-command-dedup`, `{id}` URL token expansion, `Tavern.command` (resync requests; its rejection is shown), `tavern:command-sent`, `tavern:command-error` | Lab: Votes uses hearth with a 400 ms dedup window; Server log uses click delegation with a 1 s window. Command bodies are JSON, validated by the server | `browser/tests/lab.spec.js`: one POST per click, Enter on a focused button, a double click sent once, a target replaced mid-gesture sent once, a refused command reported; `TestLabCommandsValidateJSON` | Browser. `tavern:command-success` and `-error` are dispatched on the command element, so they are lost when a live update has replaced it ([tavern-js#54](https://github.com/catgoose/tavern-js/issues/54)); the lab reports sends and shows failures only for elements that stay. Dedup is per element and URL in the browser; it is not server idempotency. |
+| Interaction protection | `tavern-hot-policy` (`pause-on-pointerdown`, `defer-on-focus`, both), `tavern:policy-activated`, `tavern:policy-deactivated` (`flushed`) | Lab: Votes uses pause-on-pointerdown; Editor uses both. Held updates are discarded by tavern-js; when `flushed` > 0 the page asks for a snapshot on that region's own stream | `browser/tests/lab.spec.js`: release outside the region, a cancelled touch, focus moving between controls, pointer and focus together releasing only when both end, one update then silence converging; `TestLabResyncReachesOnlyItsOwnStream` | Browser. No library change was needed for [tavern-js#53](https://github.com/catgoose/tavern-js/issues/53); its recipe and tests remain open upstream |
+| Live form editing | `defer-on-focus` plus an application draft guard on `htmx:oobBeforeSwap` | Lab Editor: an open editor keeps its value and selection through updates and snapshots, says when its task changed or was deleted, and saves only from the title revision it started with | `browser/tests/lab.spec.js`; `TestLabSavesFromOneRevisionConflict`, `TestLabSaveAfterDeleteKeepsDraftAndDoesNotRecreate` | Browser. Works with v0.0.23; [tavern-js#50](https://github.com/catgoose/tavern-js/issues/50) remains open for its library deliverables |
 | Lifeline and scoped streams | `tavern-role`, `tavern-scope`, `tavern:stream-warming`, `-ready`, `-promoted`, `-retired`, `-fallback`, `Tavern.lifeline`, `stream`, `streams`, `promote`, `retire` | — | — | Planned (pass 004) |
 | Debug logging | `tavern-debug` | — | — | Planned (pass 008) |
 
@@ -95,3 +98,11 @@ per-persona delivery, a topic group and a bulk action; `collab*.go`).
   own ready/refetch status, so tavern-js is not loaded on the board.
 - htmx logs `htmx:sseError` events with `console.error`, so the browser
   tests declare that one error on the page they drop.
+- tavern-js holds updates back while a region is protected and discards
+  them when protection ends, keeping no record of what they held. A region
+  whose last update arrived while it was protected stays out of date until
+  something else arrives, so the lab asks the server for a snapshot when
+  `flushed` is above zero, and shows "Catching up" until it lands.
+- htmx focuses `[autofocus]` elements in swapped content. The lab's draft
+  guard removes `autofocus` from an editor it keeps, or a snapshot would
+  pull focus back into the region and hold every later update.

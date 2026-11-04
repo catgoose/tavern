@@ -32,7 +32,8 @@ async function openPage(browser, baseURL) {
 export const test = base.extend({
   baseURL: async ({}, use) => use(process.env.TASKBOARD_URL),
   // viewer opens a page that fails the test if anything went wrong on it.
-  // expected lists problems the test causes on purpose; each must occur.
+  // expected lists problems the test causes on purpose, as exact strings or
+  // regular expressions; each must occur.
   viewer: async ({ browser, baseURL }, use) => {
     const opened = [];
     await use(async ({ expected = [] } = {}) => {
@@ -44,7 +45,7 @@ export const test = base.extend({
       await v.context.close();
       const unexpected = [...v.problems];
       for (const e of v.expected) {
-        const i = unexpected.indexOf(e);
+        const i = unexpected.findIndex((p) => (e instanceof RegExp ? e.test(p) : p === e));
         expect(i, `expected problem: ${e}`).toBeGreaterThanOrEqual(0);
         unexpected.splice(i, 1);
       }

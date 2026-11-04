@@ -43,14 +43,14 @@
   - Plan: .agents/.local/plans/handoff-016-showcase-foundation-and-real-browser-integration.md
   - Review: https://github.com/catgoose/tavern/pull/239 (merged); reviewed head 099c04bbac255655893ca7aafa903b997fa2f4cb, merge commit 09e8e3eeb5fed82745ac3ae6f11cc0f95dd62ae2.
 
-- [ ] Pass 002: Collaborative server-rendered taskboard.
+- [x] Pass 002: Collaborative server-rendered taskboard.
   - Requirements: Demonstrate task CRUD, actual OOB replace/append/delete, snapshot plus live updates, lazy/component rendering where supported, and clearly distinguished invalidation/refetch behavior. Exercise scoped per-viewer delivery, groups and subscriber filters with two browser identities. Demonstrate bulk publishing without implying application transactions or atomic cross-region rendering. Keep application authorization separate from routing.
   - Plan: .agents/.local/plans/handoff-017-collaborative-taskboard-with-scoped-oob-updates.md
-  - Review: pending.
+  - Review: https://github.com/catgoose/tavern/pull/241 (merged); reviewed head ee0dabf1c5a3a3833575c0c79d336dc817b5606f, merge commit a440e3811ac66701f08727b6636c5036fc5abd44.
 
 - [ ] Pass 003: Safe interaction and editing.
   - Requirements: Exercise programmatic and delegated commands, pointer capture/deduplication and keyboard access, hearth shorthand, and overlapping pointer/focus protection under DOM churn. Preserve active drafts and make conflicts visible using server-owned state. Prove reconciliation after a final suppressed update without another publish. Evaluate tavern-js #50 and #53 through concrete browser scenarios; create separate upstream packets for any necessary fixes, then consume reviewed pinned assets.
-  - Plan: pending.
+  - Plan: .agents/.local/plans/handoff-020-safe-commands-and-live-editing-in-the-showcase.md
   - Review: pending.
 
 - [ ] Pass 004: Connection lifecycle and stream navigation.
@@ -99,4 +99,4 @@
 
 ## Suggested Next Plan
 
-- Pass 002: the collaborative taskboard, scoped and filtered views, grouped delivery, real OOB fragments, and snapshot/update consistency. Dispatch handoff-017 in roadmap-run mode. Leave later passes unplanned until their turn.
+- Pass 003: commands and live editing under SSE updates, with explicit reconciliation after protection ends. Dispatch handoff-020 in roadmap-run mode. Leave later passes unplanned until their turn.
