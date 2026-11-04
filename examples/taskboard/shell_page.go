@@ -14,7 +14,7 @@ const shellChooserHTML = `<!doctype html>
   <nav><a href="/showcase">Showcase</a> · <a href="/">Task board</a></nav>
 </header>
 <ul class="scenarios">
-{{range .}}  <li><a href="/showcase/shell?as={{.ID}}">Open as {{.Name}}</a> ({{.Role.Label}})</li>
+{{range .}}  <li><a href="/showcase/shell?as={{.ID}}">Open as {{.Name}}</a> ({{.Role.Label}}), or <a href="/showcase/shell?as={{.ID}}&amp;slow=1">with a slow lifeline</a></li>
 {{end}}</ul>
 <p class="note">Choosing a person here is a demo switch, not a login.</p>
 </body>
@@ -44,7 +44,7 @@ const shellPageHTML = `<!doctype html>
 <p class="persona">Working as <strong>{{.P.Name}}</strong> ({{.P.Role.Label}}). The lifeline below stays connected while you switch views; each view has its own stream.</p>
 
 <div id="shell-lifeline" class="shell-lifeline" tavern-role="lifeline"
-     sse-connect="/showcase/shell/lifeline?as={{.P.ID}}&amp;conn={{.Conn}}">
+     sse-connect="/showcase/shell/lifeline?as={{.P.ID}}&amp;conn={{.Conn}}{{with .Delay}}&amp;delay={{.}}{{end}}">
   <div sse-swap="shell/notices,shell/role,shell/channel/releases,shell/channel/incidents,shell/channel/leads" hx-swap="none"></div>
   <section>
     <h2>Notices</h2>
@@ -73,12 +73,17 @@ const shellPageHTML = `<!doctype html>
 </div>
 
 <nav id="shell-nav" class="shell-nav" hx-target="#shell-view" hx-sync="this:replace">
-  <button hx-get="/showcase/shell/views/board?conn={{.Conn}}">Board</button>
-  <button hx-get="/showcase/shell/views/feeds?conn={{.Conn}}">Feeds</button>
-  <button hx-get="/showcase/shell/views/ops?conn={{.Conn}}">Ops</button>
+  <button hx-get="/showcase/shell/views/board?conn={{.Conn}}" disabled>Board</button>
+  <button hx-get="/showcase/shell/views/feeds?conn={{.Conn}}" disabled>Feeds</button>
+  <button hx-get="/showcase/shell/views/ops?conn={{.Conn}}" disabled>Ops</button>
+  <span id="shell-starting">Waiting for the lifeline…</span>
 </nav>
 <p id="shell-fallback" role="status"></p>
-<div id="shell-view" hx-get="/showcase/shell/views/board?conn={{.Conn}}" hx-trigger="load"></div>
+<div id="shell-view"></div>
+<p>
+  <button hx-post="/showcase/shell/pause?conn={{.Conn}}&amp;on=1" hx-swap="none">Hold back the lifeline and ops view</button>
+  <button hx-post="/showcase/shell/pause?conn={{.Conn}}&amp;on=0" hx-swap="none">Release them</button>
+</p>
 
 <section>
   <h2>Streams in this window</h2>
@@ -104,11 +109,39 @@ const shellPageHTML = `<!doctype html>
     document.addEventListener(name, function (e) { note(name.slice(14) + " " + e.detail.scope); });
   });
 
-  // Promote a view only when its own first data has arrived, and only if it
-  // is still the view on screen: a socket opening is not a loaded view.
+  // Views need the lifeline: the server checks that a view's connection
+  // belongs to an open lifeline. Open the first view once the lifeline's
+  // first message shows the server has registered it.
+  var lifeline = document.getElementById("shell-lifeline");
+  var started = false;
+  lifeline.addEventListener("htmx:sseMessage", function () {
+    if (started) return;
+    started = true;
+    var buttons = document.querySelectorAll("#shell-nav button");
+    buttons.forEach(function (b) { b.disabled = false; });
+    document.getElementById("shell-starting").remove();
+    buttons[0].click();
+  });
+
+  // Promote a view only when every value it starts from has arrived since
+  // it was mounted or last reconnected, and only if it is still the view on
+  // screen: a socket opening is not a loaded view.
+  var arrived = new WeakMap();
+  function resetArrived(e) {
+    var view = e.target.closest && e.target.closest("[tavern-role=scoped]");
+    if (view) arrived.set(view, new Set());
+  }
+  document.body.addEventListener("htmx:sseOpen", resetArrived);
+  document.body.addEventListener("htmx:sseError", resetArrived);
   document.body.addEventListener("htmx:sseMessage", function (e) {
     var view = e.target.closest("[tavern-role=scoped]");
-    if (!view || (view.dataset.readyEvents || "").split(" ").indexOf(e.detail.type) === -1) return;
+    if (!view) return;
+    var needed = (view.dataset.readyEvents || "").split(" ");
+    if (needed.indexOf(e.detail.type) === -1) return;
+    if (!arrived.has(view)) arrived.set(view, new Set());
+    var seen = arrived.get(view);
+    seen.add(e.detail.type);
+    if (!needed.every(function (n) { return seen.has(n); })) return;
     var scope = view.getAttribute("tavern-scope");
     var entry = Tavern.stream(scope);
     if (view !== current() || !entry || entry.el !== view || entry.state === "active") return;
@@ -126,7 +159,6 @@ const shellPageHTML = `<!doctype html>
     if (view) Tavern.retire(view.getAttribute("tavern-scope"));
   });
 
-  var lifeline = document.getElementById("shell-lifeline");
   lifeline.addEventListener("tavern:stream-fallback", function (e) {
     fallback.dataset.scope = e.detail.scope;
     fallback.textContent = "The " + e.detail.scope + " view lost its stream; it is reconnecting. Notices still arrive on the lifeline.";
@@ -180,18 +212,19 @@ const shellFragmentsHTML = `{{define "notices"}}<ol class="activity">{{range .}}
      sse-connect="/showcase/shell/views/feeds/events?as={{.P.ID}}&amp;conn={{.Conn}}">
   <div sse-swap="shell-feed-ready,shell-feed" hx-swap="none"></div>
   <h2>Feeds</h2>
-  <p class="note">One glob subscription to <code>shell/feeds/**</code>. Items are live only: this view starts empty and shows what is published while it is open, labelled with the topic it came from.</p>
+  <p class="note">One glob subscription to <code>shell/feeds/**</code>. Items are live only and best effort: this view starts empty, shows what is published while it is open, labelled with the topic it came from, and an item dropped from a full queue is not sent again.</p>
   <button hx-post="/showcase/shell/feeds/web" hx-swap="none">Publish to shell/feeds/releases/web</button>
   <button hx-post="/showcase/shell/feeds/api" hx-swap="none">Publish to shell/feeds/releases/api</button>
   <button hx-post="/showcase/shell/feeds/noise" hx-swap="none">Publish to shell/other/noise</button>
   <ol id="shell-feed-list"></ol>
 </section>{{end}}
 {{define "view-ops"}}<section class="shell-view" tavern-role="scoped" tavern-scope="ops" data-ready-events="shell/ops/deploys shell/ops/alerts"
-     sse-connect="/showcase/shell/views/ops/events?as={{.P.ID}}">
+     sse-connect="/showcase/shell/views/ops/events?as={{.P.ID}}&amp;conn={{.Conn}}">
   <div sse-swap="shell/ops/deploys,shell/ops/alerts" hx-swap="none"></div>
   <h2>Ops</h2>
-  <p class="note">A static topic group (DefineGroup and GroupHandler) over two topics; each event is named after its topic. Each topic keeps its latest value, so the view starts from it.</p>
+  <p class="note">A static topic group (DefineGroup and GroupHandler) over two topics; each event is named after its topic. Each topic keeps its latest value, so the view starts from both, and is active only once both have arrived. If a value is dropped from a full queue, the server sends the current values again.</p>
   <p><span id="shell-ops-deploys">…</span> · <span id="shell-ops-alerts">…</span></p>
   <button hx-post="/showcase/shell/ops/deploy" hx-swap="none">Record a deploy</button>
   <button hx-post="/showcase/shell/ops/alert" hx-swap="none">Raise an alert</button>
+  <button hx-post="/showcase/shell/ops/forget-alerts" hx-swap="none">Forget the alerts count</button>
 </section>{{end}}`

@@ -128,7 +128,8 @@ func TestShellFeedsGlob(t *testing.T) {
 
 func TestShellOpsGroup(t *testing.T) {
 	tb := newTestBoard(t, DefaultConfig())
-	ops := openSSE(t, tb, "/showcase/shell/views/ops/events?as=alice")
+	lifeline(t, tb, "alice", "a")
+	ops := openSSE(t, tb, "/showcase/shell/views/ops/events?as=alice&conn=a")
 	got := nextN(t, ops, 2)
 	assert.Contains(t, got["shell/ops/deploys"], "0 deploys")
 	assert.Contains(t, got["shell/ops/alerts"], "0 alerts")
@@ -184,10 +185,8 @@ func TestShellBreakHoldsTheBoardUntilRecover(t *testing.T) {
 	next(t, first)
 	assert.Equal(t, http.StatusNotFound, tb.shellPost(t, "bob", "/views/board/break?conn=a"), "only the owner breaks it")
 	require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/views/board/break?conn=a"))
-	for ev := range first {
-		// The stream sends one snapshot per topic; nothing else before it ends.
-		assert.Equal(t, "shell-board-snapshot", ev.name)
-	}
+	_, open := <-first
+	assert.False(t, open, "the broken stream ends")
 
 	again := openSSE(t, tb, "/showcase/shell/views/board/events?as=alice&conn=a")
 	none(t, again)
@@ -214,4 +213,119 @@ func TestShellLifelineReleasesOnCancelAndShutdown(t *testing.T) {
 	for range events {
 	}
 	assert.Nil(t, tb.app.broker.SubscriberTopics("a"))
+}
+
+// TestShellBoardSnapshotPrecedesEveryChange subscribes the board, changes
+// it before anything is read, and checks that the stream sends one snapshot
+// and then only changes newer than it.
+func TestShellBoardSnapshotPrecedesEveryChange(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	lifeline(t, tb, "alice", "a")
+	board := openSSE(t, tb, "/showcase/shell/views/board/events?as=alice&conn=a")
+	snap := next(t, board)
+	require.Equal(t, "shell-board-snapshot", snap.name)
+	for range 5 {
+		tb.app.shell.addBoardTask(personas[0])
+	}
+	got := map[string]string{}
+	for range 10 {
+		ev := next(t, board)
+		require.NotEqual(t, "shell-board-snapshot", ev.name, "a second snapshot could undo a newer change")
+		got[ev.name] = ev.data
+	}
+	none(t, board)
+	assert.Contains(t, got["shell/board/tasks"], "Alice&#39;s task 5")
+	assert.Contains(t, got["shell/board/stats"], "5 tasks added")
+}
+
+// pausedShellStream opens path on Alice's paused lifeline window and makes
+// changes until a repaired topic's update is dropped. Nothing changes the
+// shell afterwards.
+func pausedShellStream(t *testing.T, tb *testBoard, path string, change func()) (events <-chan sseEvent) {
+	t.Helper()
+	require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/pause?conn=a&on=1"))
+	events = openSSE(t, tb, path)
+	for i := 0; tb.app.broker.PublishDrops() == 0; i++ {
+		require.Less(t, i, 500, "no update was dropped")
+		change()
+	}
+	require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/pause?conn=a&on=0"))
+	return events
+}
+
+func fastShellRepair(tb *testBoard) {
+	f := &tb.app.shell.repair
+	f.mu.Lock()
+	f.base, f.max, f.delay = 20*time.Millisecond, 100*time.Millisecond, 20*time.Millisecond
+	f.mu.Unlock()
+}
+
+func currentOps(tb *testBoard) (deploys, alerts string) {
+	tb.app.shell.mu.Lock()
+	defer tb.app.shell.mu.Unlock()
+	return fmt.Sprint(tb.app.shell.deploys, " deploys"), fmt.Sprint(tb.app.shell.alerts, " alerts")
+}
+
+// TestShellOpsRecoversAfterDroppedUpdate drops the ops view's final updates
+// on a quiet board and checks that both counts end up current; the same run
+// with repair off leaves at least one of them stale.
+func TestShellOpsRecoversAfterDroppedUpdate(t *testing.T) {
+	for _, repair := range []bool{true, false} {
+		t.Run(fmt.Sprint("repair=", repair), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Buffer = 1
+			tb := newTestBoard(t, cfg)
+			fastShellRepair(tb)
+			if !repair {
+				tb.app.shell.repair.close()
+			}
+			lifeline(t, tb, "alice", "a")
+			i := 0
+			ops := pausedShellStream(t, tb, "/showcase/shell/views/ops/events?as=alice&conn=a", func() {
+				kind := []string{"deploy", "alert"}[i%2]
+				i++
+				require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/ops/"+kind))
+			})
+			got := drain(t, ops, 400*time.Millisecond)
+			deploys, alerts := currentOps(tb)
+			current := strings.Contains(got["shell/ops/deploys"], deploys) && strings.Contains(got["shell/ops/alerts"], alerts)
+			assert.Equal(t, repair, current, "deploys %q alerts %q, got %v", deploys, alerts, got)
+		})
+	}
+}
+
+// TestShellLifelineRecoversAfterDroppedUpdate does the same for the
+// lifeline's notices.
+func TestShellLifelineRecoversAfterDroppedUpdate(t *testing.T) {
+	for _, repair := range []bool{true, false} {
+		t.Run(fmt.Sprint("repair=", repair), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Buffer = 1
+			tb := newTestBoard(t, cfg)
+			fastShellRepair(tb)
+			if !repair {
+				tb.app.shell.repair.close()
+			}
+			events := lifeline(t, tb, "alice", "a")
+			require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/pause?conn=a&on=1"))
+			for i := 0; tb.app.broker.PublishDrops() == 0; i++ {
+				require.Less(t, i, 500, "no update was dropped")
+				tb.app.shell.postNotice(personas[1])
+			}
+			require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/pause?conn=a&on=0"))
+			got := drain(t, events, 400*time.Millisecond)
+			tb.app.shell.mu.Lock()
+			latest := fmt.Sprint("notice ", tb.app.shell.noticeN, "<")
+			tb.app.shell.mu.Unlock()
+			assert.Equal(t, repair, strings.Contains(got["shell/notices"], latest), "want %q in %q", latest, got["shell/notices"])
+		})
+	}
+}
+
+func TestShellOpsViewNeedsTheWindowsLifeline(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	resp, err := tb.srv.Client().Get(tb.srv.URL + "/showcase/shell/views/ops/events?as=alice&conn=nobody")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }

@@ -60,27 +60,33 @@ var shellFeedTopics = map[string]string{
 var shellViews = []string{"board", "feeds", "ops"}
 
 type shell struct {
-	mu        sync.Mutex
-	broker    *tavern.SSEBroker
-	notices   []string // newest first, bounded
-	noticeN   int
-	board     []string // newest first, bounded
-	boardN    int
-	deploys   int
-	alerts    int
-	lifelines map[string]*persona // connection id → persona, while its lifeline is open
-	feedN     int
+	mu      sync.Mutex
+	broker  *tavern.SSEBroker
+	notices []string // newest first, bounded
+	noticeN int
+	board   []string // newest first, bounded
+	boardN  int
+	deploys int
+	alerts  int
+	// alertsKnown is false after "forget the alerts count": the ops view
+	// then has no alerts value until the next alert.
+	alertsKnown bool
+	lifelines   map[string]*persona // connection id → persona, while its lifeline is open
+	channels    map[string]string   // channel topic → latest post
+	roleNotes   map[string]string   // role name → latest note
+	feedN       int
 
 	boardStreams sync.Map // connection id → *droppableStream
+	pausers      sync.Map // connection id → *pauser for its lifeline and ops view
 	holds        holds
+	repair       feedRepair
 	done         <-chan struct{}
 }
 
-// boardStreamOptions are validated once at startup; the snapshot is added
-// per stream.
-func boardStreamOptions(status *tavern.SubscriptionStatus, snapshot func() string) []tavern.SubscribeOption {
+// boardStreamOptions are the board view's subscription options, validated
+// once at startup. Its snapshot is not one of them: see openBoard.
+func boardStreamOptions(status *tavern.SubscriptionStatus) []tavern.SubscribeOption {
 	return []tavern.SubscribeOption{
-		tavern.SubWithSnapshot(snapshot),
 		tavern.SubWithDisconnectOnLoss(),
 		tavern.SubWithStatus(status),
 	}
@@ -88,21 +94,49 @@ func boardStreamOptions(status *tavern.SubscriptionStatus, snapshot func() strin
 
 func newShell(b *tavern.SSEBroker, done <-chan struct{}) *shell {
 	if err := tavern.ValidateSubscribeOptions(tavern.TargetSubscribeMultiWith,
-		boardStreamOptions(tavern.NewSubscriptionStatus(), func() string { return "" })...); err != nil {
+		boardStreamOptions(tavern.NewSubscriptionStatus())...); err != nil {
 		panic(err)
 	}
-	s := &shell{broker: b, lifelines: map[string]*persona{}, done: done}
+	s := &shell{
+		broker: b, lifelines: map[string]*persona{}, channels: map[string]string{},
+		roleNotes: map[string]string{}, alertsKnown: true, done: done,
+	}
 	s.holds.ttl, s.holds.max = holdTTL, holdMax
+	s.repair.init(shellRepairs, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.republishLocked()
+	})
 	b.DefineGroup(shellOpsGroup, []string{topicOpsDeploys, topicOpsAlerts})
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.publishNoticesLocked()
-	s.publishOpsLocked()
 	for _, t := range shellChannels {
-		s.publishChannel(t, "Nothing yet")
+		s.channels[t] = "Nothing yet"
 	}
-	s.publishChannel(topicLeadsChannel, "Nothing yet")
+	s.channels[topicLeadsChannel] = "Nothing yet"
+	s.republishLocked()
 	return s
+}
+
+// shellRepairs reports the topics whose dropped messages are repaired: the
+// lifeline's and the ops view's, which are whole representations. Board
+// streams are loss-aware instead, and feed items are live only.
+func shellRepairs(topic string) bool {
+	return topic == topicShellNotices || topic == topicShellRole ||
+		strings.HasPrefix(topic, "shell/channel/") || strings.HasPrefix(topic, "shell/ops/")
+}
+
+// republishLocked publishes the current notices, channel posts, role notes
+// and ops counts.
+func (s *shell) republishLocked() {
+	s.publishNoticesLocked()
+	for topic, text := range s.channels {
+		s.broker.PublishWithReplay(topic, oob(channelID(topic), "channel", text))
+	}
+	for name, note := range s.roleNotes {
+		s.broker.PublishTo(topicShellRole, name, oob("shell-role-notice", "text", note))
+	}
+	s.publishOpsLocked()
 }
 
 // Lifeline.
@@ -179,6 +213,7 @@ func (s *shell) openLifeline(p *persona, conn string) (msgs <-chan tavern.TopicM
 			s.mu.Lock()
 			if s.lifelines[conn] == p {
 				delete(s.lifelines, conn)
+				s.pausers.Delete(conn)
 			}
 			s.mu.Unlock()
 		})
@@ -247,31 +282,38 @@ func (s *shell) postChannel(p *persona, channel string) error {
 	if !ok {
 		return fmt.Errorf("%w: unknown channel", errInvalid)
 	}
-	s.publishChannel(topic, fmt.Sprintf("%s  %s posted", time.Now().Format("15:04:05"), p.name))
-	return nil
-}
-
-// publishChannel keeps a channel's latest post with PublishWithReplay, so a
-// lifeline that starts following it receives that post at once.
-func (s *shell) publishChannel(topic, text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	text := fmt.Sprintf("%s  %s posted", time.Now().Format("15:04:05"), p.name)
+	s.channels[topic] = text
+	// PublishWithReplay keeps the latest post, so a lifeline that starts
+	// following the channel receives it at once.
 	s.broker.PublishWithReplay(topic, oob(channelID(topic), "channel", text))
+	return nil
 }
 
 func channelID(topic string) string { return strings.ReplaceAll(topic, "/", "-") }
 
 func (s *shell) notifyRole(p *persona, r *role) {
-	s.broker.PublishTo(topicShellRole, r.name, oob("shell-role-notice", "text", fmt.Sprintf("%s  %s sent a note to %ss", time.Now().Format("15:04:05"), p.name, strings.ToLower(r.label))))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	note := fmt.Sprintf("%s  %s sent a note to %ss", time.Now().Format("15:04:05"), p.name, strings.ToLower(r.label))
+	s.roleNotes[r.name] = note
+	s.broker.PublishTo(topicShellRole, r.name, oob("shell-role-notice", "text", note))
 }
 
 // Board view.
 
-// openBoard subscribes the board view. The snapshot is taken and the
-// subscription registered under mu, and the board changes under mu.
-func (s *shell) openBoard(status *tavern.SubscriptionStatus) (msgs <-chan tavern.TopicMessage, unsubscribe func()) {
+// openBoard subscribes the board view and returns its snapshot, to be
+// written once before any message. Both are taken under mu, and the board
+// changes under mu, so every change is either in the snapshot or delivered
+// after it. A per-topic SubWithSnapshot would queue one copy per topic, and
+// the merged stream could deliver the second copy after a newer change.
+func (s *shell) openBoard(status *tavern.SubscriptionStatus) (snapshot string, msgs <-chan tavern.TopicMessage, unsubscribe func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.broker.SubscribeMultiWith([]string{topicBoardTasks, topicBoardStats},
-		boardStreamOptions(status, func() string { return s.boardSnapshotLocked() })...)
+	msgs, unsubscribe = s.broker.SubscribeMultiWith([]string{topicBoardTasks, topicBoardStats}, boardStreamOptions(status)...)
+	return s.boardSnapshotLocked(), msgs, unsubscribe
 }
 
 func (s *shell) addBoardTask(p *persona) {
@@ -286,8 +328,6 @@ func (s *shell) addBoardTask(p *persona) {
 	s.broker.Publish(topicBoardStats, oob("shell-board-stats", "text", fmt.Sprint(s.boardN, " tasks added")))
 }
 
-// boardSnapshotLocked is sent once per topic of the board's subscription;
-// both copies replace the whole view, so the second changes nothing.
 func (s *shell) boardSnapshotLocked() string {
 	html := oob("shell-board-tasks", "board-tasks", s.board) + oob("shell-board-stats", "text", fmt.Sprint(s.boardN, " tasks added"))
 	return tavern.NewSSEMessage("shell-board-snapshot", html).String()
@@ -318,6 +358,7 @@ func (s *shell) bumpOps(kind string) error {
 		s.deploys++
 	case "alert":
 		s.alerts++
+		s.alertsKnown = true
 	default:
 		return fmt.Errorf("%w: unknown ops event", errInvalid)
 	}
@@ -329,7 +370,24 @@ func (s *shell) bumpOps(kind string) error {
 // a new group stream starts from the latest of each topic.
 func (s *shell) publishOpsLocked() {
 	s.broker.PublishWithReplay(topicOpsDeploys, oob("shell-ops-deploys", "text", fmt.Sprint(s.deploys, " deploys")))
-	s.broker.PublishWithReplay(topicOpsAlerts, oob("shell-ops-alerts", "text", fmt.Sprint(s.alerts, " alerts")))
+	if s.alertsKnown {
+		s.broker.PublishWithReplay(topicOpsAlerts, oob("shell-ops-alerts", "text", fmt.Sprint(s.alerts, " alerts")))
+	}
+}
+
+// forgetAlerts drops the alerts count until the next alert, so an ops view
+// opened meanwhile has only one of its two values.
+func (s *shell) forgetAlerts() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.alertsKnown = false
+	s.broker.ClearReplay(topicOpsAlerts)
+}
+
+// pauser returns the pause control shared by conn's lifeline and ops view.
+func (s *shell) pauser(conn string) *pauser {
+	v, _ := s.pausers.LoadOrStore(conn, &pauser{resume: make(chan struct{})})
+	return v.(*pauser)
 }
 
 // Diagnostics: what the server holds for a window, read from the broker.

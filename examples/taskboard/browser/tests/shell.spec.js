@@ -201,3 +201,63 @@ test("a view left while its stream was still opening is never promoted", async (
   expect(await promotions()).toBe(before);
   await expect.poll(async () => (await server(page)).boardStreams).toBe(0);
 });
+
+test("with a slow lifeline, views wait for it instead of failing", async ({ viewer }) => {
+  const page = await viewer();
+  const viewRequests = [];
+  page.on("request", (req) => {
+    if (/\/showcase\/shell\/views\//.test(req.url())) viewRequests.push(req.url());
+  });
+  await page.goto("/showcase/shell?as=alice&slow=1");
+  await expect(page.locator("#shell-nav").getByRole("button", { name: "Board", exact: true })).toBeDisabled();
+  await expect(page.locator("#shell-starting")).toBeVisible();
+  await page.waitForTimeout(500); // the lifeline is still opening
+  expect(viewRequests).toEqual([]);
+
+  await expect.poll(() => streams(page)).toEqual({ board: "active" });
+  await expect(page.locator("#shell-starting")).toHaveCount(0);
+  expect(viewRequests.filter((u) => /\/views\/board\?/.test(u))).toHaveLength(1);
+  expect(viewRequests.filter((u) => /\/views\/board\/events/.test(u))).toHaveLength(1);
+});
+
+test("the ops view is not active until both of its values have arrived", async ({ viewer }) => {
+  const { page } = await openShell(viewer, "alice");
+  await go(page, "Ops");
+  await page.getByRole("button", { name: "Forget the alerts count" }).click();
+  await go(page, "Board");
+
+  await page.locator("#shell-nav").getByRole("button", { name: "Ops", exact: true }).click();
+  await expect(page.locator("#shell-ops-deploys")).toHaveText(/^\d+ deploys$/);
+  await page.waitForTimeout(500);
+  await expect(page.locator("#shell-ops-alerts")).toHaveText("…");
+  expect((await streams(page)).ops).not.toBe("active");
+
+  await page.getByRole("button", { name: "Raise an alert" }).click();
+  await expect(page.locator("#shell-ops-alerts")).toHaveText(/^\d+ alerts$/);
+  await expect.poll(() => streams(page)).toEqual({ ops: "active" });
+});
+
+test("a held-back lifeline and ops view catch up after the producer goes quiet", async ({ viewer }) => {
+  const { page: alice } = await openShell(viewer, "alice");
+  const { page: bob } = await openShell(viewer, "bob");
+  await go(alice, "Ops");
+  await go(bob, "Ops");
+
+  await alice.getByRole("button", { name: "Hold back the lifeline and ops view" }).click();
+  // More changes than the held-back queues can take, then nothing more.
+  await bob.evaluate(async () => {
+    for (let i = 0; i < 30; i++) {
+      for (const path of ["/showcase/shell/notices", "/showcase/shell/ops/deploy"]) {
+        const res = await fetch(path, { method: "POST", body: new URLSearchParams({ as: "bob" }) });
+        if (res.status !== 204) throw new Error(`${path} returned ${res.status}`);
+      }
+    }
+  });
+  const latestNotice = await bob.locator("#shell-notices li").first().textContent();
+  await expect(bob.locator("#shell-ops-deploys")).toHaveText(/^\d+ deploys$/);
+  const deploys = await bob.locator("#shell-ops-deploys").textContent();
+
+  await alice.getByRole("button", { name: "Release them" }).click();
+  await expect(alice.locator("#shell-notices li").first()).toHaveText(latestNotice, { timeout: 10_000 });
+  await expect(alice.locator("#shell-ops-deploys")).toHaveText(deploys, { timeout: 10_000 });
+});

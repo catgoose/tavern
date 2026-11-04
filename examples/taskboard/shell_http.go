@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/catgoose/tavern"
 )
@@ -19,8 +20,24 @@ func (a *App) registerShell() {
 	a.mux.HandleFunc("GET /showcase/shell/views/{view}", a.withPersona(a.shellView))
 	a.mux.HandleFunc("GET /showcase/shell/views/board/events", a.withPersona(a.shellBoardEvents))
 	a.mux.HandleFunc("GET /showcase/shell/views/feeds/events", a.withPersona(a.shellFeedEvents))
-	a.mux.Handle("GET /showcase/shell/views/ops/events", a.withPersona(func(w http.ResponseWriter, r *http.Request, _ *persona) {
+	a.mux.Handle("GET /showcase/shell/views/ops/events", a.withPersona(func(w http.ResponseWriter, r *http.Request, p *persona) {
+		conn := r.URL.Query().Get("conn")
+		if a.shell.owner(p, conn) != nil {
+			http.Error(w, "Open the shell first", http.StatusNotFound)
+			return
+		}
+		// The lifeline owns the window's pause control; there is none
+		// once it has closed.
+		if v, ok := a.shell.pausers.Load(conn); ok {
+			gate := v.(*pauser)
+			w = pausableWriter{w, func() { gate.wait(r.Context(), a.done) }}
+		}
 		ops.ServeHTTP(w, r)
+	}))
+	a.mux.HandleFunc("POST /showcase/shell/pause", a.withPersona(a.shellPause))
+	a.mux.HandleFunc("POST /showcase/shell/ops/forget-alerts", a.withPersona(func(w http.ResponseWriter, _ *http.Request, _ *persona) {
+		a.shell.forgetAlerts()
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	a.mux.HandleFunc("GET /showcase/shell/diagnostics", a.withPersona(a.shellDiagnostics))
 
@@ -48,8 +65,21 @@ func (a *App) registerShell() {
 	a.mux.HandleFunc("POST /showcase/shell/views/board/recover", a.withPersona(a.shellRecoverBoard))
 }
 
+// shellLifelineDelayMax bounds the demo's slow lifeline.
+const shellLifelineDelayMax = 2 * time.Second
+
 func (a *App) shellLifeline(w http.ResponseWriter, r *http.Request, p *persona) {
 	conn := r.URL.Query().Get("conn")
+	// The demo can open the lifeline slowly, to show that views wait for it.
+	if d, err := time.ParseDuration(r.URL.Query().Get("delay")); err == nil && d > 0 {
+		select {
+		case <-time.After(min(d, shellLifelineDelayMax)):
+		case <-r.Context().Done():
+			return
+		case <-a.done:
+			return
+		}
+	}
 	ch, unsub, err := a.shell.openLifeline(p, conn)
 	if errors.Is(err, errAdmission) {
 		http.Error(w, "Too many connections, try again shortly", http.StatusServiceUnavailable)
@@ -60,6 +90,8 @@ func (a *App) shellLifeline(w http.ResponseWriter, r *http.Request, p *persona) 
 		return
 	}
 	defer unsub()
+	gate := a.shell.pauser(conn)
+	w = pausableWriter{w, func() { gate.wait(r.Context(), a.done) }}
 	err = tavern.StreamSSE(r.Context(), w, ch, shellFrame,
 		tavern.WithStreamHeartbeat(a.cfg.Heartbeat),
 		tavern.WithStreamWriteTimeout(a.cfg.WriteTimeout),
@@ -86,7 +118,7 @@ func (a *App) shellBoardEvents(w http.ResponseWriter, r *http.Request, p *person
 		}
 	}
 	status := tavern.NewSubscriptionStatus()
-	ch, unsub := a.shell.openBoard(status)
+	snapshot, ch, unsub := a.shell.openBoard(status)
 	if ch == nil {
 		http.Error(w, "Too many connections, try again shortly", http.StatusServiceUnavailable)
 		return
@@ -99,6 +131,7 @@ func (a *App) shellBoardEvents(w http.ResponseWriter, r *http.Request, p *person
 		close(cs.done)
 	}()
 	err := tavern.StreamSSE(r.Context(), w, ch, shellFrame,
+		tavern.WithStreamSnapshot(func() string { return snapshot }),
 		tavern.WithStreamHeartbeat(a.cfg.Heartbeat),
 		tavern.WithStreamWriteTimeout(a.cfg.WriteTimeout),
 		tavern.WithStreamWriteErrors(),
@@ -228,6 +261,19 @@ func (a *App) shellBreakBoard(w http.ResponseWriter, r *http.Request, p *persona
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// shellPause holds back or resumes writes on this window's lifeline and ops
+// view, so their queues really fill.
+func (a *App) shellPause(w http.ResponseWriter, r *http.Request, p *persona) {
+	conn := r.URL.Query().Get("conn")
+	v, ok := a.shell.pausers.Load(conn)
+	if !ok || a.shell.owner(p, conn) != nil {
+		http.Error(w, "This window has no lifeline", http.StatusNotFound)
+		return
+	}
+	v.(*pauser).set(r.URL.Query().Get("on") == "1")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (a *App) shellRecoverBoard(w http.ResponseWriter, r *http.Request, p *persona) {
 	conn := r.URL.Query().Get("conn")
 	if a.shell.owner(p, conn) != nil || !a.shell.holds.take(conn) {
@@ -246,7 +292,11 @@ func (a *App) shellPage(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	err := shellPageTmpl.Execute(w, map[string]any{"P": p, "Conn": newConnID(), "Lead": p.role.seesInternal})
+	delay := ""
+	if r.URL.Query().Get("slow") == "1" {
+		delay = "1s"
+	}
+	err := shellPageTmpl.Execute(w, map[string]any{"P": p, "Conn": newConnID(), "Lead": p.role.seesInternal, "Delay": delay})
 	if err != nil {
 		a.logger.Error("render shell page", "err", err)
 	}
