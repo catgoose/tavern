@@ -151,14 +151,16 @@ const (
 	feedRepairMax  = 2 * time.Second
 )
 
-// feedRepair republishes the feed after a feed update is dropped. A drop
-// means some feed stream's queue was full, so its page may keep an old
-// activity list or counts with no later change to correct them. Republishing
-// the current feed replaces them once that stream drains; earlier queued
-// updates arrive first, so the newest state lands last. At most one
-// republish is pending, and they stop once one goes out without a drop.
+// feedRepair republishes whole representations after one of them is
+// dropped. A drop means some stream's queue was full, so its page may keep
+// an old value with no later change to correct it. Republishing the current
+// values replaces it once that stream drains; earlier queued updates arrive
+// first, so the newest state lands last. At most one republish is pending,
+// and they stop once one goes out without a drop. The collaboration feed and
+// the app shell each have one.
 type feedRepair struct {
 	mu        sync.Mutex
+	match     func(topic string) bool // topics this repair covers
 	base, max time.Duration
 	delay     time.Duration
 	timer     *time.Timer
@@ -168,14 +170,14 @@ type feedRepair struct {
 	republish func()
 }
 
-func (f *feedRepair) init(republish func()) {
-	f.base, f.max, f.delay, f.republish = feedRepairBase, feedRepairMax, feedRepairBase, republish
+func (f *feedRepair) init(match func(topic string) bool, republish func()) {
+	f.base, f.max, f.delay, f.match, f.republish = feedRepairBase, feedRepairMax, feedRepairBase, match, republish
 }
 
 // onDrop is the broker's publish-drop callback. It runs in the publishing
 // goroutine, which holds collab.mu, so it only schedules.
 func (f *feedRepair) onDrop(topic string) {
-	if !strings.HasPrefix(topic, "collab/activity/") && !strings.HasPrefix(topic, "collab/stats/") {
+	if !f.match(topic) {
 		return
 	}
 	f.mu.Lock()
@@ -242,13 +244,13 @@ var (
 
 func newCollab(b *tavern.SSEBroker) *collab {
 	c := &collab{broker: b, nextID: 1, tasks: map[int]*collabTask{}, inbox: map[string][]notice{}}
-	c.feed.init(func() {
+	c.feed.init(func(topic string) bool {
+		return strings.HasPrefix(topic, "collab/activity/") || strings.HasPrefix(topic, "collab/stats/")
+	}, func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		c.publishFeedLocked()
 	})
-	// The broker supports one drop callback; this app uses it only here.
-	b.OnPublishDrop(func(topic string, _ int) { c.feed.onDrop(topic) })
 	alice, _ := personaByID("alice")
 	bob, _ := personaByID("bob")
 	c.mu.Lock()

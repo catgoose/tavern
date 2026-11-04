@@ -60,6 +60,7 @@ type App struct {
 	collab        *collab
 	collabStreams collabStreams
 	lab           *lab
+	shell         *shell
 }
 
 func NewApp(cfg Config, logger *slog.Logger) *App {
@@ -88,6 +89,13 @@ func NewApp(cfg Config, logger *slog.Logger) *App {
 	a.registerShowcase()
 	a.registerCollab()
 	a.registerLab()
+	a.registerShell()
+	// The broker supports one drop callback. Each repair checks the topic
+	// and only schedules, so this is safe in the publishing goroutine.
+	a.broker.OnPublishDrop(func(topic string, _ int) {
+		a.collab.feed.onDrop(topic)
+		a.shell.repair.onDrop(topic)
+	})
 	return a
 }
 
@@ -99,6 +107,8 @@ func (a *App) Shutdown() {
 	a.broker.SetRetryAll(a.cfg.RetryOnClose)
 	close(a.done)
 	a.collabStreams.holds.close()
+	a.shell.holds.close()
+	a.shell.repair.close()
 	a.collab.feed.close()
 	a.broker.Close()
 }

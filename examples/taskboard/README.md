@@ -173,6 +173,99 @@ optionally surrounded by whitespace; anything after it is refused (400).
 The task ID must match the URL. Browser dedup is per element and
 URL; it is not server-side idempotency.
 
+
+**App shell** (`/showcase/shell`) keeps one connection, the *lifeline*,
+open for the whole page and swaps views in and out below it, each with its
+own stream. Open it as Alice, and as Bob in a second window.
+
+1. Switch between **Board**, **Feeds** and **Ops**. The notices at the top
+   keep arriving; the lifeline never reconnects. **Show server state**
+   lists what the server holds for this window.
+2. **Follow** a channel: the server adds its topic to this window's
+   lifeline (`AddTopic`), which receives the channel's latest post at once
+   and every later one, and lists the topic. **Unfollow** removes it. As
+   Alice, **Add for every lead** adds the leads channel to every lead's
+   lifeline (`AddTopicForScope`); Bob's never gets it.
+3. In **Feeds**, publish to the three topics: only the two under
+   `shell/feeds/` appear, each labelled with its topic.
+4. In **Board**, **Break this view's stream**: the lifeline reports the
+   fallback, notices still arrive, and the board waits. **Let it
+   reconnect**: the view starts again from a new snapshot, including changes
+   made meanwhile.
+5. **Hold back the lifeline and ops view**, post notices and record deploys
+   in the other window until the queues overflow, then **Release them**:
+   within a couple of seconds both show the current values, with nothing
+   more posted. **Open … with a slow lifeline** on the chooser shows the
+   views waiting for the lifeline to start.
+
+How it is built:
+
+- **Lifeline** (`tavern-role="lifeline"`):
+  - `SubscribeMultiWithMeta` with the window's connection ID as subscriber
+    ID, on the notices topic. Channels are added and removed only from a
+    fixed allowlist, and only for a connection owned by the requesting
+    person.
+  - A second subscription, scoped to the person's role and with the same
+    subscriber ID, carries role notes. Its scope is also what
+    `AddTopicForScope` matches: a multi-subscription has no scope of its
+    own.
+  - Topics added this way are plain subscriptions. They start with the
+    topic's latest cached message, if there is one, but do not inherit
+    other options.
+  - The page shows the topic list from each `tavern:topics-changed` event.
+  - Notices, channel posts and role notes are whole representations. If
+    one is dropped from a full queue, the server republishes the current
+    ones (the collaboration feed's repair, 200 ms then backing off to 2 s),
+    so the lifeline catches up without reconnecting or losing the topics it
+    follows.
+  - Views wait for the lifeline: the navigation stays disabled, and the first
+    view is requested only once the lifeline's first message shows that the
+    server has registered it.
+- **Views** (`tavern-role="scoped"`):
+  - Each view element is swapped in by htmx and bound by tavern-js, which
+    registers it under its `tavern-scope` name as *warming*, then *ready*
+    when its connection opens.
+  - The page promotes it to *active* only when every value the view starts
+    from (`data-ready-events`) has arrived since it was mounted or last
+    reconnected, and it is still the view on screen. An open connection is
+    not a loaded view.
+  - Leaving a view retires its entry. Retiring only changes tavern-js's
+    registry: the connection closes because htmx cleans up the element it
+    swaps out, and the server's handler then unsubscribes.
+  - Navigation requests replace each other (`hx-sync`), so a slow earlier
+    response never lands.
+- **Board view**: `SubscribeMultiWith` over two topics with
+  `SubWithDisconnectOnLoss` and `SubWithStatus`, checked once with
+  `ValidateSubscribeOptions`. The snapshot is taken and the subscription
+  registered under the shell's lock, and the snapshot is written once,
+  before any message, with `WithStreamSnapshot`. (`SubWithSnapshot` on a
+  multi-topic subscription queues one copy per topic, and the merged stream
+  can deliver the second copy after a newer change.) A stream that falls
+  behind ends, and the next one starts from a new snapshot.
+- **Feeds view**: `SubscribeGlobWith("shell/feeds/**")` with a ready frame
+  from `WithStreamSnapshot`. Glob subscriptions cannot take a snapshot or be
+  loss-aware, so this view is live only and best effort: it shows what
+  arrives while it is open, keeps the newest eight, and an item dropped from
+  a full queue is not sent again.
+- **Ops view**: a static group (`DefineGroup`, `GroupHandler`) of two
+  topics whose latest values are kept with `PublishWithReplay`. Opening the
+  view starts from both, and it is active only once both have arrived. The
+  group stream is not loss-aware, so a dropped value is repaired like the
+  lifeline's.
+- **Breaking the board stream** reuses the collaboration scenario's bounded
+  holds. tavern-js raises `tavern:stream-fallback` on the lifeline for an
+  *active* scoped stream that errors. The lifeline does not carry the
+  board's data; the view recovers by reconnecting and taking a new snapshot.
+
+`tavern-scope` names a stream in tavern-js's registry. It is not a broker
+scope (`SubWithScope`), and neither grants access. Every request names a
+person. Requests about a window's connection (the lifeline itself, view
+streams, following channels, holding back, breaking and recovering the
+board, and the server state) are refused unless that connection's lifeline
+is open and belongs to the person. Shared actions (posting notices and
+channel posts, role notes, board tasks, feed items and ops events) take
+only the person. `ScopedTopic` only builds
+colon-separated topic names; glob patterns match slash-separated paths.
 ## How it works
 
 - **Canonical state lives on the server** (`board.go`). Columns and the
@@ -238,7 +331,11 @@ resume replays what it missed before `tavern-reconnected`. `collab_test.go` read
 collaboration streams: snapshots and live fragments per person, the inbox
 scope and filter, the feed group, one batched event for the bulk action, a
 change made while a snapshot is being taken, reconnect after changes, and
-malformed input. `lab_test.go` checks the lab's JSON commands, races two saves from one
+malformed input. `shell_test.go` checks lifeline ownership, topic changes by window and by
+role, the glob and group streams, one board snapshot before every change,
+board recovery after loss, lifeline and ops recovery after a dropped final
+update (and staleness with repair off), the break hold, and release on
+cancel and shutdown. `lab_test.go` checks the lab's JSON commands, races two saves from one
 revision, saves a deleted task, scopes resync to its window, and bounds
 bursts. `collab_recovery_test.go` drops a feed's final updates
 and checks that it still converges with no further change, and that it does
@@ -276,6 +373,14 @@ purpose declares it. The tests:
   window reconnecting after deletes, renames and additions without
   duplicate, missing or deleted cards; and a paused feed that dropped
   updates catching up after the board goes quiet;
+- in the app shell: one lifeline request and the same subscriber counts
+  after switching views back and forth; topics added and removed on the
+  lifeline, by window and by role; glob and group views; a broken view
+  falling back and recovering while notices arrive; an aborted slow view
+  response; a view left while its stream was opening never promoted; a
+  slow lifeline with no early view requests; an ops view missing one value
+  not promoted; a held-back lifeline and ops view catching up once the
+  producer is quiet;
 - in the interaction lab: one vote per click, Enter and double click; a
   vote whose button is replaced mid-gesture sent once; a refused command
   reported; pointer release outside the region and a cancelled touch; an
