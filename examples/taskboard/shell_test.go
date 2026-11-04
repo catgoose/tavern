@@ -329,3 +329,36 @@ func TestShellOpsViewNeedsTheWindowsLifeline(t *testing.T) {
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
+
+// TestShellOpsIsReleasedWhenItsLifelineEnds pauses a window's ops view,
+// leaves a deploy waiting in it, and ends only the lifeline. The waiting
+// update is delivered, and once the same window opens a new lifeline the
+// ops view follows the new window's pause control.
+func TestShellOpsIsReleasedWhenItsLifelineEnds(t *testing.T) {
+	tb := newTestBoard(t, DefaultConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", tb.srv.URL+"/showcase/shell/lifeline?as=alice&conn=a", http.NoBody)
+	require.NoError(t, err)
+	resp, err := tb.srv.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	ops := openSSE(t, tb, "/showcase/shell/views/ops/events?as=alice&conn=a")
+	nextN(t, ops, 2)
+	require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/pause?conn=a&on=1"))
+	require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/ops/deploy"))
+	none(t, ops)
+
+	cancel()
+	require.Eventually(t, func() bool { return tb.app.shell.owner(personas[0], "a") != nil }, 2*time.Second, time.Millisecond)
+	// A deploy republishes both counts.
+	assert.Contains(t, nextN(t, ops, 2)["shell/ops/deploys"], "1 deploys", "ending the lifeline releases its pause")
+
+	lifeline(t, tb, "alice", "a")
+	require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/pause?conn=a&on=1"))
+	require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/ops/deploy"))
+	none(t, ops)
+	require.Equal(t, http.StatusNoContent, tb.shellPost(t, "alice", "/pause?conn=a&on=0"))
+	assert.Contains(t, nextN(t, ops, 2)["shell/ops/deploys"], "2 deploys", "the new lifeline's control applies")
+}

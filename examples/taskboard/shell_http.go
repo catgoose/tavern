@@ -26,13 +26,7 @@ func (a *App) registerShell() {
 			http.Error(w, "Open the shell first", http.StatusNotFound)
 			return
 		}
-		// The lifeline owns the window's pause control; there is none
-		// once it has closed.
-		if v, ok := a.shell.pausers.Load(conn); ok {
-			gate := v.(*pauser)
-			w = pausableWriter{w, func() { gate.wait(r.Context(), a.done) }}
-		}
-		ops.ServeHTTP(w, r)
+		ops.ServeHTTP(pausableWriter{w, func() { a.shell.waitPaused(r.Context(), conn, a.done) }}, r)
 	}))
 	a.mux.HandleFunc("POST /showcase/shell/pause", a.withPersona(a.shellPause))
 	a.mux.HandleFunc("POST /showcase/shell/ops/forget-alerts", a.withPersona(func(w http.ResponseWriter, _ *http.Request, _ *persona) {
@@ -90,8 +84,7 @@ func (a *App) shellLifeline(w http.ResponseWriter, r *http.Request, p *persona) 
 		return
 	}
 	defer unsub()
-	gate := a.shell.pauser(conn)
-	w = pausableWriter{w, func() { gate.wait(r.Context(), a.done) }}
+	w = pausableWriter{w, func() { a.shell.waitPaused(r.Context(), conn, a.done) }}
 	err = tavern.StreamSSE(r.Context(), w, ch, shellFrame,
 		tavern.WithStreamHeartbeat(a.cfg.Heartbeat),
 		tavern.WithStreamWriteTimeout(a.cfg.WriteTimeout),

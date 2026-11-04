@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,7 +78,7 @@ type shell struct {
 	feedN       int
 
 	boardStreams sync.Map // connection id → *droppableStream
-	pausers      sync.Map // connection id → *pauser for its lifeline and ops view
+	pausers      sync.Map // connection id → *pauser owned by its open lifeline, shared with its ops view
 	holds        holds
 	repair       feedRepair
 	done         <-chan struct{}
@@ -157,6 +158,8 @@ func (s *shell) openLifeline(p *persona, conn string) (msgs <-chan tavern.TopicM
 		return nil, nil, errAdmission
 	}
 	s.lifelines[conn] = p
+	gate := &pauser{resume: make(chan struct{})}
+	s.pausers.Store(conn, gate)
 
 	// Merge both into one stream. It ends when either source closes (the
 	// broker closed or dropped it) or when the handler unsubscribes.
@@ -213,9 +216,12 @@ func (s *shell) openLifeline(p *persona, conn string) (msgs <-chan tavern.TopicM
 			s.mu.Lock()
 			if s.lifelines[conn] == p {
 				delete(s.lifelines, conn)
-				s.pausers.Delete(conn)
 			}
+			s.pausers.CompareAndDelete(conn, gate)
 			s.mu.Unlock()
+			// A write still waiting on this lifeline's pause would wait
+			// forever: nothing can reach the gate any more.
+			gate.set(false)
 		})
 	}, nil
 }
@@ -384,10 +390,13 @@ func (s *shell) forgetAlerts() {
 	s.broker.ClearReplay(topicOpsAlerts)
 }
 
-// pauser returns the pause control shared by conn's lifeline and ops view.
-func (s *shell) pauser(conn string) *pauser {
-	v, _ := s.pausers.LoadOrStore(conn, &pauser{resume: make(chan struct{})})
-	return v.(*pauser)
+// waitPaused waits while conn's current lifeline has paused its streams.
+// Each write looks the gate up again, so a stream that outlives one
+// lifeline follows the next one's control.
+func (s *shell) waitPaused(ctx context.Context, conn string, done <-chan struct{}) {
+	if v, ok := s.pausers.Load(conn); ok {
+		v.(*pauser).wait(ctx, done)
+	}
 }
 
 // Diagnostics: what the server holds for a window, read from the broker.
