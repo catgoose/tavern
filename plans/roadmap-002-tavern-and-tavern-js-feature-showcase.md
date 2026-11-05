@@ -78,10 +78,10 @@
   - Plan: .agents/.local/plans/handoff-032-scoped-ttl-replay-isolation-and-expiry-routing.md
   - Review: https://github.com/catgoose/tavern/pull/248 (merged); reviewed head 38f231be9e6be7d6d61a2ffb36500cde2b0ed1b6, merge commit f8f5588cd77159a031f1853b67bfd858ccff59d3; #245 closed. Adds replay audience metadata, optional store scope support and same-topic red/blue/unscoped expiry evidence; 62 browser cases pass. Existing replay-retention and external-store auto-removal limits remain documented.
 
-- [ ] Pass 009: Complete coverage and evaluation experience.
+- [x] Pass 009: Complete coverage and evaluation experience.
   - Requirements: Resolve every uncovered matrix entry through a working scenario or runnable exercise, with explicit treatment of aliases and test-helper APIs. Complete browser coverage of two-user updates, scope isolation, idle-after-edit convergence, hot commands, navigation/teardown, reconnect/gaps and pressure recovery. Check keyboard/status accessibility, source links, startup/reset instructions, pinned asset reproduction and bounded resource cleanup. Reconcile #128 against the original criteria and verified full-library coverage; accurately close or retain upstream issues.
   - Plan: .agents/.local/plans/handoff-033-complete-showcase-coverage-and-evaluation-experience.md
-  - Review: pending.
+  - Review: https://github.com/catgoose/tavern/pull/249 (merged); reviewed head d5dc0f4cecba08c250cebd60902cd02344abd769, merge commit 4c90150f25863879568b9477c0aa6cb08a969d1d. Required CI passed; 70 browser cases passed on pinned Chromium and Chrome. Adds remaining runnable API exercises, client lifecycle/ordering coverage and owned test controls. #128 is closed and #187 Phase 4 is reconciled; #187 remains open for #151/#154. Best-effort control delivery and TTL limits stay explicit in COVERAGE.md.
 
 ## Review Risks
 
@@ -93,16 +93,16 @@
 - Failure controls need deterministic bounded ownership; avoid global sleeps, unbounded logs, shared cross-scenario pressure or cleanup of resources the demo did not create.
 - Browser assets must be pinned with provenance/licenses, and browser CI must participate in the existing required aggregate check. Optional adapters must not raise core dependencies.
 - Separate repositories have separate worktrees, CI and review baselines; consume only reviewed upstream revisions and preserve existing local changes.
-- PR #247 fixes the interaction-lab double removal behind `htmx:oobErrorNoTarget #lab-edit-6` with a placeholder and 40 repeated delete-test passes. Final closure still needs deterministic regression evidence (a server/writer barrier can control delivery without browser SSE interception) and must stabilize the separate refused-command test's 1,050 ms burst-timing assumption. Preserve evidence and narrow error checks. Retain documented TTL limitations and honest Partial entries until their delivered evidence is reconciled.
+- PR #249 adds deterministic coverage of both interaction-lab delete orders and holds a burst active while testing command refusal, removing the finite-burst timing assumption. Test controls are disabled by default, owned by live streams and expire after 30 seconds. Coverage still identifies best-effort escalation/replay hints that may be dropped, replay-retention loss of auto-remove, and external-store auto-remove limits; these are not counted as successful client event delivery.
 
-## Deferred Questions
+## Resolved Decisions
 
-- The initial public-capability inventory determines the exact scenario grouping; group API aliases without silently omitting capabilities. New APIs added during the lane must be considered before completion.
-- Resolve the precise live-form insulation and post-suppression recipe from #50/#53 evidence. Prefer the smallest server-authoritative solution; an issue does not mandate a particular new API.
-- Choose the smallest maintained browser harness that runs locally and in CI with pinned developer dependencies. There is a local Google Chrome binary; previous lack of browser evidence is not a reason to omit browser validation.
-- Headless extension points, helper APIs and optional exporters may be demonstrated through runnable server exercises linked from the showcase rather than misleading browser controls.
-- Release/tag availability can affect consumption timing of upstream fixes; pin an exact reviewed commit with provenance if a released asset is not yet available, preserving the no-build launch.
+- COVERAGE.md accounts for public capability families and aliases through browser scenarios, HTTP evidence and runnable exercises, with explicit delivery limitations.
+- The interaction lab provides application draft protection and finite reconciliation recipes. Upstream tavern-js #50/#53 remain open for their own library deliverables; #56 release metadata is separately scoped. The reviewed command-outcome fix from tavern-js #55 is consumed in v0.0.24.
+- Playwright is pinned and participates in required CI; the final 70-case suite also passed on installed Chrome. The normal application launch needs no frontend build or external browser assets.
+- Backend, exporter, primitive and test-helper exercises run from documented commands. Exporter dependencies remain in their existing optional modules.
+- The local tavern-js asset is pinned with provenance/license/digest. Future public API or asset changes should update both coverage and the integration evidence.
 
 ## Suggested Next Plan
 
-- Pass 009: finish uncovered public capabilities, deterministic browser regressions and the evaluation path; reconcile #128/#187 only against delivered evidence. Dispatch handoff-033 in roadmap-run mode.
+- None: all nine passes are reviewed and merged. The showcase lane is complete; distributed presence (#151), tenant controls (#154), upstream client deliverables and documented library limits remain separately tracked work.
