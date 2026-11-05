@@ -124,6 +124,7 @@ func (a *App) Shutdown() {
 	a.recovery.close()
 	a.delivery.close()
 	a.ops.close()
+	a.closeTestControls()
 	a.client.broker.Close()
 	a.collab.feed.close()
 	a.broker.Close()

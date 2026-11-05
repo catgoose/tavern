@@ -125,3 +125,16 @@ test("tavern-debug logs only where it is set", async ({ viewer }) => {
   await expect(regionN(debug, 1)).toHaveClass(/\bis-live\b/);
   await expect.poll(() => logs.some((l) => l.startsWith("[tavern] binding to"))).toBe(true);
 });
+
+test("regions in two windows end on the same last pulse while both send", async ({ viewer }) => {
+  const one = await openClient(viewer);
+  const two = await openClient(viewer);
+  for (const page of [one, two]) {
+    await button(page, "Add a region").click();
+    await expect(regionN(page, 1)).toHaveClass(/\bis-live\b/);
+  }
+  const send = (page) => page.evaluate(() => Promise.all(Array.from({ length: 5 }, () => fetch("/showcase/client/pulse", { method: "POST" }))));
+  await Promise.all([send(one), send(two)]);
+  const { pulses } = await one.evaluate(() => fetch("/showcase/client/state").then((r) => r.json()));
+  for (const page of [one, two]) await expect(regionN(page, 1).locator("output")).toHaveText(`pulse ${pulses}`);
+});

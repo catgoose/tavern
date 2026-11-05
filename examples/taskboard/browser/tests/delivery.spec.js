@@ -322,9 +322,9 @@ test("workflow windows opened later, or reloaded, show the model's rows and summ
 });
 
 // The reset hint is sent without waiting, right after the first message that
-// fits again. With the repair held until the released window has drained,
-// that message lands in an empty queue, so the hint arrives and tavern-js
-// reports the stream restored.
+// fits again. The repair is held until the server sees the released
+// window's queues empty, so that message and the hint both fit, and
+// tavern-js reports the stream restored.
 test("a window that recovers from backpressure gets the restored hint", async ({ viewer }) => {
   const page = await open(viewer, "pressure");
   await expect(page.locator("#gauge [data-value]")).toBeAttached();
@@ -345,7 +345,7 @@ test("a window that recovers from backpressure gets the restored hint", async ({
       return mine.length > 0 && !mine[0].endsWith("→ normal");
     }).toBe(true);
     await button(page, "Release it").click();
-    await page.waitForTimeout(500); // the backlog is written; the queue is empty
+    expect(await control(`/test/pressure/repair?hold=0&drained=${conn}`)).toBe(204);
   } finally {
     await control("/test/pressure/repair?hold=0");
   }

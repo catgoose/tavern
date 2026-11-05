@@ -469,7 +469,7 @@ test("a deleting window ends without the card whether its response or the stream
   const first = await addTask(alice, `Response first ${Date.now()}`);
   await expect(editCard(bob, first)).toBeVisible();
   const firstID = await editCard(bob, first).getAttribute("id");
-  expect(await control(bob, `/test/lab/hold?conn=${conn}&on=1`)).toBe(204);
+  expect(await control(bob, `/test/lab/hold?as=bob&conn=${conn}&on=1`)).toBe(204);
   try {
     const answered = bob.waitForResponse((r) => r.url().includes("/delete?as=bob") || r.url().endsWith("/delete"));
     await editCard(bob, first).getByRole("button", { name: "Delete" }).click();
@@ -477,7 +477,7 @@ test("a deleting window ends without the card whether its response or the stream
     await expect(bob.locator(`#${firstID}`)).toBeHidden(); // the placeholder, still waiting for the stream
     await expect(bob.locator(`#${firstID}`)).toHaveCount(1);
   } finally {
-    await control(bob, `/test/lab/hold?conn=${conn}&on=0`);
+    await control(bob, `/test/lab/hold?as=bob&conn=${conn}&on=0`);
   }
   await expect(bob.locator(`#${firstID}`)).toHaveCount(0); // the stream's delete removed the placeholder
 

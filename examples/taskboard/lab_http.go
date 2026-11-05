@@ -73,23 +73,15 @@ func (a *App) labEvents(w http.ResponseWriter, r *http.Request, p *persona) {
 		return
 	}
 	status := tavern.NewSubscriptionStatus()
-	ch, unsub := a.lab.subscribe(p, region, r.URL.Query().Get("conn"), status)
+	ch, hold, unsub := a.lab.subscribe(p, region, r.URL.Query().Get("conn"), status)
 	if ch == nil {
 		http.Error(w, "Too many connections, try again shortly", http.StatusServiceUnavailable)
 		return
 	}
 	defer unsub()
 	out := http.ResponseWriter(w)
-	if a.lab.holds != nil {
-		// With test controls, a window's writes can be held back; the hold
-		// is looked up on each write, so one set after the stream opened
-		// still applies.
-		conn := r.URL.Query().Get("conn")
-		out = pausableWriter{w, func() {
-			if v, ok := a.lab.holds.Load(conn); ok {
-				v.(*pauser).wait(r.Context(), a.done)
-			}
-		}}
+	if hold != nil {
+		out = pausableWriter{w, func() { hold.wait(r.Context(), a.done) }}
 	}
 	err := tavern.StreamSSE(r.Context(), out, ch, func(msg string) string { return msg },
 		tavern.WithStreamHeartbeat(a.cfg.Heartbeat),

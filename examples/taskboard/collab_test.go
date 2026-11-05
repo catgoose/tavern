@@ -20,6 +20,13 @@ type sseEvent struct{ name, data string }
 // arrive. The channel closes when the stream ends.
 func openSSE(t *testing.T, tb *testBoard, path string) <-chan sseEvent {
 	t.Helper()
+	events, _ := openSSECancel(t, tb, path)
+	return events
+}
+
+// openSSECancel is openSSE with a function that ends the request.
+func openSSECancel(t *testing.T, tb *testBoard, path string) (<-chan sseEvent, context.CancelFunc) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	req, err := http.NewRequestWithContext(ctx, "GET", tb.srv.URL+path, http.NoBody)
@@ -52,7 +59,7 @@ func openSSE(t *testing.T, tb *testBoard, path string) <-chan sseEvent {
 			}
 		}
 	}()
-	return events
+	return events, cancel
 }
 
 func next(t *testing.T, events <-chan sseEvent) sseEvent {

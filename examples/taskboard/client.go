@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"sync/atomic"
+	"sync"
 
 	"github.com/catgoose/tavern"
 )
@@ -20,10 +20,16 @@ const (
 	clUpdateMs = 400
 )
 
+// pubMu orders each pulse's change and publish, and each new stream's
+// snapshot and subscription, so a stream starts from the value its first
+// live message follows and every stream sees the pulses in order.
 type clientLab struct {
 	broker *tavern.SSEBroker
 	reg    connRegistry
-	seq    atomic.Int64
+	pubMu  sync.Mutex
+	seq    int64
+
+	opening func() // tests: called between a stream's snapshot and subscription
 }
 
 func newClientLab() *clientLab {
@@ -31,9 +37,32 @@ func newClientLab() *clientLab {
 }
 
 func (l *clientLab) pulse() int64 {
-	n := l.seq.Add(1)
-	l.broker.Publish(clTopic, tavern.NewSSEMessage("pulse", fmt.Sprintf("pulse %d", n)).String())
-	return n
+	l.pubMu.Lock()
+	defer l.pubMu.Unlock()
+	l.seq++
+	l.broker.Publish(clTopic, tavern.NewSSEMessage("pulse", fmt.Sprintf("pulse %d", l.seq)).String())
+	return l.seq
+}
+
+func (l *clientLab) pulses() int64 {
+	l.pubMu.Lock()
+	defer l.pubMu.Unlock()
+	return l.seq
+}
+
+// open subscribes conn and returns the current value, to be written first.
+func (l *clientLab) open(conn string) (msgs <-chan tavern.TopicMessage, unsubscribe func(), snapshot string, err error) {
+	l.pubMu.Lock()
+	defer l.pubMu.Unlock()
+	snap := tavern.NewSSEMessage("pulse", fmt.Sprintf("pulse %d", l.seq)).String()
+	if l.opening != nil {
+		l.opening()
+	}
+	msgs, unsubscribe, err = openAll(func() (keyedSub, error) {
+		ch, unsub := l.broker.SubscribeWith(clTopic, tavern.SubWithMeta(tavern.SubscribeMeta{ID: conn}))
+		return subOrErr(clTopic, ch, unsub)
+	})
+	return msgs, unsubscribe, snap, err
 }
 
 func (a *App) registerClient() {
@@ -49,20 +78,13 @@ func (a *App) registerClient() {
 	a.mux.HandleFunc("GET /showcase/client/events", func(w http.ResponseWriter, r *http.Request) {
 		// The current value goes first: the response, and so the browser's
 		// connection, opens with it.
-		a.serveOwned(w, r, ownedStream{reg: &l.reg, openSnapshot: func(conn string) (<-chan tavern.TopicMessage, func(), string, error) {
-			snap := tavern.NewSSEMessage("pulse", fmt.Sprintf("pulse %d", l.seq.Load())).String()
-			ch, unsub, err := openAll(func() (keyedSub, error) {
-				ch, unsub := l.broker.SubscribeWith(clTopic, tavern.SubWithMeta(tavern.SubscribeMeta{ID: conn}))
-				return subOrErr(clTopic, ch, unsub)
-			})
-			return ch, unsub, snap, err
-		}})
+		a.serveOwned(w, r, ownedStream{reg: &l.reg, openSnapshot: l.open})
 	})
 	a.mux.HandleFunc("POST /showcase/client/pulse", func(w http.ResponseWriter, _ *http.Request) {
 		l.pulse()
 		w.WriteHeader(http.StatusNoContent)
 	})
 	a.mux.HandleFunc("GET /showcase/client/state", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"subscriptions": l.broker.SubscriberCount(), "pulses": l.seq.Load()})
+		writeJSON(w, map[string]any{"subscriptions": l.broker.SubscriberCount(), "pulses": l.pulses()})
 	})
 }

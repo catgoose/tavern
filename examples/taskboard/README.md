@@ -723,7 +723,10 @@ restart, a stream still opening when the child shuts down, no child
 starting after the app shuts down, starts and shutdowns racing the final
 close, background work refused once a lab stops, and shutdown of the whole
 lab. `testcontrols_test.go` checks that the `/test/` endpoints exist only
-with `-test-controls`, and that a held burst is refused until released.
+with `-test-controls`, and that holds are refused for unknown or other
+personas' windows, end with their stream or request, release themselves,
+and are released at shutdown. `client_test.go` checks that pulses reach
+every stream in order and that a stream being set up misses none.
 `examples/primitives`, `examples/taverntest` and `examples/backends` each
 test their own output.
 
@@ -740,10 +743,13 @@ TASKBOARD_BROWSER_CHANNEL=chrome make browser-test   # use installed Google Chro
 
 The tests build the app, start it on a free local port with
 `-test-controls`, and stop it afterwards. That flag adds endpoints under
-`/test/` that let a test order events a browser cannot: hold back one
-window's lab stream (an EventSource cannot be intercepted), keep a lab burst
-running, and hold the pressure page's repair. They are not registered
-without the flag. Each window gets its own browser context. Every page fails its
+`/test/` that let a test order events a browser cannot: hold back the
+writes of one persona's open lab window (an EventSource cannot be
+intercepted), keep a lab burst running, and hold the pressure page's repair
+until a window's queues are empty. A window hold belongs to that window's
+open streams and ends with each of them; every hold releases itself after
+30 seconds and at shutdown, and none can be set after shutdown. They are
+not registered without the flag. Each window gets its own browser context. Every page fails its
 test on a page error, a console error, a failed request, a 4xx or 5xx
 response, or a request to any other host; a test that causes an error on
 purpose declares it. The tests:
@@ -819,7 +825,8 @@ purpose declares it. The tests:
   no listeners; regions added after destroy streaming unbound until scanned
   or initialized; destroy emptying the registry while connections stay;
   removed regions' connections closing with no accumulation over five
-  rounds; and debug logging only where `tavern-debug` is set;
+  rounds; debug logging only where `tavern-debug` is set; and two windows
+  sending at once ending on the same last pulse;
 - also: a lab delete in both orders (the window's response first, and the
   stream's delete first), the refused burst held running by a test control,
   the restored backpressure hint reaching tavern-js, the gap banner's

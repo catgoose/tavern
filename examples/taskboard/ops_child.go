@@ -19,15 +19,15 @@ import (
 // that belonged to the old one never touches it. When the app shuts down
 // the lab is closed for good and no child starts again.
 const (
-	chTopic    = "ops:child"
-	chTick     = 500 * time.Millisecond
-	chSlow     = 300 * time.Millisecond
+	chTopic = "ops:child"
+	chTick  = 500 * time.Millisecond
+	chSlow  = 300 * time.Millisecond
 	// chGrace lets established streams write what is queued, such as the
 	// retry: the slow stream's full queue takes about 1.8 s at 300 ms a
 	// frame. Streams still running after it are cancelled.
 	chGrace    = 2 * time.Second
 	chDrainMax = 4 * time.Second
-	chRetry    = 4 * time.Second        // reconnect delay sent before shutting down
+	chRetry    = 4 * time.Second // reconnect delay sent before shutting down
 )
 
 // child is one generation of the child broker.
