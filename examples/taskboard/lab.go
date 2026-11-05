@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html/template"
@@ -50,6 +51,7 @@ type labTask struct {
 type labConn struct {
 	p      *persona
 	region string
+	hold   *testHold // with test controls; closed when the stream ends
 }
 
 type lab struct {
@@ -61,6 +63,11 @@ type lab struct {
 	conns  map[string]*labConn // stream key → connection, while open
 	burst  bool                // a simulated burst is running
 	done   <-chan struct{}     // closed at shutdown
+
+	// With test controls, each stream gets a hold and holdBurst keeps a
+	// finished burst running until it is released.
+	testControls bool
+	holdBurst    *testHold
 }
 
 func newLab(b *tavern.SSEBroker, done <-chan struct{}) *lab {
@@ -114,7 +121,7 @@ func (l *lab) sorted() []*labTask {
 // subscribe opens a region stream for conn. Like the collaboration board,
 // the snapshot is taken and the stream registered under mu, so no change
 // falls between them.
-func (l *lab) subscribe(p *persona, region, conn string, status *tavern.SubscriptionStatus) (msgs <-chan string, unsubscribe func()) {
+func (l *lab) subscribe(p *persona, region, conn string, status *tavern.SubscriptionStatus) (msgs <-chan string, hold *testHold, unsubscribe func()) {
 	key := labKey(conn, region)
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -125,18 +132,45 @@ func (l *lab) subscribe(p *persona, region, conn string, status *tavern.Subscrip
 		tavern.SubWithStatus(status),
 	)
 	if ch == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	c := &labConn{p: p, region: region}
+	if l.testControls {
+		c.hold = newTestHold(testHoldMax)
+	}
 	l.conns[key] = c
-	return ch, func() {
+	return ch, c.hold, func() {
 		unsub()
 		l.mu.Lock()
 		if l.conns[key] == c {
 			delete(l.conns, key)
 		}
 		l.mu.Unlock()
+		if c.hold != nil {
+			c.hold.close()
+		}
 	}
+}
+
+// holdWindow holds back or releases the writes of every stream p has open
+// on conn. Streams opened later are not held.
+func (l *lab) holdWindow(p *persona, conn string, on bool) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	found := false
+	for key, c := range l.conns {
+		if c.hold == nil || c.p != p || key != labKey(conn, c.region) {
+			continue
+		}
+		if err := c.hold.set(on); err != nil {
+			return err
+		}
+		found = true
+	}
+	if !found {
+		return errNotFound
+	}
+	return nil
 }
 
 // resync sends conn's region a fresh snapshot on its own stream. The
@@ -319,6 +353,9 @@ func (l *lab) startBurst(by *persona, count int) error {
 
 	go func() {
 		defer func() {
+			if l.holdBurst != nil {
+				l.holdBurst.wait(context.Background(), l.done)
+			}
 			l.mu.Lock()
 			l.burst = false
 			l.mu.Unlock()

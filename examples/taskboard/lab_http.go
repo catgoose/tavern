@@ -73,13 +73,17 @@ func (a *App) labEvents(w http.ResponseWriter, r *http.Request, p *persona) {
 		return
 	}
 	status := tavern.NewSubscriptionStatus()
-	ch, unsub := a.lab.subscribe(p, region, r.URL.Query().Get("conn"), status)
+	ch, hold, unsub := a.lab.subscribe(p, region, r.URL.Query().Get("conn"), status)
 	if ch == nil {
 		http.Error(w, "Too many connections, try again shortly", http.StatusServiceUnavailable)
 		return
 	}
 	defer unsub()
-	err := tavern.StreamSSE(r.Context(), w, ch, func(msg string) string { return msg },
+	out := http.ResponseWriter(w)
+	if hold != nil {
+		out = pausableWriter{w, func() { hold.wait(r.Context(), a.done) }}
+	}
+	err := tavern.StreamSSE(r.Context(), out, ch, func(msg string) string { return msg },
 		tavern.WithStreamHeartbeat(a.cfg.Heartbeat),
 		tavern.WithStreamWriteTimeout(a.cfg.WriteTimeout),
 		tavern.WithStreamWriteErrors(),

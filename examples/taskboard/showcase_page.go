@@ -16,6 +16,7 @@ const showcaseHTML = `<!doctype html>
 <p>Working scenarios for Tavern and tavern-js. Each one runs against this server.</p>
 <ul class="scenarios">
   <li><a href="/showcase/connection">Connection and live updates</a>: tavern-js connection state, a live counter, and reconnecting with replay.</li>
+  <li><a href="/showcase/client">tavern-js lifecycle</a>: regions added and removed by the page, Tavern.init, bind, scanAndBind and destroy, the stream registry, the updated class and debug logging.</li>
   <li><a href="/showcase/ops">Operations lab</a>: presence across tabs, connection events and metrics, admission limits, transport lifetimes and write failures, and shutting down an owned broker.</li>
   <li><a href="/showcase/delivery">Delivery lab</a>: change-only and lazy rendering, debounce and throttle, expiring messages, batches and ordering, rate limits and coalescing, adaptive backpressure, reactive hooks and scheduled sections.</li>
   <li><a href="/showcase/recovery">Recovery lab</a>: resume with Last-Event-ID, gaps and snapshots, truncated replay, full queues, eviction and replay store failures, each recovering to the current value.</li>

@@ -52,7 +52,8 @@ export default async function globalSetup() {
 
   const port = await freePort();
   const url = `http://127.0.0.1:${port}`;
-  const app = spawn(bin, ["-addr", `127.0.0.1:${port}`], { stdio: ["ignore", "inherit", "inherit"] });
+  // -test-controls adds the /test/ endpoints some tests use to order events.
+  const app = spawn(bin, ["-addr", `127.0.0.1:${port}`, "-test-controls"], { stdio: ["ignore", "inherit", "inherit"] });
   try {
     await waitUntilServing(url, app, Date.now() + 15_000);
   } catch (err) {

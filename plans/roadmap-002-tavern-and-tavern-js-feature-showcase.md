@@ -73,14 +73,14 @@
   - Plan: .agents/.local/plans/handoff-030-presence-and-operational-diagnostics-exercises.md
   - Review: https://github.com/catgoose/tavern/pull/247 (merged); reviewed head 43b937b6f1a50473cd20d6908fe606e5c5acfd5a, merge commit e86608135bc1f50436f5d2679948a699a6ed4166. Includes generation-bound request cancellation, sealed final shutdown, offline backend/exporter exercises and 61 browser cases. Also fixes the interaction-lab double removal, cross-topic test assumption and exporter label-ranking tie.
 
-- [ ] Pass 008: Scoped TTL replay isolation and expiry routing.
+- [x] Pass 008: Scoped TTL replay isolation and expiry routing.
   - Requirements: Fix confirmed core issue #245 before claiming scoped TTL coverage complete: private TTL replay reaches only its matching audience, expiry deletions retain scope, unscoped behavior stays compatible, and every relevant in-memory/external replay read path is tested. Keep the fix in a separate reviewed PR. This bounded prerequisite was split from final closure after the showcase exposed a real replay-isolation defect; final closure retains all original requirements in pass 009.
   - Plan: .agents/.local/plans/handoff-032-scoped-ttl-replay-isolation-and-expiry-routing.md
-  - Review: pending.
+  - Review: https://github.com/catgoose/tavern/pull/248 (merged); reviewed head 38f231be9e6be7d6d61a2ffb36500cde2b0ed1b6, merge commit f8f5588cd77159a031f1853b67bfd858ccff59d3; #245 closed. Adds replay audience metadata, optional store scope support and same-topic red/blue/unscoped expiry evidence; 62 browser cases pass. Existing replay-retention and external-store auto-removal limits remain documented.
 
 - [ ] Pass 009: Complete coverage and evaluation experience.
   - Requirements: Resolve every uncovered matrix entry through a working scenario or runnable exercise, with explicit treatment of aliases and test-helper APIs. Complete browser coverage of two-user updates, scope isolation, idle-after-edit convergence, hot commands, navigation/teardown, reconnect/gaps and pressure recovery. Check keyboard/status accessibility, source links, startup/reset instructions, pinned asset reproduction and bounded resource cleanup. Reconcile #128 against the original criteria and verified full-library coverage; accurately close or retain upstream issues.
-  - Plan: pending.
+  - Plan: .agents/.local/plans/handoff-033-complete-showcase-coverage-and-evaluation-experience.md
   - Review: pending.
 
 ## Review Risks
@@ -105,4 +105,4 @@
 
 ## Suggested Next Plan
 
-- Pass 008: fix #245's scoped TTL replay and expiry routing in a separate PR before final coverage closure (now pass 009). Dispatch handoff-032 in roadmap-run mode. Build the closure packet only after this correctness pass is reviewed and merged.
+- Pass 009: finish uncovered public capabilities, deterministic browser regressions and the evaluation path; reconcile #128/#187 only against delivered evidence. Dispatch handoff-033 in roadmap-run mode.

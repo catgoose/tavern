@@ -33,6 +33,9 @@ type Config struct {
 	WriteTimeout   time.Duration // bounds each frame write
 	MaxSubscribers int           // admission limit; 0 = unlimited
 	RetryOnClose   time.Duration // reconnect delay sent at shutdown
+	// TestControls adds endpoints under /test/ that the browser tests use to
+	// order events deterministically. Never enable it for a real deployment.
+	TestControls bool
 }
 
 func DefaultConfig() Config {
@@ -64,6 +67,7 @@ type App struct {
 	recovery      *recovery
 	delivery      *delivery
 	ops           *ops
+	client        *clientLab
 }
 
 func NewApp(cfg Config, logger *slog.Logger) *App {
@@ -96,6 +100,8 @@ func NewApp(cfg Config, logger *slog.Logger) *App {
 	a.registerRecovery()
 	a.registerDelivery()
 	a.registerOps()
+	a.registerClient()
+	a.registerTestControls()
 	// The broker supports one drop callback. Each repair checks the topic
 	// and only schedules, so this is safe in the publishing goroutine.
 	a.broker.OnPublishDrop(func(topic string, _ int) {
@@ -118,6 +124,8 @@ func (a *App) Shutdown() {
 	a.recovery.close()
 	a.delivery.close()
 	a.ops.close()
+	a.closeTestControls()
+	a.client.broker.Close()
 	a.collab.feed.close()
 	a.broker.Close()
 }

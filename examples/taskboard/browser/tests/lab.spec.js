@@ -80,8 +80,16 @@ test("vote commands: one per gesture, keyboard too, double clicks deduplicated",
   await expect(alice.locator("#lab-log-list")).toContainText(`Alice voted for "${title}" (3)`);
 });
 
+// control posts to the app's test-only endpoints (the tests run the app
+// with -test-controls).
+const control = (page, path) => page.evaluate((p) => fetch(p, { method: "POST" }).then((r) => r.status), path);
+const labConn = (page) =>
+  page.evaluate(() => new URL(document.querySelector("#lab-editor").getAttribute("sse-connect"), location.href).searchParams.get("conn"));
+
 test("a refused command is reported, and click commands are deduplicated", async ({ viewer }) => {
-  // The second burst is refused while the first runs.
+  // The second burst is refused while the first runs. The first is held
+  // running by a test control until the refusal has been seen, so the
+  // refusal does not depend on how long a burst takes.
   const alice = await openLab(viewer, "alice", {
     expected: [
       /^409 http:\/\/127\.0\.0\.1:\d+\/showcase\/lab\/burst\?as=alice$/,
@@ -90,30 +98,35 @@ test("a refused command is reported, and click commands are deduplicated", async
   });
   const sent = commandsTo(alice, /\/burst\?as=alice$/);
   const simulate = alice.getByRole("button", { name: "Simulate 8 votes" });
-  await simulate.click();
-  await simulate.click(); // within the 1 s dedup window: not sent
-  await expect(alice.locator("#lab-log-list")).toContainText("Alice started 8 simulated votes");
-  expect(sent).toHaveLength(1);
+  expect(await control(alice, "/test/lab/burst?hold=1")).toBe(204);
+  try {
+    await simulate.click();
+    await simulate.click(); // within the 1 s dedup window: not sent
+    await expect(alice.locator("#lab-log-list")).toContainText("Alice started 8 simulated votes");
+    expect(sent).toHaveLength(1);
 
-  await alice.waitForTimeout(1_050);
-  const outcomes = await recordOutcomes(alice);
-  await simulate.click(); // the burst is still running
-  await expect(alice.locator("#lab-command-status")).toHaveText(
-    "Failed: Simulate 8 votes (/showcase/lab/burst?as=alice): Tavern.command: 409 Conflict",
-  );
-  expect(sent).toHaveLength(2);
-  // The button stayed, so the outcome comes from it, once.
-  expect(await outcomes()).toEqual([
-    {
-      type: "tavern:command-error",
-      url: "/showcase/lab/burst?as=alice",
-      sameElement: true,
-      connected: true,
-      origin: "element",
-      error: "Tavern.command: 409 Conflict",
-      status: null,
-    },
-  ]);
+    await alice.waitForTimeout(1_050);
+    const outcomes = await recordOutcomes(alice);
+    await simulate.click(); // the burst is still running
+    await expect(alice.locator("#lab-command-status")).toHaveText(
+      "Failed: Simulate 8 votes (/showcase/lab/burst?as=alice): Tavern.command: 409 Conflict",
+    );
+    expect(sent).toHaveLength(2);
+    // The button stayed, so the outcome comes from it, once.
+    expect(await outcomes()).toEqual([
+      {
+        type: "tavern:command-error",
+        url: "/showcase/lab/burst?as=alice",
+        sameElement: true,
+        connected: true,
+        origin: "element",
+        error: "Tavern.command: 409 Conflict",
+        status: null,
+      },
+    ]);
+  } finally {
+    await control(alice, "/test/lab/burst?hold=0");
+  }
 });
 
 test("a vote's success is reported after its button was replaced", async ({ viewer }) => {
@@ -440,4 +453,56 @@ test("internal tasks and their actions stay with leads in every region", async (
   const fresh = await openLab(viewer, "bob");
   await expect(fresh.locator("#lab-log-list")).toContainText(`Alice added "${shared}"`);
   expect(await fresh.content()).not.toContain("Decide the budget");
+});
+
+// Bob deletes a card. The server's delete reaches his window too, so the
+// card is removed twice: once by his own response, once by the stream.
+// Each order is forced, and each ends with the card gone, no error and no
+// placeholder left.
+test("a deleting window ends without the card whether its response or the stream's delete comes first", async ({ viewer }) => {
+  const alice = await openLab(viewer, "alice");
+  const bob = await openLab(viewer, "bob");
+  const conn = await labConn(bob);
+
+  // Response first: Bob's stream is held, so the delete arrives after the
+  // response has replaced the card.
+  const first = await addTask(alice, `Response first ${Date.now()}`);
+  await expect(editCard(bob, first)).toBeVisible();
+  const firstID = await editCard(bob, first).getAttribute("id");
+  expect(await control(bob, `/test/lab/hold?as=bob&conn=${conn}&on=1`)).toBe(204);
+  try {
+    const answered = bob.waitForResponse((r) => r.url().includes("/delete?as=bob") || r.url().endsWith("/delete"));
+    await editCard(bob, first).getByRole("button", { name: "Delete" }).click();
+    await answered;
+    await expect(bob.locator(`#${firstID}`)).toBeHidden(); // the placeholder, still waiting for the stream
+    await expect(bob.locator(`#${firstID}`)).toHaveCount(1);
+  } finally {
+    await control(bob, `/test/lab/hold?as=bob&conn=${conn}&on=0`);
+  }
+  await expect(bob.locator(`#${firstID}`)).toHaveCount(0); // the stream's delete removed the placeholder
+
+  // Stream first: Bob's response is held, so the stream's delete arrives
+  // while the card is still there and the editor has focus.
+  const second = await addTask(alice, `Stream first ${Date.now()}`);
+  await expect(editCard(bob, second)).toBeVisible();
+  const secondID = await editCard(bob, second).getAttribute("id");
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const intercepted = new Promise((resolve) => {
+    bob.route(/\/delete(\?|$)/, async (route) => {
+      const response = await route.fetch(); // the server deletes and publishes now
+      resolve();
+      await held;
+      await route.fulfill({ response });
+    });
+  });
+  await editCard(bob, second).getByRole("button", { name: "Delete" }).click();
+  await intercepted;
+  await expect(editCard(alice, second)).toHaveCount(0); // the delete reached the other window
+  await bob.waitForTimeout(200);
+  release();
+  await expect(bob.locator(`#${secondID}`)).toHaveCount(0);
+  await expect(bob.locator("#lab-state-editor")).toHaveText("Up to date");
+  await bob.waitForTimeout(300);
+  await expect(bob.locator(`#${secondID}`)).toHaveCount(0);
 });

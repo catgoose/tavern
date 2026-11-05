@@ -56,6 +56,14 @@ test("a short disconnect resumes with Last-Event-ID and the server confirms it",
 
 test("an absence beyond retention is a gap answered with a snapshot", async ({ viewer }) => {
   const page = await openScenario(await viewer({ expected: sseErrors(1) }), "resume");
+  await page.evaluate(() => {
+    const region = document.getElementById("recovery-region");
+    window.__states = [];
+    new MutationObserver(() => {
+      const state = ["is-live", "is-stale", "is-reconnecting"].filter((c) => region.classList.contains(c)).join(" ") || "none";
+      if (window.__states[window.__states.length - 1] !== state) window.__states.push(state);
+    }).observe(region, { attributes: true, attributeFilter: ["class"] });
+  });
   await button(page, "Disconnect and miss 8 changes").click();
   await expect(events(page)).toContainText("tavern:replay-gap");
   await expect(events(page)).toContainText("tavern:stale");
@@ -63,6 +71,10 @@ test("an absence beyond retention is a gap answered with a snapshot", async ({ v
   await expect(page.locator("#recovery-region")).toHaveClass(/\bis-live\b/);
   await converges(page, "resume");
   await serverSaw(page, "is no longer kept");
+  // tavern-js adds the stale class alongside the reconnecting one.
+  const states = await page.evaluate(() => window.__states);
+  expect(states).toEqual(["is-reconnecting", "is-stale is-reconnecting", "is-live"]);
+  await expect(page.locator("#recovery-region [tavern-status-stale]")).toBeHidden();
 });
 
 test("a silent gap goes live with an old value until the next change", async ({ viewer }) => {
@@ -85,6 +97,7 @@ test("gap actions: banner, custom event and reload all end on the current value"
   const banner = await openScenario(await viewer({ expected: sseErrors(1) }), "resume", "banner");
   await button(banner, "Disconnect and miss 8 changes").click();
   await expect(banner.locator("[tavern-gap-banner]")).toBeVisible();
+  await expect(banner.locator("[tavern-gap-banner] [role=alert]")).toHaveText("Some updates were missed while this window was away.");
   await expect(banner.locator("#recovery-region")).toHaveClass(/\bis-live\b/);
   await converges(banner, "resume");
 

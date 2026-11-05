@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -36,10 +37,41 @@ type pressureLab struct {
 	value   int
 	results []string // blocking publish results, newest first
 	log     obsLog
+
+	// With test controls, holdRepair makes the repair wait before it
+	// republishes, and queues has each open window's broker queues.
+	holdRepair *testHold
+	queues     map[string]*prQueue // under mu
+	stop       context.Context
+}
+
+// prQueue is one window's broker subscriptions, read for their length.
+type prQueue struct{ chans []<-chan string }
+
+// awaitDrained waits until conn's broker queues are empty.
+func (l *pressureLab) awaitDrained(ctx context.Context, conn string) error {
+	for {
+		l.mu.Lock()
+		q := l.queues[conn]
+		l.mu.Unlock()
+		if q == nil {
+			return errNotFound
+		}
+		queued := 0
+		for _, ch := range q.chans {
+			queued += len(ch)
+		}
+		if queued == 0 {
+			return nil
+		}
+		if !sleepCtx(ctx, 10*time.Millisecond) {
+			return ctx.Err()
+		}
+	}
 }
 
 func newPressureLab(d *delivery) *pressureLab {
-	l := &pressureLab{broker: d.broker(tavern.WithBufferSize(4), tavern.WithAdaptiveBackpressure(prThresholds))}
+	l := &pressureLab{broker: d.broker(tavern.WithBufferSize(4), tavern.WithAdaptiveBackpressure(prThresholds)), stop: d.ctx}
 	l.broker.SetSimplifiedRenderer(prTopic, simplifyGauge)
 	l.broker.OnBackpressureTierChange(func(sub *tavern.SubscriberInfo, oldTier, newTier tavern.BackpressureTier) {
 		l.log.add("%s: %s → %s", sub.ID, oldTier, newTier)
@@ -105,6 +137,9 @@ func (l *pressureLab) change(n int) {
 
 // republish sends the current value again, to everyone and to the team.
 func (l *pressureLab) republish() {
+	if l.holdRepair != nil {
+		l.holdRepair.wait(l.stop, nil)
+	}
 	l.pubMu.Lock()
 	defer l.pubMu.Unlock()
 	l.mu.Lock()
@@ -156,16 +191,33 @@ func (l *pressureLab) open(conn string) (msgs <-chan tavern.TopicMessage, unsubs
 	snap := tavern.NewSSEMessage("oob", l.message()).String()
 	l.mu.Unlock()
 	meta := tavern.SubWithMeta(tavern.SubscribeMeta{ID: conn})
-	return openAll(
+	q := &prQueue{}
+	msgs, unsub, err := openAll(
 		func() (keyedSub, error) {
 			ch, unsub := l.broker.SubscribeWith(prTopic, meta, tavern.SubWithSnapshot(func() string { return snap }))
+			q.chans = append(q.chans, ch)
 			return subOrErr("everyone", ch, unsub)
 		},
 		func() (keyedSub, error) {
 			ch, unsub := l.broker.SubscribeWith(prTopic, meta, tavern.SubWithScope(deliveryTeam))
+			q.chans = append(q.chans, ch)
 			return subOrErr("team", ch, unsub)
 		},
 	)
+	if err != nil || l.queues == nil {
+		return msgs, unsub, err
+	}
+	l.mu.Lock()
+	l.queues[conn] = q
+	l.mu.Unlock()
+	return msgs, func() {
+		unsub()
+		l.mu.Lock()
+		if l.queues[conn] == q {
+			delete(l.queues, conn)
+		}
+		l.mu.Unlock()
+	}, nil
 }
 
 func (a *App) registerPressure() {
